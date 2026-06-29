@@ -25,7 +25,7 @@ class TrackRepository(private val database: AuralisDatabase) {
         queries.selectBySource(source).executeAsList().map { it.toDomain() }
     }
 
-    suspend fun insertTrack(track: Track): Long = withContext(Dispatchers.Default) {
+    suspend fun insertTrack(track: Track) = withContext(Dispatchers.Default) {
         queries.insert(
             title = track.title,
             artist = track.artist,

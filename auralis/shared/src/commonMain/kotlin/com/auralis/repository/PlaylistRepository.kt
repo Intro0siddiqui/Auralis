@@ -18,7 +18,7 @@ class PlaylistRepository(private val database: AuralisDatabase) {
         playlistQueries.selectById(id).executeAsOneOrNull()?.toDomain()
     }
 
-    suspend fun insertPlaylist(playlist: Playlist): Long = withContext(Dispatchers.Default) {
+    suspend fun insertPlaylist(playlist: Playlist) = withContext(Dispatchers.Default) {
         playlistQueries.insert(
             name = playlist.name,
             description = playlist.description,
@@ -48,7 +48,7 @@ class PlaylistRepository(private val database: AuralisDatabase) {
             playlistTrackQueries.insert(
                 playlist_id = playlistId,
                 track_id = trackId,
-                position = position,
+                position = position.toLong(),
                 date_added = System.currentTimeMillis()
             )
         }
