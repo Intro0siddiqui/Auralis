@@ -1,0 +1,25 @@
+CREATE TABLE PlaylistTrack (
+    playlist_id INTEGER NOT NULL,
+    track_id INTEGER NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    date_added INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (playlist_id, track_id),
+    FOREIGN KEY (playlist_id) REFERENCES Playlist(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES Track(id) ON DELETE CASCADE
+);
+
+selectByPlaylist:
+SELECT * FROM PlaylistTrack WHERE playlist_id = ? ORDER BY position;
+
+insert:
+INSERT INTO PlaylistTrack (playlist_id, track_id, position, date_added)
+VALUES (?, ?, ?, ?);
+
+updatePosition:
+UPDATE PlaylistTrack SET position = ? WHERE playlist_id = ? AND track_id = ?;
+
+deleteFromPlaylist:
+DELETE FROM PlaylistTrack WHERE playlist_id = ? AND track_id = ?;
+
+deleteAllFromPlaylist:
+DELETE FROM PlaylistTrack WHERE playlist_id = ?;

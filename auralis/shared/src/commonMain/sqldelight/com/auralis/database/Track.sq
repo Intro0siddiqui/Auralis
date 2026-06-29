@@ -1,0 +1,47 @@
+CREATE TABLE Track (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    artist TEXT,
+    album TEXT,
+    genre TEXT,
+    year INTEGER,
+    track_number INTEGER,
+    duration INTEGER NOT NULL DEFAULT 0,
+    file_path TEXT NOT NULL UNIQUE,
+    thumbnail_path TEXT,
+    format TEXT NOT NULL DEFAULT 'mp3',
+    size INTEGER NOT NULL DEFAULT 0,
+    date_added INTEGER NOT NULL DEFAULT 0,
+    source TEXT,
+    source_url TEXT
+);
+
+createTitleIndex: CREATE INDEX Track_title ON Track(title);
+
+createArtistIndex: CREATE INDEX Track_artist ON Track(artist);
+
+createAlbumIndex: CREATE INDEX Track_album ON Track(album);
+
+selectAll:
+SELECT * FROM Track ORDER BY date_added DESC;
+
+selectById:
+SELECT * FROM Track WHERE id = ?;
+
+selectByTitle:
+SELECT * FROM Track WHERE title LIKE ?;
+
+selectBySource:
+SELECT * FROM Track WHERE source = ?;
+
+insert:
+INSERT INTO Track (title, artist, album, genre, year, track_number, duration, file_path, thumbnail_path, format, size, date_added, source, source_url)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+update:
+UPDATE Track
+SET title = ?, artist = ?, album = ?, genre = ?, year = ?, track_number = ?
+WHERE id = ?;
+
+deleteById:
+DELETE FROM Track WHERE id = ?;
