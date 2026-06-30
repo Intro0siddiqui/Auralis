@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auralis - Offline Music Player</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        .hero {
+            text-align: center;
+            padding: 80px 20px 60px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        }
+        .logo { font-size: 48px; margin-bottom: 16px; }
+        h1 { font-size: 48px; font-weight: 700; margin-bottom: 12px; }
+        .tagline { font-size: 20px; color: #a0a0a0; margin-bottom: 40px; }
+        .features {
+            display: flex;
+            justify-content: center;
+            gap: 32px;
+            flex-wrap: wrap;
+            margin-bottom: 40px;
+        }
+        .feature {
+            background: rgba(255,255,255,0.05);
+            padding: 16px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        .downloads {
+            padding: 60px 20px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h2 { font-size: 28px; margin-bottom: 32px; text-align: center; }
+        .download-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+        }
+        .download-card {
+            background: #1a1a2e;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 24px;
+            text-align: center;
+            transition: border-color 0.2s;
+        }
+        .download-card:hover { border-color: #533483; }
+        .platform { font-size: 14px; color: #888; margin-bottom: 8px; }
+        .os-name { font-size: 20px; font-weight: 600; margin-bottom: 16px; }
+        .download-btn {
+            display: inline-block;
+            background: #533483;
+            color: white;
+            padding: 10px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .download-btn:hover { background: #6b44a8; }
+        .download-btn.android { background: #3ddc84; color: #000; }
+        .download-btn.android:hover { background: #4ae094; }
+        .section {
+            padding: 60px 20px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 24px;
+            margin-top: 24px;
+        }
+        .feature-item h3 { font-size: 16px; margin-bottom: 8px; }
+        .feature-item p { font-size: 14px; color: #888; }
+        footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: #666;
+            font-size: 14px;
+            border-top: 1px solid #222;
+        }
+        a { color: #7c5cbf; }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <div class="logo">🎵</div>
+        <h1>Auralis</h1>
+        <p class="tagline">Offline music player with YouTube/Instagram download & P2P sync</p>
+        <div class="features">
+            <div class="feature">YouTube Download</div>
+            <div class="feature">Instagram Reels</div>
+            <div class="feature">P2P Sync</div>
+            <div class="feature">QR Connect</div>
+            <div class="feature">Local Import</div>
+            <div class="feature">Cross-Platform</div>
+        </div>
+    </div>
+
+    <div class="downloads">
+        <h2>Download</h2>
+        <div class="download-grid">
+            <div class="download-card">
+                <div class="platform">Desktop</div>
+                <div class="os-name">macOS</div>
+                <a href="https://github.com/Intro0siddiqui/Auralis/releases/latest" class="download-btn">
+                    Download .dmg
+                </a>
+            </div>
+            <div class="download-card">
+                <div class="platform">Desktop</div>
+                <div class="os-name">Linux</div>
+                <a href="https://github.com/Intro0siddiqui/Auralis/releases/latest" class="download-btn">
+                    Download .deb
+                </a>
+            </div>
+            <div class="download-card">
+                <div class="platform">Mobile</div>
+                <div class="os-name">Android</div>
+                <a href="https://github.com/Intro0siddiqui/Auralis/releases/latest" class="download-btn android">
+                    Download APK
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Features</h2>
+        <div class="feature-grid">
+            <div class="feature-item">
+                <h3>📥 Media Download</h3>
+                <p>Download audio from YouTube videos and Instagram Reels in MP3, FLAC, AAC, OGG, WAV, or M4A format.</p>
+            </div>
+            <div class="feature-item">
+                <h3>🎵 Music Player</h3>
+                <p>Full-featured player with queue, repeat, shuffle, and background playback.</p>
+            </div>
+            <div class="feature-item">
+                <h3>📂 Local Import</h3>
+                <p>Import music from any folder on your device. Scan system directories automatically.</p>
+            </div>
+            <div class="feature-item">
+                <h3>🔄 P2P Sync</h3>
+                <p>Sync your library between devices over LAN. QR code or temp code pairing.</p>
+            </div>
+            <div class="feature-item">
+                <h3>🏷️ Metadata</h3>
+                <p>Edit track info, album art, and organize with playlists.</p>
+            </div>
+            <div class="feature-item">
+                <h3>⚡ Lightweight</h3>
+                <p>Low memory usage, native performance. No Electron, no bloat.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Build from Source</h2>
+        <pre style="background: #1a1a2e; padding: 20px; border-radius: 8px; overflow-x: auto; font-size: 14px;"><code>git clone https://github.com/Intro0siddiqui/Auralis.git
+cd Auralis/auralis
+./gradlew :desktop:run          # Run desktop app
+./gradlew :desktop:packageDmg   # Build macOS .dmg
+./gradlew :desktop:packageDeb   # Build Linux .deb
+./gradlew :android:assembleDebug # Build Android APK</code></pre>
+    </div>
+
+    <footer>
+        <p>Auralis is open source under the MIT License.</p>
+        <p style="margin-top: 8px;">
+            <a href="https://github.com/Intro0siddiqui/Auralis">GitHub</a> ·
+            <a href="https://github.com/Intro0siddiqui/Auralis/releases">Releases</a> ·
+            <a href="https://github.com/Intro0siddiqui/Auralis/issues">Issues</a>
+        </p>
+    </footer>
+</body>
+</html>

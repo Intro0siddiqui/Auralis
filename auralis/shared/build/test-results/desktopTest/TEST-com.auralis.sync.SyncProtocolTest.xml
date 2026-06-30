@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.auralis.sync.SyncProtocolTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-06-30T13:41:46" hostname="artix-sway" time="0.175">
+  <properties/>
+  <testcase name="testEncodeDecodeTrackList[desktop]" classname="com.auralis.sync.SyncProtocolTest" time="0.137"/>
+  <testcase name="testConnectionInfoJson[desktop]" classname="com.auralis.sync.SyncProtocolTest" time="0.022"/>
+  <testcase name="testEncodeDecodeAuthResponse[desktop]" classname="com.auralis.sync.SyncProtocolTest" time="0.005"/>
+  <testcase name="testWriteReadMessage[desktop]" classname="com.auralis.sync.SyncProtocolTest" time="0.002"/>
+  <testcase name="testEncodeDecodeSyncRequest[desktop]" classname="com.auralis.sync.SyncProtocolTest" time="0.002"/>
+  <testcase name="testEncodeDecodeFileChunk[desktop]" classname="com.auralis.sync.SyncProtocolTest" time="0.002"/>
+  <testcase name="testEncodeDecodeAuthRequest[desktop]" classname="com.auralis.sync.SyncProtocolTest" time="0.001"/>
+  <testcase name="testQrMatrixGeneration[desktop]" classname="com.auralis.sync.SyncProtocolTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.auralis.sync.AccountManagerTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-06-30T13:41:46" hostname="artix-sway" time="0.036">
+  <properties/>
+  <testcase name="testPasswordHashing[desktop]" classname="com.auralis.sync.AccountManagerTest" time="0.035"/>
+  <testcase name="testHashLength[desktop]" classname="com.auralis.sync.AccountManagerTest" time="0.001"/>
+  <testcase name="testDifferentPasswordDifferentHash[desktop]" classname="com.auralis.sync.AccountManagerTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
