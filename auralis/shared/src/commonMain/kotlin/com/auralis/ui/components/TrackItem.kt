@@ -2,8 +2,6 @@ package com.auralis.ui.components
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -11,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.auralis.model.Track
+import com.auralis.ui.icons.MusicNoteIcon
 
 @Composable
 fun TrackItem(
@@ -31,7 +30,7 @@ fun TrackItem(
             color = MaterialTheme.colorScheme.surfaceVariant
         ) {
             Icon(
-                Icons.Default.MusicNote,
+                MusicNoteIcon,
                 contentDescription = null,
                 modifier = Modifier.padding(12.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant

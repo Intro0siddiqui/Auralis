@@ -1,14 +1,16 @@
 package com.auralis.ui.components
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.auralis.ui.icons.PauseIcon
+import com.auralis.ui.icons.PlayArrowIcon
+import com.auralis.ui.icons.SkipNextIcon
+import com.auralis.ui.icons.SkipPreviousIcon
 
 @Composable
 fun BottomPlayer(
@@ -55,16 +57,16 @@ fun BottomPlayer(
                 }
                 Row {
                     IconButton(onClick = onPrevious) {
-                        Icon(Icons.Default.SkipPrevious, contentDescription = "Previous")
+                        Icon(SkipPreviousIcon, contentDescription = "Previous")
                     }
                     IconButton(onClick = onPlayPause) {
                         Icon(
-                            if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            if (isPlaying) PauseIcon else PlayArrowIcon,
                             contentDescription = if (isPlaying) "Pause" else "Play"
                         )
                     }
                     IconButton(onClick = onNext) {
-                        Icon(Icons.Default.SkipNext, contentDescription = "Next")
+                        Icon(SkipNextIcon, contentDescription = "Next")
                     }
                 }
             }

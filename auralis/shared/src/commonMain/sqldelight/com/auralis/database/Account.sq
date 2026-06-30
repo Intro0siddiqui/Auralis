@@ -1,0 +1,26 @@
+CREATE TABLE SyncAccount (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    date_created INTEGER NOT NULL DEFAULT 0
+);
+
+selectByUsername:
+SELECT * FROM SyncAccount WHERE username = ?;
+
+selectById:
+SELECT * FROM SyncAccount WHERE id = ?;
+
+selectAll:
+SELECT * FROM SyncAccount;
+
+insert:
+INSERT INTO SyncAccount (username, password_hash, salt, date_created)
+VALUES (?, ?, ?, ?);
+
+deleteById:
+DELETE FROM SyncAccount WHERE id = ?;
+
+deleteByUsername:
+DELETE FROM SyncAccount WHERE username = ?;

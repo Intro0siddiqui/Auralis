@@ -3,14 +3,17 @@ package com.auralis.ui.screens
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.auralis.service.DownloadResult
+import com.auralis.ui.icons.CheckCircleIcon
+import com.auralis.ui.icons.ClearIcon
+import com.auralis.ui.icons.DownloadIcon
+import com.auralis.ui.icons.ErrorCircleIcon
+import com.auralis.ui.icons.LinkIcon
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,11 +39,11 @@ fun DownloadScreen(
             onValueChange = { url = it },
             label = { Text("Paste URL from YouTube or Instagram") },
             modifier = Modifier.fillMaxWidth(),
-            leadingIcon = { Icon(Icons.Default.Link, contentDescription = null) },
+            leadingIcon = { Icon(LinkIcon, contentDescription = null) },
             trailingIcon = {
                 if (url.isNotEmpty()) {
                     IconButton(onClick = { url = "" }) {
-                        Icon(Icons.Default.Clear, contentDescription = "Clear")
+                        Icon(ClearIcon, contentDescription = "Clear")
                     }
                 }
             }
@@ -53,7 +56,7 @@ fun DownloadScreen(
             modifier = Modifier.fillMaxWidth(),
             enabled = url.isNotBlank()
         ) {
-            Icon(Icons.Default.Download, contentDescription = null)
+            Icon(DownloadIcon, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
             Text("Download")
         }
@@ -92,7 +95,7 @@ fun DownloadResultItem(result: DownloadResult) {
             when (result) {
                 is DownloadResult.Success -> {
                     Icon(
-                        Icons.Default.CheckCircle,
+                        CheckCircleIcon,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary
                     )
@@ -108,7 +111,7 @@ fun DownloadResultItem(result: DownloadResult) {
                 }
                 is DownloadResult.Error -> {
                     Icon(
-                        Icons.Default.Error,
+                        ErrorCircleIcon,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.error
                     )

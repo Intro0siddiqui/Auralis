@@ -11,6 +11,10 @@ dependencies {
     implementation(compose.material3)
     implementation(compose.components.resources)
     implementation(compose.desktop.common)
+    implementation("org.jetbrains.skiko:skiko-awt-runtime-linux-x64:0.8.21")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:1.9.0")
 }
 
 compose.desktop {
@@ -46,4 +50,23 @@ compose.desktop {
 
 kotlin {
     jvmToolchain(17)
+}
+
+tasks.jar {
+    manifest {
+        attributes("Main-Class" to "com.auralis.desktop.MainKt")
+    }
+    from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) }) {
+        exclude("org/sqlite/native/Android/**")
+        exclude("org/sqlite/native/Windows/**")
+        exclude("org/sqlite/native/Mac/**")
+        exclude("org/sqlite/native/FreeBSD/**")
+        exclude("org/sqlite/native/Linux-Android/**")
+        exclude("org/sqlite/native/Linux-Musl/**")
+        exclude("org/sqlite/native/Linux/arm/**")
+        exclude("org/sqlite/native/Linux/aarch64/**")
+        exclude("org/sqlite/native/Linux/ppc64/**")
+        exclude("org/sqlite/native/Linux/armv6/**")
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
