@@ -9,7 +9,12 @@ actual fun createDatabase(): AuralisDatabase {
     storageDir.mkdirs()
     val dbDir = File(storageDir, "database")
     dbDir.mkdirs()
-    val driver = JdbcSqliteDriver("jdbc:sqlite:${dbDir.path}/auralis.db")
-    AuralisDatabase.Schema.create(driver)
+    val dbFile = File(dbDir, "auralis.db")
+    val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.path}")
+    if (dbFile.exists() && dbFile.length() > 0) {
+        AuralisDatabase.Schema.migrate(driver, AuralisDatabase.Schema.version, AuralisDatabase.Schema.version)
+    } else {
+        AuralisDatabase.Schema.create(driver)
+    }
     return AuralisDatabase(driver)
 }
