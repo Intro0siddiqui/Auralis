@@ -22,7 +22,7 @@ compose.desktop {
         mainClass = "com.auralis.desktop.MainKt"
 
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
+            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.Rpm)
             packageName = "Auralis"
             packageVersion = "1.0.0"
             description = "Offline Music Player"
@@ -43,6 +43,68 @@ compose.desktop {
                 iconFile.set(project.file("icon.ico"))
                 menuGroup = "Auralis"
                 upgradeUuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            }
+        }
+    }
+}
+
+tasks.register("packageAppImage") {
+    description = "Creates a standalone Linux x86_64 app-image with bundled JRE"
+    group = "distribution"
+
+    dependsOn("jar")
+
+    doLast {
+        val jarFile = tasks.jar.get().archiveFile.get().asFile
+        val outputDir = layout.buildDirectory.dir("app-image").get().asFile
+        val tarName = "Auralis-linux-x86_64.tar.gz"
+
+        outputDir.deleteRecursively()
+        outputDir.mkdirs()
+
+        val jpackageArgs = mutableListOf(
+            "jpackage",
+            "--type", "app-image",
+            "--dest", outputDir.absolutePath,
+            "--name", "Auralis",
+            "--input", jarFile.parentFile.absolutePath,
+            "--main-jar", jarFile.name,
+            "--main-class", "com.auralis.desktop.MainKt",
+            "--icon", file("icon.png").absolutePath,
+            "--java-options", "-Xmx512m",
+            "--java-options", "-Dfile.encoding=UTF-8"
+        )
+
+        println("Running jpackage...")
+        println(jpackageArgs.joinToString(" "))
+
+        val process = ProcessBuilder(jpackageArgs)
+            .directory(projectDir)
+            .redirectErrorStream(true)
+            .start()
+
+        val output = process.inputStream.bufferedReader().readText()
+        val exitCode = process.waitFor()
+
+        if (exitCode != 0) {
+            println(output)
+            throw GradleException("jpackage failed with exit code $exitCode")
+        }
+
+        println("App image created successfully")
+
+        val appImageDir = outputDir.listFiles()?.firstOrNull()
+        if (appImageDir != null) {
+            val tarFile = outputDir.resolve(tarName)
+            val tarProcess = ProcessBuilder(
+                "tar", "czf", tarFile.absolutePath,
+                "-C", outputDir.absolutePath,
+                appImageDir.name
+            ).start()
+            val tarExit = tarProcess.waitFor()
+            if (tarExit == 0) {
+                println("Created: ${tarFile.absolutePath}")
+                println("Size: ${tarFile.length() / 1024 / 1024}MB")
             }
         }
     }

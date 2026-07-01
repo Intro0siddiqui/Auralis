@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Auralis
+Comment=Offline Music Player
+Exec=auralis
+Icon=auralis
+Terminal=false
+Type=Application
+Categories=Audio;Music;Player;
+Keywords=music;player;audio;
+StartupWMClass=com-auralis-desktop

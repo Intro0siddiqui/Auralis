@@ -112,21 +112,35 @@
             <div class="download-card">
                 <div class="platform">Desktop</div>
                 <div class="os-name">macOS</div>
-                <a href="https://github.com/Intro0siddiqui/Auralis/releases/latest" class="download-btn">
+                <a href="https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/Auralis-mac-arm64.dmg" class="download-btn">
                     Download .dmg
                 </a>
             </div>
             <div class="download-card">
                 <div class="platform">Desktop</div>
-                <div class="os-name">Linux</div>
-                <a href="https://github.com/Intro0siddiqui/Auralis/releases/latest" class="download-btn">
+                <div class="os-name">Linux (Portable)</div>
+                <a href="https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/Auralis-linux-x86_64.tar.gz" class="download-btn">
+                    Download .tar.gz
+                </a>
+            </div>
+            <div class="download-card">
+                <div class="platform">Desktop</div>
+                <div class="os-name">Linux (Debian/Ubuntu)</div>
+                <a href="https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/auralis_1.0.0_amd64.deb" class="download-btn">
                     Download .deb
+                </a>
+            </div>
+            <div class="download-card">
+                <div class="platform">Desktop</div>
+                <div class="os-name">Linux (Fedora)</div>
+                <a href="https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/auralis-1.0.0.x86_64.rpm" class="download-btn">
+                    Download .rpm
                 </a>
             </div>
             <div class="download-card">
                 <div class="platform">Mobile</div>
                 <div class="os-name">Android</div>
-                <a href="https://github.com/Intro0siddiqui/Auralis/releases/latest" class="download-btn android">
+                <a href="https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/auralis.apk" class="download-btn android">
                     Download APK
                 </a>
             </div>
@@ -167,10 +181,12 @@
         <h2>Build from Source</h2>
         <pre style="background: #1a1a2e; padding: 20px; border-radius: 8px; overflow-x: auto; font-size: 14px;"><code>git clone https://github.com/Intro0siddiqui/Auralis.git
 cd Auralis/auralis
-./gradlew :desktop:run          # Run desktop app
-./gradlew :desktop:packageDmg   # Build macOS .dmg
-./gradlew :desktop:packageDeb   # Build Linux .deb
-./gradlew :android:assembleDebug # Build Android APK</code></pre>
+./gradlew :desktop:run              # Run desktop app
+./gradlew :desktop:packageDmg       # Build macOS .dmg
+./gradlew :desktop:packageDeb       # Build Linux .deb
+./gradlew :desktop:packageRpm       # Build Linux .rpm
+./gradlew :desktop:packageAppImage  # Build portable Linux binary
+./gradlew :android:assembleDebug    # Build Android APK</code></pre>
     </div>
 
     <footer>
