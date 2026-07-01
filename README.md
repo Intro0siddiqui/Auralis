@@ -19,7 +19,7 @@ Offline music player with YouTube/Instagram audio download and P2P sync between 
 | Debian/Ubuntu | .deb | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/auralis_1.0.0-1_amd64.deb) |
 | Fedora | .rpm | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/auralis-1.0.0-1.x86_64.rpm) |
 | macOS | .dmg | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/Auralis-1.0.0.dmg) |
-| Android | .apk | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/android-release-unsigned.apk) |
+| Android | .apk | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/android-debug.apk) |
 
 ## Install
 
