@@ -62,6 +62,14 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
+      - name: Generate signing keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore auralis/android/release-key.jks \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias auralis \
+            -storepass auralis123 -keypass auralis123 \
+            -dname "CN=Auralis, OU=Dev, O=Auralis, L=Unknown, ST=Unknown, C=US"
       - run: cd auralis && ./gradlew :android:assembleRelease
       - uses: actions/upload-artifact@v4
         with:

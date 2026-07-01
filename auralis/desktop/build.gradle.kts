@@ -48,7 +48,7 @@ compose.desktop {
 }
 
 tasks.register("packageAppImage") {
-    description = "Creates a standalone Linux x86_64 app-image with bundled JRE"
+    description = "Creates a standalone app-image with bundled JRE"
     group = "distribution"
 
     dependsOn("jar")
@@ -56,7 +56,14 @@ tasks.register("packageAppImage") {
     doLast {
         val jarFile = tasks.jar.get().archiveFile.get().asFile
         val outputDir = layout.buildDirectory.dir("app-image").get().asFile
-        val tarName = "Auralis-linux-x86_64.tar.gz"
+        val os = System.getProperty("os.name").lowercase()
+        val arch = System.getProperty("os.arch").lowercase()
+        val platform = when {
+            os.contains("mac") || os.contains("darwin") -> "mac-${if (arch.contains("aarch64")) "arm64" else "x64"}"
+            os.contains("linux") -> "linux-x86_64"
+            else -> "unknown"
+        }
+        val tarName = "Auralis-${platform}.tar.gz"
 
         outputDir.deleteRecursively()
         outputDir.mkdirs()
