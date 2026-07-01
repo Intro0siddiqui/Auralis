@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://intro0siddiqui.github.io/Auralis/sitemap.xml
