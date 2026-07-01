@@ -13,44 +13,22 @@ Offline music player with YouTube/Instagram audio download and P2P sync between 
 
 ## Download
 
-| Platform | Format | Link |
-|----------|--------|------|
-| Linux (any distro) | .tar.gz | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/Auralis-linux-x86_64.tar.gz) |
-| Debian/Ubuntu | .deb | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/auralis_1.0.0-1_amd64.deb) |
-| Fedora | .rpm | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/auralis-1.0.0-1.x86_64.rpm) |
-| macOS | .dmg | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/Auralis-1.0.0.dmg) |
-| Android | .apk | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/android-debug.apk) |
+| Platform | Link |
+|----------|------|
+| Linux x86_64 | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/Auralis-linux-x86_64.tar.gz) |
+| macOS | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/Auralis-mac-arm64.tar.gz) |
+| Android | [Download](https://github.com/Intro0siddiqui/Auralis/releases/download/v1.0.0/android-debug.apk) |
+
+All desktop builds use the same format: portable binary with bundled JRE. Extract and run.
 
 ## Install
 
-### Linux (portable)
+### Linux / macOS
 
 ```bash
-tar xzf Auralis-linux-x86_64.tar.gz
+tar xzf Auralis-*.tar.gz
 cd Auralis && ./bin/Auralis
 ```
-
-Or install to `~/.local/bin` and app launcher:
-
-```bash
-./install.sh
-```
-
-### Linux (Debian/Ubuntu)
-
-```bash
-sudo dpkg -i auralis_1.0.0-1_amd64.deb
-```
-
-### Linux (Fedora)
-
-```bash
-sudo rpm -i auralis-1.0.0-1.x86_64.rpm
-```
-
-### macOS
-
-Open the `.dmg` and drag Auralis to Applications.
 
 ### Android
 
@@ -64,26 +42,16 @@ Requirements: JDK 17+, Android SDK (for Android builds)
 git clone https://github.com/Intro0siddiqui/Auralis.git
 cd Auralis/auralis
 
-# Run desktop app
-./gradlew :desktop:run
-
-# Build packages
-./gradlew :desktop:packageDeb       # Linux .deb
-./gradlew :desktop:packageRpm       # Linux .rpm
-./gradlew :desktop:packageDmg       # macOS .dmg
-./gradlew :desktop:packageAppImage  # Portable Linux binary
-./gradlew :android:assembleDebug    # Android APK
+./gradlew :desktop:run              # Run desktop app
+./gradlew :desktop:packageAppImage  # Build portable binary
+./gradlew :android:assembleDebug    # Build Android APK
 ```
 
 ## Requirements
 
-- **Desktop**: Java 17+ (not needed for the portable .tar.gz build)
+- **Desktop**: No Java needed (bundled in the download)
 - **Download feature**: [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [ffmpeg](https://ffmpeg.org/) must be installed and in your PATH
 - **Android**: Android 8.0+
-
-## Storage
-
-All data is stored in `~/.auralis/` (desktop) or app-private storage (Android).
 
 ## Tech Stack
 

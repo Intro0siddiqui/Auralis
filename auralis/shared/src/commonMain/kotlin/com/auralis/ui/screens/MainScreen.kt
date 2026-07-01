@@ -24,7 +24,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun MainScreen(
     database: AuralisDatabase,
-    storageDir: java.io.File
+    storageDir: java.io.File,
+    folderPicker: FolderPicker = FolderPicker()
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var libraryInitialized by remember { mutableStateOf(false) }
@@ -37,7 +38,6 @@ fun MainScreen(
 
     val trackRepository = remember { TrackRepository(database) }
     val musicScanner = remember { MusicScanner(trackRepository) }
-    val folderPicker = remember { FolderPicker() }
     val syncService = remember { SyncService(database, storageDir) }
 
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }

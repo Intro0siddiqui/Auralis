@@ -30,18 +30,10 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
-      - run: cd auralis && ./gradlew :desktop:packageDeb :desktop:packageRpm :desktop:packageAppImage
+      - run: cd auralis && ./gradlew :desktop:packageAppImage
       - uses: actions/upload-artifact@v4
         with:
-          name: auralis-linux-deb
-          path: auralis/desktop/build/compose/binaries/main/deb/*.deb
-      - uses: actions/upload-artifact@v4
-        with:
-          name: auralis-linux-rpm
-          path: auralis/desktop/build/compose/binaries/main/rpm/*.rpm
-      - uses: actions/upload-artifact@v4
-        with:
-          name: auralis-linux-portable
+          name: auralis-linux-x86_64
           path: auralis/desktop/build/app-image/Auralis-linux-x86_64.tar.gz
 
   build-mac:
@@ -54,27 +46,11 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
-      - run: cd auralis && ./gradlew :desktop:packageDmg
+      - run: cd auralis && ./gradlew :desktop:packageAppImage
       - uses: actions/upload-artifact@v4
         with:
-          name: auralis-mac-arm64
-          path: auralis/desktop/build/compose/binaries/main/dmg/*.dmg
-
-  build-mac-intel:
-    needs: test
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
-      - run: cd auralis && ./gradlew :desktop:packageDmg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: auralis-mac-intel
-          path: auralis/desktop/build/compose/binaries/main/dmg/*.dmg
+          name: auralis-mac
+          path: auralis/desktop/build/app-image/Auralis-mac-*.tar.gz
 
   build-android:
     needs: test
@@ -94,7 +70,7 @@ jobs:
 
   release:
     if: github.event_name == 'release'
-    needs: [build-linux, build-mac, build-mac-intel, build-android]
+    needs: [build-linux, build-mac, build-android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -104,7 +80,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for dir in auralis-linux-deb auralis-linux-rpm auralis-linux-portable auralis-mac-arm64 auralis-mac-intel auralis-android; do
+          for dir in auralis-linux-x86_64 auralis-mac auralis-android; do
             for file in "$dir"/*; do
               if [ -f "$file" ]; then
                 gh release upload "${{ github.event.release.tag_name }}" "$file" --clobber
