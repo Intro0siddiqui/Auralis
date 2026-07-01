@@ -62,11 +62,11 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
-      - run: cd auralis && ./gradlew :android:assembleDebug
+      - run: cd auralis && ./gradlew :android:assembleRelease
       - uses: actions/upload-artifact@v4
         with:
           name: auralis-android
-          path: auralis/android/build/outputs/apk/debug/*.apk
+          path: auralis/android/build/outputs/apk/release/*.apk
 
   release:
     if: github.event_name == 'release'
