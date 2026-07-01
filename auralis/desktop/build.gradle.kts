@@ -11,7 +11,7 @@ dependencies {
     implementation(compose.material3)
     implementation(compose.components.resources)
     implementation(compose.desktop.common)
-    implementation("org.jetbrains.skiko:skiko-awt-runtime-linux-x64:0.8.21")
+    implementation(compose.desktop.currentOs)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:1.9.0")
@@ -33,7 +33,6 @@ compose.desktop {
             }
 
             macOS {
-                iconFile.set(project.file("icon.icns"))
                 bundleID = "com.auralis.desktop"
                 dmgPackageVersion = "1.0.0"
                 dmgPackageBuildVersion = "1"
