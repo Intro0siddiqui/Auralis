@@ -42,21 +42,11 @@ fn main() {
     info!("Auralis v2 starting...");
     info!("Initializing Tauri application");
 
-    // Build and run the Tauri application
-    let result = AuralisApp::build();
-
-    match result {
-        Ok(app) => {
-            info!("Application built successfully, running...");
-            app.run(|_app, event| {
-                info!(event = ?event, "Tauri event received");
-            });
-        }
-        Err(e) => {
-            error!(error = %e, "Failed to build application");
-            eprintln!("Failed to build application: {}", e);
-            std::process::exit(1);
-        }
+    // Run the Tauri application
+    if let Err(e) = AuralisApp::run() {
+        error!(error = %e, "Failed to run application");
+        eprintln!("Failed to run application: {e}");
+        std::process::exit(1);
     }
 
     info!("Auralis v2 shutting down gracefully");

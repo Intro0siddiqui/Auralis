@@ -54,8 +54,17 @@ use tracing::info;
 pub struct AuralisApp;
 
 impl AuralisApp {
+    /// Run the Tauri application
+    pub fn run() -> tauri::Result<()> {
+        info!("Running Auralis application");
+
+        let app = Self::build()?;
+        app.run(|_app, _event| {});
+        Ok(())
+    }
+
     /// Build the Tauri application with all configurations
-    pub fn build() -> tauri::Result<tauri::App> {
+    fn build() -> tauri::Result<tauri::App> {
         info!("Building Auralis application");
 
         tauri::Builder::default()
@@ -183,11 +192,8 @@ impl AuralisApp {
     }
 }
 
-/// Mobile entry point for Android/iOS
-#[tauri::mobile_entry_point]
-fn main() {
-    AuralisApp::build()
-        .map_err(|e| eprintln!("Failed to build Auralis: {e}"))
-        .expect("Failed to initialize Auralis application");
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    AuralisApp::run()
 }
 
