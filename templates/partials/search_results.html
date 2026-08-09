@@ -1,0 +1,11 @@
+<div class="search-results">
+    {% if query.is_empty() %}
+    <p class="muted">Type a query above to search your library.</p>
+    {% else if tracks.is_empty() %}
+    <p class="muted">No matches for "{{ query }}".</p>
+    {% else %}
+    <h2>Results for "{{ query }}"</h2>
+    <p class="muted">{{ tracks.len() }} matches</p>
+    {% include "partials/track_list.html" %}
+    {% endif %}
+</div>

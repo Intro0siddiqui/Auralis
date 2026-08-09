@@ -1,0 +1,146 @@
+<section class="page-library">
+    <header class="section-header">
+        <h2 class="section-title">Library</h2>
+        <button class="btn btn-primary"
+                hx-post="/api/library/scan"
+                hx-trigger="click"
+                hx-swap="none"
+                hx-on::after-request="window.Auralis.toast('Library scan started','info')">
+            <i data-lucide="folder-search"></i>
+            Scan Library
+        </button>
+    </header>
+
+    <div class="filter-bar">
+        <select name="sort_by" class="input">
+            <option value="date_added">Date added</option>
+            <option value="title">Title</option>
+            <option value="artist">Artist</option>
+            <option value="album">Album</option>
+        </select>
+        <label class="checkbox">
+            <input type="checkbox" name="downloaded_only" />
+            Downloaded only
+        </label>
+    </div>
+
+    <div class="track-list">
+        <div class="track-row" data-track-id="1">
+            <div class="track-row-artwork">
+                <i data-lucide="music"></i>
+            </div>
+            <div class="track-row-info">
+                <div class="track-row-title">Neon Skyline</div>
+                <div class="track-row-subtitle">Midnight Drive — Synthwave City</div>
+            </div>
+            <span class="track-row-duration">3:42</span>
+            <div class="track-row-actions">
+                <button class="btn btn-ghost btn-icon" title="Play">
+                    <i data-lucide="play"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Like">
+                    <i data-lucide="heart"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Add">
+                    <i data-lucide="plus"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="track-row" data-track-id="2">
+            <div class="track-row-artwork">
+                <i data-lucide="music"></i>
+            </div>
+            <div class="track-row-info">
+                <div class="track-row-title">Glass Horizon</div>
+                <div class="track-row-subtitle">Aurora Waves — Glass Horizons</div>
+            </div>
+            <span class="track-row-duration">4:15</span>
+            <div class="track-row-actions">
+                <button class="btn btn-ghost btn-icon" title="Play">
+                    <i data-lucide="play"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Like">
+                    <i data-lucide="heart"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Add">
+                    <i data-lucide="plus"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="track-row" data-track-id="3">
+            <div class="track-row-artwork">
+                <i data-lucide="music"></i>
+            </div>
+            <div class="track-row-info">
+                <div class="track-row-title">Soft Static</div>
+                <div class="track-row-subtitle">Echo Chamber — Soft Static</div>
+            </div>
+            <span class="track-row-duration">2:58</span>
+            <div class="track-row-actions">
+                <button class="btn btn-ghost btn-icon" title="Play">
+                    <i data-lucide="play"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Like">
+                    <i data-lucide="heart"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Add">
+                    <i data-lucide="plus"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="track-row" data-track-id="4">
+            <div class="track-row-artwork">
+                <i data-lucide="music"></i>
+            </div>
+            <div class="track-row-info">
+                <div class="track-row-title">Weightless</div>
+                <div class="track-row-subtitle">Lunar Fade — Gravity Well</div>
+            </div>
+            <span class="track-row-duration">5:03</span>
+            <div class="track-row-actions">
+                <button class="btn btn-ghost btn-icon" title="Play">
+                    <i data-lucide="play"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Like">
+                    <i data-lucide="heart"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Add">
+                    <i data-lucide="plus"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="track-row" data-track-id="5">
+            <div class="track-row-artwork">
+                <i data-lucide="music"></i>
+            </div>
+            <div class="track-row-info">
+                <div class="track-row-title">Afterglow</div>
+                <div class="track-row-subtitle">Cinder Bloom — Ember Tapes</div>
+            </div>
+            <span class="track-row-duration">3:27</span>
+            <div class="track-row-actions">
+                <button class="btn btn-ghost btn-icon" title="Play">
+                    <i data-lucide="play"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Like">
+                    <i data-lucide="heart"></i>
+                </button>
+                <button class="btn btn-ghost btn-icon" title="Add">
+                    <i data-lucide="plus"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="empty-state">
+        <div class="empty-state-icon">
+            <i data-lucide="music"></i>
+        </div>
+        <h2 class="empty-state-title">Your library is empty</h2>
+        <p class="empty-state-description">Add a download URL or scan a folder of music files to get started.</p>
+    </div>
+</section>

@@ -1,0 +1,7 @@
+<div class="track-list-inner" data-rows="{{ tracks.len() }}">
+    {% for track in tracks %}
+        <div class="track-list-row">
+            {% include "partials/track_row.html" %}
+        </div>
+    {% endfor %}
+</div>

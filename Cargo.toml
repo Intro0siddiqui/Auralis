@@ -1,0 +1,98 @@
+[package]
+name = "auralis"
+version = "2.0.0"
+edition = "2021"
+authors = ["Auralis Team"]
+description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
+license = "MIT"
+repository = "https://github.com/Intro0siddiqui/Auralis"
+rust-version = "1.75"
+readme = "README.md"
+default-run = "auralis"
+
+# Force the tauri build to know where to find tauri.conf.json
+[package.metadata.tauri]
+build = { }
+
+[lib]
+name = "auralis_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "auralis"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Core async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Tauri runtime (v2)
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+tauri-plugin-os = "2"
+
+# HTML templating (server-side, embedded at compile time)
+askama = "0.12"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled", "chrono", "uuid"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "1"
+anyhow = "1"
+dirs = "5"
+hostname = "0.4"
+rand = "0.8"
+
+# P2P networking (light use — main runtime would be libp2p over IPC)
+libp2p = { version = "0.54", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio"] }
+
+# QR code generation
+qrcode = "0.14"
+image = "0.25"
+base64 = "0.22"
+
+# HTTP client (for fetching metadata / artwork)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Audio playback
+rodio = "0.17"
+
+# Audio metadata
+lofty = "0.21"
+
+# Filesystem globbing
+glob = "0.3"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true
+
+[profile.dev]
+incremental = true

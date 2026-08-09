@@ -1,0 +1,471 @@
+/* ==========================================================================
+   RESPONSIVE STYLES - Grid System + Breakpoints
+   ========================================================================== */
+
+/* ==========================================================================
+   CONTAINER
+   ========================================================================== */
+
+.container {
+    width: 100%;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 var(--space-4);
+}
+
+.container-narrow {
+    max-width: 800px;
+}
+
+.container-wide {
+    max-width: 1400px;
+}
+
+/* ==========================================================================
+   SECTION SPACING
+   ========================================================================== */
+
+.section {
+    padding: var(--space-6) var(--space-4);
+}
+
+.section + .section {
+    padding-top: 0;
+}
+
+/* ==========================================================================
+   BREAKPOINTS
+   ========================================================================== */
+
+/* Mobile: < 640px */
+@media (max-width: 639px) {
+    :root {
+        --sidebar-width: 0px;
+        --player-track-width: 100%;
+        --card-width: 140px;
+    }
+    
+    /* Mobile Layout */
+    .app-shell {
+        grid-template-areas:
+            "content"
+            "player-bar";
+        grid-template-columns: 1fr;
+    }
+    
+    #sidebar {
+        display: none;
+    }
+    
+    #content {
+        left: 0;
+        width: 100vw;
+        height: calc(100vh - var(--player-bar-height) - var(--mobile-nav-height));
+        bottom: calc(var(--player-bar-height) + var(--mobile-nav-height));
+    }
+    
+    #mobile-nav {
+        display: flex;
+    }
+    
+    /* Mobile Player Bar */
+    #player-bar {
+        height: var(--player-bar-height);
+        padding: var(--space-2) var(--space-3);
+        gap: var(--space-2);
+    }
+    
+    .player-track {
+        width: 100%;
+        gap: var(--space-2);
+    }
+    
+    .track-artwork {
+        width: 40px;
+        height: 40px;
+    }
+    
+    .track-info {
+        flex: 1;
+    }
+    
+    .player-controls {
+        display: none;
+    }
+    
+    .player-extra {
+        display: none;
+    }
+    
+    .track-like {
+        display: flex;
+    }
+    
+    /* Mobile Typography */
+    h1 { font-size: var(--text-2xl); }
+    h2 { font-size: var(--text-xl); }
+    h3 { font-size: var(--text-lg); }
+    
+    /* Mobile Cards */
+    .grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: var(--space-3);
+    }
+    
+    .card-artwork {
+        aspect-ratio: 1;
+    }
+    
+    /* Mobile Shelf */
+    .shelf {
+        gap: var(--space-3);
+        margin: 0 calc(var(--space-3) * -1);
+        padding-left: var(--space-3);
+        padding-right: var(--space-3);
+    }
+    
+    .album-card,
+    .artist-card {
+        width: var(--card-width);
+    }
+    
+    /* Mobile Track Row */
+    .track-row {
+        padding: var(--space-2);
+        gap: var(--space-2);
+    }
+    
+    .track-row-artwork {
+        width: 36px;
+        height: 36px;
+    }
+    
+    /* Reduce blur on mobile for performance */
+    .glass {
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+    }
+    
+    .card {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        background: var(--glass-strong);
+    }
+    
+    /* Mobile Section */
+    .section {
+        padding: var(--space-4) var(--space-3);
+    }
+    
+    /* Mobile Pills */
+    .pill-tabs {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    
+    .pill-tabs::-webkit-scrollbar {
+        display: none;
+    }
+}
+
+/* Tablet: 640px - 1023px */
+@media (min-width: 640px) and (max-width: 1023px) {
+    :root {
+        --sidebar-width: 72px;
+        --player-track-width: 30%;
+        --card-width: 160px;
+    }
+    
+    /* Tablet Layout */
+    .app-shell {
+        grid-template-columns: var(--sidebar-width) 1fr;
+    }
+    
+    #sidebar {
+        width: var(--sidebar-width);
+    }
+    
+    .sidebar-header {
+        padding: var(--space-3);
+        justify-content: center;
+    }
+    
+    .logo-text {
+        display: none;
+    }
+    
+    .sidebar-nav {
+        padding: var(--space-2);
+    }
+    
+    .nav-item {
+        padding: var(--space-3);
+        justify-content: center;
+        border-radius: var(--radius-md);
+    }
+    
+    .nav-item span {
+        display: none;
+    }
+    
+    .nav-item svg {
+        width: 24px;
+        height: 24px;
+    }
+    
+    .sidebar-footer {
+        padding: var(--space-3);
+        justify-content: center;
+    }
+    
+    .sync-status span {
+        display: none;
+    }
+    
+    #mobile-nav {
+        display: none;
+    }
+    
+    #content {
+        left: var(--sidebar-width);
+        width: calc(100vw - var(--sidebar-width));
+    }
+    
+    /* Tablet Cards */
+    .grid {
+        grid-template-columns: repeat(3, 1fr);
+        gap: var(--space-4);
+    }
+    
+    /* Tablet Shelf */
+    .shelf {
+        gap: var(--space-4);
+    }
+    
+    .album-card,
+    .artist-card {
+        width: var(--card-width);
+    }
+    
+    /* Tablet Player */
+    .player-extra {
+        width: 20%;
+    }
+    
+    .volume-slider {
+        width: 60px;
+    }
+}
+
+/* Desktop: >= 1024px */
+@media (min-width: 1024px) {
+    :root {
+        --sidebar-width: 240px;
+        --player-track-width: 25%;
+        --card-width: 180px;
+    }
+    
+    /* Desktop Layout */
+    .app-shell {
+        grid-template-columns: var(--sidebar-width) 1fr;
+    }
+    
+    #sidebar {
+        width: var(--sidebar-width);
+    }
+    
+    .sidebar-toggle {
+        display: none;
+    }
+    
+    #mobile-nav {
+        display: none;
+    }
+    
+    #content {
+        left: var(--sidebar-width);
+        width: calc(100vw - var(--sidebar-width));
+    }
+    
+    /* Desktop Cards */
+    .grid {
+        grid-template-columns: repeat(4, 1fr);
+        gap: var(--space-4);
+    }
+    
+    /* Desktop Shelf */
+    .shelf {
+        gap: var(--space-4);
+    }
+    
+    .album-card,
+    .artist-card {
+        width: var(--card-width);
+    }
+    
+    /* Large Desktop */
+    @media (min-width: 1400px) {
+        :root {
+            --card-width: 200px;
+        }
+        
+        .grid {
+            grid-template-columns: repeat(5, 1fr);
+        }
+    }
+    
+    @media (min-width: 1600px) {
+        :root {
+            --card-width: 220px;
+        }
+        
+        .grid {
+            grid-template-columns: repeat(6, 1fr);
+        }
+    }
+}
+
+/* ==========================================================================
+   PERFORMANCE OPTIMIZATIONS
+   ========================================================================== */
+
+/* Prevent blur jank on scroll */
+.content {
+    contain: layout paint style;
+}
+
+.card {
+    contain: layout paint style;
+}
+
+.shelf {
+    contain: layout paint style;
+}
+
+/* GPU acceleration for animations */
+.glass,
+.card,
+.neu,
+.neu-glass,
+.control-btn,
+.play-btn {
+    transform: translateZ(0);
+    will-change: transform;
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* ==========================================================================
+   LANDSCAPE MODE (Mobile)
+   ========================================================================== */
+
+@media (max-height: 500px) and (orientation: landscape) {
+    :root {
+        --player-bar-height: 60px;
+        --mobile-nav-height: 48px;
+    }
+    
+    .player-track {
+        flex-direction: row;
+    }
+    
+    .track-artwork {
+        width: 36px;
+        height: 36px;
+    }
+    
+    .control-buttons {
+        gap: var(--space-1);
+    }
+    
+    .control-btn {
+        width: 32px;
+        height: 32px;
+    }
+    
+    .play-btn {
+        width: 40px;
+        height: 40px;
+    }
+}
+
+/* ==========================================================================
+   HIGH CONTRAST MODE
+   ========================================================================== */
+
+@media (prefers-contrast: high) {
+    .glass {
+        background: rgba(0, 0, 0, 0.8);
+        border-width: 2px;
+        border-color: var(--text-1);
+    }
+    
+    .card {
+        background: rgba(0, 0, 0, 0.9);
+        border-width: 2px;
+        border-color: var(--text-1);
+    }
+    
+    .neu {
+        box-shadow: none;
+        border: 2px solid var(--text-2);
+    }
+    
+    .neu-inset {
+        border: 2px solid var(--text-3);
+    }
+}
+
+/* ==========================================================================
+   DARK MODE OVERRIDES (Forced)
+   ========================================================================== */
+
+@media (forced-colors: active) {
+    .glass,
+    .card,
+    .neu,
+    .neu-glass {
+        background: Canvas;
+        border: 2px solid CanvasText;
+    }
+    
+    .accent,
+    .btn-primary {
+        background: Highlight;
+        color: HighlightText;
+    }
+}
+
+/* ==========================================================================
+   PRINT STYLES
+   ========================================================================== */
+
+@media print {
+    .sidebar,
+    .player-bar,
+    .mobile-nav,
+    #overlay-root {
+        display: none !important;
+    }
+    
+    .content {
+        position: static;
+        width: 100%;
+        height: auto;
+    }
+    
+    body {
+        background: white;
+        color: black;
+    }
+}

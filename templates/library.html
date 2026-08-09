@@ -1,0 +1,53 @@
+<section class="page-library">
+    <header class="page-header">
+        <h1>Library</h1>
+        <div class="actions">
+            <button class="btn primary"
+                    hx-post="/api/library/scan"
+                    hx-trigger="click"
+                    hx-swap="none"
+                    hx-on::after-request="window.Auralis.toast('Library scan started','info')">
+                Scan Library
+            </button>
+        </div>
+    </header>
+
+    <div class="filter-bar">
+        <label>
+            <span>Sort by</span>
+            <select name="sort_by"
+                    hx-get="/api/library/list"
+                    hx-trigger="change"
+                    hx-target="#track-list"
+                    hx-swap="innerHTML">
+                <option value="date_added">Date added</option>
+                <option value="title">Title</option>
+                <option value="artist">Artist</option>
+                <option value="album">Album</option>
+                <option value="play_count">Play count</option>
+                <option value="last_played">Last played</option>
+            </select>
+        </label>
+        <label class="checkbox">
+            <input type="checkbox" name="downloaded_only"
+                   hx-get="/api/library/list"
+                   hx-trigger="change"
+                   hx-target="#track-list"
+                   hx-swap="innerHTML" />
+            Downloaded only
+        </label>
+    </div>
+
+    {% if tracks.is_empty() %}
+    <div class="empty-state">
+        <h2>Your library is empty</h2>
+        <p>Add a download URL or scan a folder of music files to get started.</p>
+        <a class="btn primary" href="/downloads.html">Download audio</a>
+    </div>
+    {% else %}
+    <p class="muted">{{ total_count }} tracks</p>
+    <div id="track-list" class="track-list">
+        {% include "partials/track_list.html" %}
+    </div>
+    {% endif %}
+</section>

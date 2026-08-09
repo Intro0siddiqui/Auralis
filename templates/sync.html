@@ -1,0 +1,44 @@
+<section class="page-sync">
+    <header class="page-header">
+        <h1>Devices</h1>
+        <button class="btn primary"
+                hx-post="/api/sync/start_pairing"
+                hx-trigger="click"
+                hx-target="#pairing-area"
+                hx-swap="innerHTML">
+            Pair New Device
+        </button>
+    </header>
+
+    <div id="pairing-area"></div>
+
+    <h2>Paired Devices</h2>
+    {% if devices.is_empty() %}
+    <p class="muted">No paired devices yet.</p>
+    {% else %}
+    <ul class="device-list">
+        {% for device in devices %}
+        <li class="device device-{{ device.status }}">
+            <span class="dot"></span>
+            <div>
+                <strong>{{ device.name }}</strong>
+                <p class="muted">
+                    {{ device.device_type }} ·
+                    {% match device.last_sync %}
+                    {% when Some with (t) %}Last sync: {{ t }}
+                    {% when None %}Never synced
+                    {% endmatch %}
+                </p>
+            </div>
+            <button class="btn"
+                    hx-post="/api/sync/sync/{{ device.id }}"
+                    hx-trigger="click"
+                    hx-swap="none"
+                    hx-on::after-request="window.Auralis.toast('Sync started','info')">
+                Sync now
+            </button>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</section>

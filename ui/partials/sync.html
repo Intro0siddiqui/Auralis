@@ -1,0 +1,44 @@
+<div id="sync-view" class="view">
+    <div class="section-header">
+        <h2 class="section-title">Devices</h2>
+        <button class="btn btn-primary">
+            <i data-lucide="plus"></i>
+            Pair New Device
+        </button>
+    </div>
+
+    <div class="card pairing-card" style="padding: var(--space-4); margin-bottom: var(--space-6);">
+        <div class="pairing-layout">
+            <div class="card-artwork pairing-qr">
+                <i data-lucide="qr-code"></i>
+            </div>
+            <div class="pairing-pin">
+                <div class="settings-label">Pairing PIN</div>
+                <div class="settings-description" style="margin-bottom: var(--space-3);">
+                    Enter this PIN on your other device to connect.
+                </div>
+                <input class="input neu-inset" type="text" inputmode="numeric" placeholder="000 000" value="482 913" aria-label="Pairing PIN">
+            </div>
+        </div>
+    </div>
+
+    <h3 class="section-title" style="font-size: var(--text-lg); margin-bottom: var(--space-3);">Paired Devices</h3>
+
+    <div class="track-row">
+        <span class="status-dot" style="background: var(--success);"></span>
+        <div class="track-row-info">
+            <strong>Living Room Speaker</strong>
+            <div class="track-row-subtitle">Online · 2.4 GHz</div>
+        </div>
+        <button class="btn btn-secondary">Sync now</button>
+    </div>
+
+    <div class="track-row">
+        <span class="status-dot" style="background: var(--text-4);"></span>
+        <div class="track-row-info">
+            <strong>Office Laptop</strong>
+            <div class="track-row-subtitle">Last seen 2h ago</div>
+        </div>
+        <button class="btn btn-secondary">Sync now</button>
+    </div>
+</div>

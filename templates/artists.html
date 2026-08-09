@@ -1,0 +1,22 @@
+<section class="page-artists">
+    <header class="page-header">
+        <h1>Artists</h1>
+    </header>
+    {% if artists.is_empty() %}
+    <div class="empty-state">
+        <h2>No artists yet</h2>
+        <p>Artists will appear here once tracks are added to your library.</p>
+    </div>
+    {% else %}
+    <ul class="artist-list">
+        {% for artist in artists %}
+        <li>
+            <a href="/artist.html?id={{ artist.id }}">
+                <strong>{{ artist.name }}</strong>
+                <span class="muted">{{ artist.track_count }} tracks · {{ artist.album_count }} albums</span>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</section>

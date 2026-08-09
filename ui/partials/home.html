@@ -1,0 +1,93 @@
+<div class="section-header">
+    <h2 class="section-title">Welcome</h2>
+</div>
+
+<section class="quick-actions">
+    <button class="btn btn-primary" hx-post="/api/scan" hx-target="#content">
+        <i data-lucide="refresh-cw"></i>
+        Scan Library
+    </button>
+    <button class="btn btn-primary" hx-get="/partials/downloads" hx-target="#content" hx-swap="innerHTML transition:true">
+        <i data-lucide="download"></i>
+        Download Audio
+    </button>
+</section>
+
+<section class="section-header">
+    <h2 class="section-title">Recently Added</h2>
+    <a href="#" class="section-link" hx-get="/partials/albums" hx-target="#content" hx-swap="innerHTML transition:true">See all</a>
+</section>
+
+<div class="shelf">
+    <div class="card album-card">
+        <div class="card-artwork">
+            <i data-lucide="disc-3"></i>
+        </div>
+        <div class="card-body">
+            <div class="card-title">Midnight Drive</div>
+            <div class="card-subtitle">The Night Owls</div>
+        </div>
+    </div>
+    <div class="card album-card">
+        <div class="card-artwork">
+            <i data-lucide="disc-3"></i>
+        </div>
+        <div class="card-body">
+            <div class="card-title">Glass Horizon</div>
+            <div class="card-subtitle">Aurora Fields</div>
+        </div>
+    </div>
+    <div class="card album-card">
+        <div class="card-artwork">
+            <i data-lucide="disc-3"></i>
+        </div>
+        <div class="card-body">
+            <div class="card-title">Neon Rain</div>
+            <div class="card-subtitle">Static Bloom</div>
+        </div>
+    </div>
+    <div class="card album-card">
+        <div class="card-artwork">
+            <i data-lucide="disc-3"></i>
+        </div>
+        <div class="card-body">
+            <div class="card-title">Soft Glass</div>
+            <div class="card-subtitle">Vela</div>
+        </div>
+    </div>
+</div>
+
+<section class="section-header">
+    <h2 class="section-title">Continue Listening</h2>
+</section>
+
+<div class="track-row" hx-get="/partials/track_row" hx-trigger="click" hx-target="#content">
+    <div class="track-row-artwork">
+        <i data-lucide="disc-3"></i>
+    </div>
+    <div class="track-row-info">
+        <div class="track-row-title">Midnight Drive</div>
+        <div class="track-row-subtitle">The Night Owls</div>
+    </div>
+    <div class="track-row-duration">3:42</div>
+</div>
+<div class="track-row" hx-get="/partials/track_row" hx-trigger="click" hx-target="#content">
+    <div class="track-row-artwork">
+        <i data-lucide="disc-3"></i>
+    </div>
+    <div class="track-row-info">
+        <div class="track-row-title">City Lights</div>
+        <div class="track-row-subtitle">Neon Skyline</div>
+    </div>
+    <div class="track-row-duration">4:15</div>
+</div>
+<div class="track-row" hx-get="/partials/track_row" hx-trigger="click" hx-target="#content">
+    <div class="track-row-artwork">
+        <i data-lucide="disc-3"></i>
+    </div>
+    <div class="track-row-info">
+        <div class="track-row-title">Gravity Pulls</div>
+        <div class="track-row-subtitle">Stellar Drift</div>
+    </div>
+    <div class="track-row-duration">5:08</div>
+</div>

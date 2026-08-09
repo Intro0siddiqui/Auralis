@@ -1,0 +1,51 @@
+<div id="player-full" class="overlay modal--full glass-strong">
+    <button class="btn btn-ghost btn-icon player-full-close" onclick="document.getElementById('overlay-root').innerHTML = ''" aria-label="Close">
+        <i data-lucide="x"></i>
+    </button>
+
+    <div class="player-full-art">
+        <div class="card-artwork">
+            <div class="artwork-placeholder">
+                <i data-lucide="disc-3"></i>
+            </div>
+        </div>
+    </div>
+
+    <div class="player-full-info">
+        <h2 class="player-full-title">Track Title</h2>
+        <p class="player-full-artist">Artist Name</p>
+    </div>
+
+    <div class="progress-container player-full-progress">
+        <span class="time-current" id="full-time-current">1:24</span>
+        <div class="progress-track neu-inset">
+            <div class="progress-fill" style="width: 35%;"></div>
+        </div>
+        <span class="time-total" id="full-time-total">4:02</span>
+    </div>
+
+    <div class="player-full-controls">
+        <button class="neu player-full-btn" aria-label="Shuffle">
+            <i data-lucide="shuffle"></i>
+        </button>
+        <button class="neu player-full-btn" aria-label="Previous">
+            <i data-lucide="skip-back"></i>
+        </button>
+        <button class="neu play-btn player-full-play" aria-label="Play">
+            <i data-lucide="play"></i>
+        </button>
+        <button class="neu player-full-btn" aria-label="Next">
+            <i data-lucide="skip-forward"></i>
+        </button>
+        <button class="neu player-full-btn" aria-label="Repeat">
+            <i data-lucide="repeat"></i>
+        </button>
+    </div>
+
+    <div class="player-full-volume">
+        <i data-lucide="volume-2"></i>
+        <div class="volume-slider neu-inset">
+            <div class="volume-fill" style="width: 70%;"></div>
+        </div>
+    </div>
+</div>

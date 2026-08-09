@@ -1,0 +1,30 @@
+<section class="page-albums">
+    <header class="page-header">
+        <h1>Albums</h1>
+    </header>
+    {% if albums.is_empty() %}
+    <div class="empty-state">
+        <h2>No albums yet</h2>
+        <p>Albums will appear here once tracks are added to your library.</p>
+    </div>
+    {% else %}
+    <div class="album-grid">
+        {% for album in albums %}
+        <a class="album-card" href="/album.html?id={{ album.id }}">
+            <div class="art">
+                {% if album.art_path.is_some() %}
+                <img src="{{ album.art_path.as_deref().unwrap_or("") }}" alt="{{ album.title }}" loading="lazy" />
+                {% else %}
+                <div class="art-placeholder">{{ album.title.chars().next().unwrap_or('?') }}</div>
+                {% endif %}
+            </div>
+            <div class="meta">
+                <h3>{{ album.title }}</h3>
+                <p>{{ album.artist.as_deref().unwrap_or("Unknown artist") }}</p>
+                <p class="muted">{{ album.track_count }} tracks · {{ album.formatted_duration() }}</p>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+</section>

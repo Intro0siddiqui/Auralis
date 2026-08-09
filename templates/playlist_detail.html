@@ -1,0 +1,13 @@
+<section class="page-playlist">
+    <header class="page-header">
+        <h1>{{ playlist.name }}</h1>
+        <p class="muted">{{ playlist.track_count() }} tracks</p>
+    </header>
+
+    <div class="track-list"
+         hx-get="/api/playlists/{{ playlist.id }}/render"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        {% include "partials/track_list.html" %}
+    </div>
+</section>

@@ -1,0 +1,14 @@
+<div class="queue" data-current="{{ current_index.is_some() }}">
+    {% if queue.is_empty() %}
+    <p class="muted">The queue is empty.</p>
+    {% else %}
+    {% for track in queue %}
+    <div class="queue-row">
+        <span class="muted">{{ loop.index + 1 }}</span>
+        <strong>{{ track.title }}</strong>
+        <span class="muted">— {{ track.artist.as_deref().unwrap_or("Unknown") }}</span>
+        <span class="muted duration">{{ track.formatted_duration() }}</span>
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>
