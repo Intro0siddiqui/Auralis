@@ -59,7 +59,7 @@ impl AuralisApp {
         info!("Running Auralis application");
 
         if let Err(e) = Self::build().and_then(|mut app| app.run(|_app, _event| {})) {
-            error!(error = %e, "Failed to run Auralis application");
+            tracing::error!(error = %e, "Failed to run Auralis application");
         }
     }
 
