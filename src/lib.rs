@@ -190,5 +190,4 @@ fn main() {
         .map_err(|e| eprintln!("Failed to build Auralis: {e}"))
         .expect("Failed to initialize Auralis application");
 }
-}
 
