@@ -76,7 +76,7 @@ image = "0.25"
 base64 = "0.22"
 
 # HTTP client (for fetching metadata / artwork)
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # Audio playback
 rodio = "0.17"
