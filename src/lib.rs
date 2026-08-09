@@ -182,3 +182,13 @@ impl AuralisApp {
         Ok(())
     }
 }
+
+/// Mobile entry point for Android/iOS
+#[tauri::mobile_entry_point]
+fn main() {
+    AuralisApp::build()
+        .map_err(|e| eprintln!("Failed to build Auralis: {e}"))
+        .expect("Failed to initialize Auralis application");
+}
+}
+
