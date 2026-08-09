@@ -59,8 +59,7 @@ impl AuralisApp {
         info!("Running Auralis application");
 
         let app = Self::build()?;
-        app.run(|_app, _event| {});
-        Ok(())
+        app.run(|_app, _event| {})
     }
 
     /// Build the Tauri application with all configurations
