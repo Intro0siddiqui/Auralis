@@ -3,7 +3,10 @@
 //! Renders server-side HTML fragments consumed by HTMX. Templates are
 //! embedded at compile time so the binary is self-contained.
 
-use crate::domain::models::{Album, Artist, DownloadProgress, NowPlaying, PairedDevice, Playlist, Settings, Track, TrackFilter};
+use crate::domain::models::{
+    Album, Artist, DownloadProgress, NowPlaying, PairedDevice, Playlist, Settings, Track,
+    TrackFilter,
+};
 use askama::Template;
 use serde::Serialize;
 

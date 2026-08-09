@@ -12,5 +12,8 @@ pub trait SettingsRepository: Send + Sync {
     async fn get_settings(&self) -> Result<Settings, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Save settings
-    async fn save_settings(&self, settings: &Settings) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    async fn save_settings(
+        &self,
+        settings: &Settings,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }

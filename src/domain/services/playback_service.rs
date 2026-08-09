@@ -304,19 +304,13 @@ impl PlaybackService {
                 let mut rng = rand::thread_rng();
                 remaining.shuffle(&mut rng);
 
-                state.queue = std::iter::once(current.clone())
-                    .chain(remaining)
-                    .collect();
+                state.queue = std::iter::once(current.clone()).chain(remaining).collect();
                 state.queue_index = 0;
             }
         } else if !enabled && state.shuffle_enabled {
             // Disable shuffle: restore original order
             if let Some(current) = &state.current_track {
-                if let Some(pos) = state
-                    .original_queue
-                    .iter()
-                    .position(|t| t.id == current.id)
-                {
+                if let Some(pos) = state.original_queue.iter().position(|t| t.id == current.id) {
                     state.queue_index = pos;
                 }
                 state.queue = state.original_queue.clone();

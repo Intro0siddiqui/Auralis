@@ -147,12 +147,7 @@ impl DownloadProgress {
     }
 
     /// Update progress
-    pub fn update(
-        &mut self,
-        downloaded_bytes: u64,
-        total_bytes: Option<u64>,
-        speed_bps: u64,
-    ) {
+    pub fn update(&mut self, downloaded_bytes: u64, total_bytes: Option<u64>, speed_bps: u64) {
         self.downloaded_bytes = downloaded_bytes;
         self.total_bytes = total_bytes;
         self.speed_bps = speed_bps;

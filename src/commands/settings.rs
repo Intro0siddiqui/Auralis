@@ -2,8 +2,8 @@
 //!
 //! Tauri command handlers for application settings.
 
-use crate::templates::render;
 use crate::domain::models::Settings;
+use crate::templates::render;
 use crate::templates::SettingsTemplate;
 
 /// Get the current settings.

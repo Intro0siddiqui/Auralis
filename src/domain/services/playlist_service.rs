@@ -54,7 +54,9 @@ impl PlaylistService {
         info!(name = %name, "Creating playlist");
 
         if name.trim().is_empty() {
-            return Err(PlaylistError::InvalidName("Name cannot be empty".to_string()));
+            return Err(PlaylistError::InvalidName(
+                "Name cannot be empty".to_string(),
+            ));
         }
 
         let playlist = Playlist::new(name);
@@ -92,7 +94,9 @@ impl PlaylistService {
 
         if let Some(name) = name {
             if name.trim().is_empty() {
-                return Err(PlaylistError::InvalidName("Name cannot be empty".to_string()));
+                return Err(PlaylistError::InvalidName(
+                    "Name cannot be empty".to_string(),
+                ));
             }
             playlist.name = name;
         }

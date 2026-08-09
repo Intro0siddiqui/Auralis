@@ -17,10 +17,13 @@ pub use artist::Artist;
 pub use download::{DownloadProgress, DownloadStatus};
 pub use playlist::{Playlist, SmartPlaylistCriteria, SmartSortField};
 pub use settings::{
-    AppearanceSettings, AudioSettings, DownloadSettings, LibrarySettings, Settings,
-    SyncSettings, ThemeMode, LibraryView,
+    AppearanceSettings, AudioSettings, DownloadSettings, LibrarySettings, LibraryView, Settings,
+    SyncSettings, ThemeMode,
 };
-pub use sync::{ChangeType, DeviceStatus, DeviceType, EntityType, PairingInfo, PairedDevice, SyncChange, SyncStatus};
+pub use sync::{
+    ChangeType, DeviceStatus, DeviceType, EntityType, PairedDevice, PairingInfo, SyncChange,
+    SyncStatus,
+};
 pub use track::{AudioFormat, RepeatMode, Track, TrackFilter, TrackMetadataUpdate, TrackSortField};
 
 /// Playback state information

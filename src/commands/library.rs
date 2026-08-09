@@ -3,9 +3,9 @@
 //! Tauri command handlers for the music library domain. These commands
 //! expose library operations to the HTMX frontend.
 
+use crate::domain::models::{ScanSummary, Track, TrackFilter, TrackMetadataUpdate};
 use crate::templates::render;
 use crate::templates::{LibraryTemplate, SearchResultsTemplate, TrackListPartial, TrackRowPartial};
-use crate::domain::models::{ScanSummary, Track, TrackFilter, TrackMetadataUpdate};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -27,9 +27,7 @@ pub struct SearchQuery {
 
 /// Get a paginated list of tracks, optionally filtered.
 #[tauri::command]
-pub async fn get_tracks(
-    filter: Option<TrackFilter>,
-) -> Result<TracksPage, String> {
+pub async fn get_tracks(filter: Option<TrackFilter>) -> Result<TracksPage, String> {
     let filter = filter.unwrap_or_default();
     // TODO: Wire to TrackRepository once database is fully initialized.
     Ok(TracksPage {

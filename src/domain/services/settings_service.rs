@@ -56,10 +56,13 @@ impl SettingsService {
         // Validate settings
         self.validate_settings(&settings)?;
 
-        self.repository.save_settings(&settings).await.map_err(|e| {
-            error!(error = %e, "Failed to save settings");
-            SettingsError::DatabaseError(e.to_string())
-        })?;
+        self.repository
+            .save_settings(&settings)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to save settings");
+                SettingsError::DatabaseError(e.to_string())
+            })?;
 
         // Update cache
         {
@@ -88,9 +91,7 @@ impl SettingsService {
         }
 
         // Validate concurrent downloads
-        if settings.downloads.max_concurrent == 0
-            || settings.downloads.max_concurrent > 10
-        {
+        if settings.downloads.max_concurrent == 0 || settings.downloads.max_concurrent > 10 {
             return Err(SettingsError::ValidationError(
                 "Max concurrent downloads must be between 1 and 10".to_string(),
             ));
@@ -112,10 +113,13 @@ impl SettingsService {
 
         let settings = Settings::default();
 
-        self.repository.save_settings(&settings).await.map_err(|e| {
-            error!(error = %e, "Failed to reset settings");
-            SettingsError::DatabaseError(e.to_string())
-        })?;
+        self.repository
+            .save_settings(&settings)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to reset settings");
+                SettingsError::DatabaseError(e.to_string())
+            })?;
 
         // Update cache
         {
@@ -140,7 +144,10 @@ impl SettingsService {
     }
 
     /// Remove a library scan path
-    pub async fn remove_scan_path(&self, path: &std::path::Path) -> Result<Settings, SettingsError> {
+    pub async fn remove_scan_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Settings, SettingsError> {
         let mut settings = self.get_settings().await?;
 
         settings.library.scan_paths.retain(|p| p != path);

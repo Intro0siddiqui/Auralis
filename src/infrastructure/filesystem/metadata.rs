@@ -3,8 +3,8 @@
 //! Extracts audio metadata from files using lofty.
 
 use crate::domain::models::{AudioFormat, Track};
-use lofty::prelude::*;
 use lofty::file::TaggedFileExt;
+use lofty::prelude::*;
 use std::path::Path;
 use tracing::debug;
 
@@ -16,21 +16,23 @@ impl MetadataExtractor {
     pub fn extract(path: &Path) -> Result<Track, MetadataError> {
         debug!(path = %path.display(), "Extracting metadata");
 
-        let tagged_file = lofty::read_from_path(path)
-            .map_err(|e| MetadataError::ReadError(e.to_string()))?;
+        let tagged_file =
+            lofty::read_from_path(path).map_err(|e| MetadataError::ReadError(e.to_string()))?;
 
         let properties = tagged_file.properties();
-        let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+        let tag = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag());
 
         let duration_secs = properties.duration().as_secs() as u32;
-        let file_size = std::fs::metadata(path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
         let format = Self::detect_format(path);
 
         // Use the unified title extractor that handles Option<&dyn Accessor>
-        let title = tag.map(|t| Self::get_title(t)).unwrap_or_else(|| "Unknown".to_string());
+        let title = tag
+            .map(|t| Self::get_title(t))
+            .unwrap_or_else(|| "Unknown".to_string());
 
         let mut track = Track::new(
             title,

@@ -2,8 +2,8 @@
 //!
 //! Tauri command handlers for media downloads via yt-dlp.
 
-use crate::templates::render;
 use crate::domain::models::{AudioFormat, DownloadProgress};
+use crate::templates::render;
 use crate::templates::{DownloadItemPartial, DownloadsTemplate};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -37,7 +37,9 @@ pub async fn download_audio(request: DownloadRequest) -> Result<DownloadProgress
 
 /// Start downloading a playlist (creates one download per item).
 #[tauri::command]
-pub async fn download_playlist(_request: PlaylistDownloadRequest) -> Result<Vec<DownloadProgress>, String> {
+pub async fn download_playlist(
+    _request: PlaylistDownloadRequest,
+) -> Result<Vec<DownloadProgress>, String> {
     // TODO: parse playlist URL and enqueue per-item downloads
     Ok(Vec::new())
 }

@@ -251,7 +251,10 @@ impl PairingInfo {
             )
             .unwrap();
 
-        format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&buffer))
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&buffer)
+        )
     }
 
     /// Check if pairing has expired

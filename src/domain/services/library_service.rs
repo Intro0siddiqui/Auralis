@@ -4,7 +4,7 @@
 //! and metadata management.
 
 use crate::domain::models::{ScanSummary, Track, TrackFilter, TrackMetadataUpdate};
-use crate::domain::repositories::{TrackRepository, SettingsRepository};
+use crate::domain::repositories::{SettingsRepository, TrackRepository};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -153,7 +153,9 @@ impl LibraryService {
                 }
                 Err(e) => {
                     error!(path = %path.display(), error = %e, "Failed to scan path");
-                    summary.errors.push(format!("Failed to scan {}: {}", path.display(), e));
+                    summary
+                        .errors
+                        .push(format!("Failed to scan {}: {}", path.display(), e));
                 }
             }
         }
@@ -206,9 +208,11 @@ impl LibraryService {
             ..Default::default()
         };
 
-        let title_results = self.track_repository.find_all(title_filter).await.map_err(|e| {
-            LibraryError::DatabaseError(e.to_string())
-        })?;
+        let title_results = self
+            .track_repository
+            .find_all(title_filter)
+            .await
+            .map_err(|e| LibraryError::DatabaseError(e.to_string()))?;
 
         // Merge results, avoiding duplicates
         for track in title_results {
@@ -223,16 +227,18 @@ impl LibraryService {
 
     /// Get track count
     pub async fn get_track_count(&self) -> Result<u64, LibraryError> {
-        self.track_repository.count().await.map_err(|e| {
-            LibraryError::DatabaseError(e.to_string())
-        })
+        self.track_repository
+            .count()
+            .await
+            .map_err(|e| LibraryError::DatabaseError(e.to_string()))
     }
 
     /// Get total library duration
     pub async fn get_total_duration(&self) -> Result<u64, LibraryError> {
-        self.track_repository.total_duration().await.map_err(|e| {
-            LibraryError::DatabaseError(e.to_string())
-        })
+        self.track_repository
+            .total_duration()
+            .await
+            .map_err(|e| LibraryError::DatabaseError(e.to_string()))
     }
 }
 

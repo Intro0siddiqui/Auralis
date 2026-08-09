@@ -2,8 +2,8 @@
 //!
 //! Tauri command handlers for the audio playback domain.
 
-use crate::templates::render;
 use crate::domain::models::{NowPlaying, RepeatMode, Track};
+use crate::templates::render;
 use crate::templates::{NowPlayingPartial, QueuePartial};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

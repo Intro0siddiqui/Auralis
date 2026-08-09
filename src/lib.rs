@@ -11,15 +11,14 @@ pub mod domain;
 
 // Re-export domain types for convenient access
 pub use domain::models::{
-    Album, AlbumArt, AppearanceSettings, Artist, AudioFormat, AudioSettings,
-    DownloadProgress, DownloadSettings, DownloadStatus, LibrarySettings, LibraryView,
-    NowPlaying, PairedDevice, PairingInfo, Playlist, RepeatMode, ScanSummary, Settings,
-    SmartPlaylistCriteria, SmartSortField, SyncChange, SyncStatus, SyncSettings,
-    ThemeMode, Track, TrackFilter, TrackMetadataUpdate, TrackSortField,
+    Album, AlbumArt, AppearanceSettings, Artist, AudioFormat, AudioSettings, DownloadProgress,
+    DownloadSettings, DownloadStatus, LibrarySettings, LibraryView, NowPlaying, PairedDevice,
+    PairingInfo, Playlist, RepeatMode, ScanSummary, Settings, SmartPlaylistCriteria,
+    SmartSortField, SyncChange, SyncSettings, SyncStatus, ThemeMode, Track, TrackFilter,
+    TrackMetadataUpdate, TrackSortField,
 };
 pub use domain::services::{
-    DownloadService, LibraryService, PlaybackService, PlaylistService,
-    SettingsService, SyncService,
+    DownloadService, LibraryService, PlaybackService, PlaylistService, SettingsService, SyncService,
 };
 
 // ============================================================================
@@ -155,8 +154,7 @@ impl AuralisApp {
         info!(path = %db_path.display(), "Database path configured");
 
         // Open the database and run migrations, then store it in app state
-        let db = Database::new(&db_path)
-            .map_err(|e| format!("Failed to open database: {e:?}"))?;
+        let db = Database::new(&db_path).map_err(|e| format!("Failed to open database: {e:?}"))?;
         db.run_migrations()
             .map_err(|e| format!("Failed to run migrations: {e:?}"))?;
         app_handle.manage(db);

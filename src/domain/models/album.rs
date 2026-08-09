@@ -77,12 +77,21 @@ impl Album {
         }
 
         let first = &tracks[0];
-        let mut album = Album::new(first.album.clone().unwrap_or_else(|| "Unknown Album".to_string()));
+        let mut album = Album::new(
+            first
+                .album
+                .clone()
+                .unwrap_or_else(|| "Unknown Album".to_string()),
+        );
         album.artist = first.album_artist.clone().or_else(|| first.artist.clone());
         album.year = first.year;
         album.genre = first.genre.clone();
         album.art_path = first.album_art_path.clone();
-        album.date_added = tracks.iter().map(|t| t.date_added).min().unwrap_or_else(Utc::now);
+        album.date_added = tracks
+            .iter()
+            .map(|t| t.date_added)
+            .min()
+            .unwrap_or_else(Utc::now);
         album.track_count = tracks.len() as u32;
         album.total_duration_secs = tracks.iter().map(|t| t.duration_secs).sum();
         album.total_size = tracks.iter().map(|t| t.file_size).sum();

@@ -51,10 +51,7 @@ impl Artist {
 
     /// Build artist from track collection
     pub fn from_tracks(name: &str, tracks: &[crate::Track]) -> Self {
-        let albums: Vec<_> = tracks
-            .iter()
-            .filter_map(|t| t.album.clone())
-            .collect();
+        let albums: Vec<_> = tracks.iter().filter_map(|t| t.album.clone()).collect();
         let unique_albums: std::collections::HashSet<_> = albums.iter().collect();
 
         Self {
@@ -62,7 +59,11 @@ impl Artist {
             name: name.to_string(),
             bio: None,
             image_path: tracks.first().and_then(|t| t.album_art_path.clone()),
-            date_added: tracks.iter().map(|t| t.date_added).min().unwrap_or_else(Utc::now),
+            date_added: tracks
+                .iter()
+                .map(|t| t.date_added)
+                .min()
+                .unwrap_or_else(Utc::now),
             track_count: tracks.len() as u32,
             album_count: unique_albums.len() as u32,
             total_duration_secs: tracks.iter().map(|t| t.duration_secs).sum(),

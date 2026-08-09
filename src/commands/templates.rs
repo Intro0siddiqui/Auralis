@@ -4,12 +4,14 @@
 //! primary entry points used by the HTMX frontend — every navigation,
 //! fragment swap, and SSE-style update is one of these commands.
 
+use crate::domain::models::{
+    Album, Artist, DownloadProgress, PairedDevice, Playlist, Settings, Track, TrackFilter,
+};
 use crate::templates::render;
 use crate::templates::{
-    AlbumsTemplate, ArtistsTemplate, LibraryTemplate, SettingsTemplate,
-    SyncTemplate, DownloadsTemplate, PlaylistsTemplate,
+    AlbumsTemplate, ArtistsTemplate, DownloadsTemplate, LibraryTemplate, PlaylistsTemplate,
+    SettingsTemplate, SyncTemplate,
 };
-use crate::domain::models::{Album, Artist, DownloadProgress, PairedDevice, Playlist, Settings, Track, TrackFilter};
 use askama::Template;
 use serde::{Deserialize, Serialize};
 
@@ -39,8 +41,7 @@ pub struct RenderTemplateRequest {
 pub async fn render_template(request: RenderTemplateRequest) -> Result<String, String> {
     match request.template {
         TemplateName::Library => {
-            let filter: TrackFilter = serde_json::from_value(request.data)
-                .unwrap_or_default();
+            let filter: TrackFilter = serde_json::from_value(request.data).unwrap_or_default();
             let tracks: Vec<Track> = Vec::new();
             let tmpl = LibraryTemplate {
                 tracks: &tracks,
@@ -62,12 +63,16 @@ pub async fn render_template(request: RenderTemplateRequest) -> Result<String, S
         }
         TemplateName::Downloads => {
             let downloads: Vec<DownloadProgress> = Vec::new();
-            let tmpl = DownloadsTemplate { downloads: &downloads };
+            let tmpl = DownloadsTemplate {
+                downloads: &downloads,
+            };
             render(&tmpl).map_err(|e| e.to_string())
         }
         TemplateName::Playlists => {
             let playlists: Vec<Playlist> = Vec::new();
-            let tmpl = PlaylistsTemplate { playlists: &playlists };
+            let tmpl = PlaylistsTemplate {
+                playlists: &playlists,
+            };
             render(&tmpl).map_err(|e| e.to_string())
         }
         TemplateName::Sync => {
@@ -77,7 +82,9 @@ pub async fn render_template(request: RenderTemplateRequest) -> Result<String, S
         }
         TemplateName::Settings => {
             let settings = Settings::default();
-            let tmpl = SettingsTemplate { settings: &settings };
+            let tmpl = SettingsTemplate {
+                settings: &settings,
+            };
             render(&tmpl).map_err(|e| e.to_string())
         }
         TemplateName::Layout => {

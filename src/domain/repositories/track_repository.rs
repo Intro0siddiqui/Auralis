@@ -10,22 +10,40 @@ use uuid::Uuid;
 #[async_trait]
 pub trait TrackRepository: Send + Sync {
     /// Find all tracks with optional filtering
-    async fn find_all(&self, filter: TrackFilter) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn find_all(
+        &self,
+        filter: TrackFilter,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Find a track by ID
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn find_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Find tracks by file path
-    async fn find_by_path(&self, path: &str) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn find_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Find tracks by artist
-    async fn find_by_artist(&self, artist: &str) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn find_by_artist(
+        &self,
+        artist: &str,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Find tracks by album
-    async fn find_by_album(&self, album: &str) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn find_by_album(
+        &self,
+        album: &str,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Search tracks by query
-    async fn search(&self, query: &str) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn search(
+        &self,
+        query: &str,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Insert a new track
     async fn insert(&self, track: &Track) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -37,7 +55,10 @@ pub trait TrackRepository: Send + Sync {
     async fn delete(&self, id: Uuid) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Delete multiple tracks
-    async fn delete_many(&self, ids: Vec<Uuid>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    async fn delete_many(
+        &self,
+        ids: Vec<Uuid>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Get total track count
     async fn count(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>>;
@@ -46,8 +67,14 @@ pub trait TrackRepository: Send + Sync {
     async fn total_duration(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Get recently added tracks
-    async fn recent(&self, limit: u32) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn recent(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Get most played tracks
-    async fn most_played(&self, limit: u32) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn most_played(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
 }

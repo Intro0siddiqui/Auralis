@@ -26,13 +26,12 @@ impl Database {
 
         // Create parent directories if needed
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| DatabaseError::IoError(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| DatabaseError::IoError(e.to_string()))?;
         }
 
         // Open connection
-        let connection = Connection::open(path)
-            .map_err(|e| DatabaseError::ConnectionError(e.to_string()))?;
+        let connection =
+            Connection::open(path).map_err(|e| DatabaseError::ConnectionError(e.to_string()))?;
 
         // Enable foreign keys and WAL mode for better performance
         connection
@@ -56,7 +55,9 @@ impl Database {
     pub fn run_migrations(&self) -> Result<(), DatabaseError> {
         debug!("Running database migrations");
 
-        let connection = self.connection.lock()
+        let connection = self
+            .connection
+            .lock()
             .map_err(|e| DatabaseError::ConnectionError(format!("Mutex poisoned: {e}")))?;
 
         // Create tables
@@ -155,7 +156,8 @@ impl Database {
 
     /// Get a guard for the connection. Note: blocks the current thread.
     pub fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, DatabaseError> {
-        self.connection.lock()
+        self.connection
+            .lock()
             .map_err(|e| DatabaseError::ConnectionError(format!("Mutex poisoned: {e}")))
     }
 }

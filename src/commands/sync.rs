@@ -2,8 +2,8 @@
 //!
 //! Tauri command handlers for P2P device synchronization.
 
+use crate::domain::models::{PairedDevice, PairingInfo, SyncStatus};
 use crate::templates::render;
-use crate::domain::models::{PairingInfo, PairedDevice, SyncStatus};
 use crate::templates::SyncTemplate;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -59,8 +59,6 @@ pub async fn get_sync_status() -> Result<SyncStatus, String> {
 #[tauri::command]
 pub async fn render_sync() -> Result<String, String> {
     let devices: Vec<PairedDevice> = Vec::new();
-    let tmpl = SyncTemplate {
-        devices: &devices,
-    };
+    let tmpl = SyncTemplate { devices: &devices };
     render(&tmpl).map_err(|e| e.to_string())
 }

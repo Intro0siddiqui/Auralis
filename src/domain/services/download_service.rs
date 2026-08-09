@@ -53,7 +53,9 @@ impl DownloadService {
             .map_err(|e| DownloadError::SettingsError(e.to_string()))?;
 
         // Create download progress entry
-        let title = self.extract_title(&url).unwrap_or_else(|| "Unknown".to_string());
+        let title = self
+            .extract_title(&url)
+            .unwrap_or_else(|| "Unknown".to_string());
         let progress = DownloadProgress::new(url.clone(), title, format);
 
         let download_id = progress.id;
@@ -108,7 +110,11 @@ impl DownloadService {
             return Err(DownloadError::EmptyPlaylist);
         }
 
-        info!(count = urls.len(), "Playlist contains {} videos", urls.len());
+        info!(
+            count = urls.len(),
+            "Playlist contains {} videos",
+            urls.len()
+        );
 
         let mut download_ids = Vec::new();
 
@@ -187,9 +193,7 @@ impl DownloadService {
 
     /// Check if URL is supported
     fn is_supported_url(&self, url: &str) -> bool {
-        url.contains("youtube.com")
-            || url.contains("youtu.be")
-            || url.contains("instagram.com")
+        url.contains("youtube.com") || url.contains("youtu.be") || url.contains("instagram.com")
     }
 
     /// Extract title from URL (placeholder)
@@ -224,7 +228,8 @@ impl DownloadService {
         let output_dir = settings.downloads.download_path;
         std::fs::create_dir_all(&output_dir).map_err(|e| DownloadError::IoError(e))?;
 
-        let output_file = output_dir.join(format!("download_{}.{}", download_id, format.extension()));
+        let output_file =
+            output_dir.join(format!("download_{}.{}", download_id, format.extension()));
 
         // Update status to downloading
         {
@@ -238,8 +243,10 @@ impl DownloadService {
         let mut cmd = tokio::process::Command::new("yt-dlp");
         cmd.args([
             "-x",
-            "--audio-format", format.extension(),
-            "-o", output_file.to_str().unwrap(),
+            "--audio-format",
+            format.extension(),
+            "-o",
+            output_file.to_str().unwrap(),
             &url,
         ]);
 

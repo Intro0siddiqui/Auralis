@@ -35,8 +35,8 @@ impl AudioPlayer {
     pub fn new() -> Result<Self, PlayerError> {
         info!("Initializing audio player");
 
-        let (stream, stream_handle) = OutputStream::try_default()
-            .map_err(|e| PlayerError::InitError(e.to_string()))?;
+        let (stream, stream_handle) =
+            OutputStream::try_default().map_err(|e| PlayerError::InitError(e.to_string()))?;
 
         info!("Audio player initialized");
         Ok(Self {
@@ -56,23 +56,21 @@ impl AudioPlayer {
         self.stop().await?;
 
         // Create new sink
-        let (_stream, stream_handle) = OutputStream::try_default()
-            .map_err(|e| PlayerError::InitError(e.to_string()))?;
+        let (_stream, stream_handle) =
+            OutputStream::try_default().map_err(|e| PlayerError::InitError(e.to_string()))?;
 
-        let sink = Sink::try_new(&stream_handle)
-            .map_err(|e| PlayerError::SinkError(e.to_string()))?;
+        let sink =
+            Sink::try_new(&stream_handle).map_err(|e| PlayerError::SinkError(e.to_string()))?;
 
         // Set volume
         let vol = *self.volume.read().await;
         sink.set_volume(vol);
 
         // Open and decode file
-        let file = File::open(path)
-            .map_err(|e| PlayerError::FileError(e.to_string()))?;
+        let file = File::open(path).map_err(|e| PlayerError::FileError(e.to_string()))?;
 
         let reader = BufReader::new(file);
-        let source = Decoder::new(reader)
-            .map_err(|e| PlayerError::DecodeError(e.to_string()))?;
+        let source = Decoder::new(reader).map_err(|e| PlayerError::DecodeError(e.to_string()))?;
 
         sink.append(source);
 
@@ -124,7 +122,9 @@ impl AudioPlayer {
     /// Check if currently playing
     pub async fn is_playing(&self) -> bool {
         let sink = self.sink.read().await;
-        sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false)
+        sink.as_ref()
+            .map(|s| !s.is_paused() && !s.empty())
+            .unwrap_or(false)
     }
 
     /// Get current position in seconds

@@ -3,8 +3,8 @@
 //! Handles P2P synchronization between devices.
 
 use crate::domain::models::{
-    ChangeType, DeviceStatus, DeviceType, EntityType, PairedDevice, PairingInfo,
-    SyncChange, SyncStatus,
+    ChangeType, DeviceStatus, DeviceType, EntityType, PairedDevice, PairingInfo, SyncChange,
+    SyncStatus,
 };
 use crate::domain::repositories::{SettingsRepository, SyncRepository, TrackRepository};
 use std::collections::HashMap;
@@ -49,10 +49,14 @@ impl SyncService {
         info!("Initializing sync service");
 
         // Load paired devices
-        let devices = self.sync_repository.get_paired_devices().await.map_err(|e| {
-            error!(error = %e, "Failed to load paired devices");
-            SyncError::DatabaseError(e.to_string())
-        })?;
+        let devices = self
+            .sync_repository
+            .get_paired_devices()
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to load paired devices");
+                SyncError::DatabaseError(e.to_string())
+            })?;
 
         {
             let mut paired = self.paired_devices.write().await;
@@ -62,10 +66,14 @@ impl SyncService {
         }
 
         // Load pending changes
-        let changes = self.sync_repository.get_pending_changes().await.map_err(|e| {
-            error!(error = %e, "Failed to load pending changes");
-            SyncError::DatabaseError(e.to_string())
-        })?;
+        let changes = self
+            .sync_repository
+            .get_pending_changes()
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to load pending changes");
+                SyncError::DatabaseError(e.to_string())
+            })?;
 
         {
             let mut pending = self.pending_changes.write().await;
@@ -134,10 +142,7 @@ impl SyncService {
 
         // TODO: Implement actual network pairing via libp2p
         // For now, create a mock device
-        let device = PairedDevice::new(
-            "Paired Device".to_string(),
-            DeviceType::Desktop,
-        );
+        let device = PairedDevice::new("Paired Device".to_string(), DeviceType::Desktop);
 
         // Save to repository
         self.sync_repository

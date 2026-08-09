@@ -51,8 +51,13 @@ impl SqliteTrackRepository {
 
 #[async_trait]
 impl TrackRepository for SqliteTrackRepository {
-    async fn find_all(&self, filter: TrackFilter) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+    async fn find_all(
+        &self,
+        filter: TrackFilter,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         let mut sql = String::from("SELECT * FROM tracks WHERE 1=1");
@@ -83,7 +88,11 @@ impl TrackRepository for SqliteTrackRepository {
             TrackSortField::Year => "year",
         };
 
-        sql.push_str(&format!(" ORDER BY {} {}", order_field, if filter.sort_desc { "DESC" } else { "ASC" }));
+        sql.push_str(&format!(
+            " ORDER BY {} {}",
+            order_field,
+            if filter.sort_desc { "DESC" } else { "ASC" }
+        ));
 
         if let Some(limit) = filter.limit {
             sql.push_str(&format!(" LIMIT {}", limit));
@@ -93,18 +102,25 @@ impl TrackRepository for SqliteTrackRepository {
             sql.push_str(&format!(" OFFSET {}", offset));
         }
 
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
 
-        let tracks = stmt.query_map(params_refs.as_slice(), Self::row_to_track)?
+        let tracks = stmt
+            .query_map(params_refs.as_slice(), Self::row_to_track)?
             .filter_map(|r| r.ok())
             .collect();
 
         Ok(tracks)
     }
 
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+    async fn find_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         let mut stmt = conn.prepare("SELECT * FROM tracks WHERE id = ?")?;
 
@@ -115,22 +131,31 @@ impl TrackRepository for SqliteTrackRepository {
         Ok(track)
     }
 
-    async fn find_by_path(&self, path: &str) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+    async fn find_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         let mut stmt = conn.prepare("SELECT * FROM tracks WHERE file_path = ?")?;
 
-        let track = stmt
-            .query_row(params![path], Self::row_to_track)
-            .ok();
+        let track = stmt.query_row(params![path], Self::row_to_track).ok();
 
         Ok(track)
     }
 
-    async fn find_by_artist(&self, artist: &str) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+    async fn find_by_artist(
+        &self,
+        artist: &str,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-        let mut stmt = conn.prepare("SELECT * FROM tracks WHERE artist LIKE ? ORDER BY album, track_number")?;
+        let mut stmt =
+            conn.prepare("SELECT * FROM tracks WHERE artist LIKE ? ORDER BY album, track_number")?;
 
         let tracks = stmt
             .query_map(params![format!("%{}%", artist)], Self::row_to_track)?
@@ -140,10 +165,17 @@ impl TrackRepository for SqliteTrackRepository {
         Ok(tracks)
     }
 
-    async fn find_by_album(&self, album: &str) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+    async fn find_by_album(
+        &self,
+        album: &str,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-        let mut stmt = conn.prepare("SELECT * FROM tracks WHERE album LIKE ? ORDER BY disc_number, track_number")?;
+        let mut stmt = conn.prepare(
+            "SELECT * FROM tracks WHERE album LIKE ? ORDER BY disc_number, track_number",
+        )?;
 
         let tracks = stmt
             .query_map(params![format!("%{}%", album)], Self::row_to_track)?
@@ -153,12 +185,17 @@ impl TrackRepository for SqliteTrackRepository {
         Ok(tracks)
     }
 
-    async fn search(&self, query: &str) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+    async fn search(
+        &self,
+        query: &str,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         let pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
-            "SELECT * FROM tracks WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? LIMIT 50"
+            "SELECT * FROM tracks WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? LIMIT 50",
         )?;
 
         let tracks = stmt
@@ -170,7 +207,9 @@ impl TrackRepository for SqliteTrackRepository {
     }
 
     async fn insert(&self, track: &Track) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         conn.execute(
             r#"INSERT INTO tracks (
@@ -207,7 +246,9 @@ impl TrackRepository for SqliteTrackRepository {
     }
 
     async fn update(&self, track: &Track) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         conn.execute(
             r#"UPDATE tracks SET
@@ -244,37 +285,60 @@ impl TrackRepository for SqliteTrackRepository {
     }
 
     async fn delete(&self, id: Uuid) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         conn.execute("DELETE FROM tracks WHERE id = ?", params![id.to_string()])?;
         Ok(())
     }
 
-    async fn delete_many(&self, ids: Vec<Uuid>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+    async fn delete_many(
+        &self,
+        ids: Vec<Uuid>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         let ids_str: Vec<String> = ids.iter().map(|u| u.to_string()).collect();
         let placeholders = ids_str.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        conn.execute(&format!("DELETE FROM tracks WHERE id IN ({})", placeholders), rusqlite::params_from_iter(&ids_str))?;
+        conn.execute(
+            &format!("DELETE FROM tracks WHERE id IN ({})", placeholders),
+            rusqlite::params_from_iter(&ids_str),
+        )?;
         Ok(())
     }
 
     async fn count(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 
     async fn total_duration(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-        let duration: i64 = conn.query_row("SELECT COALESCE(SUM(duration_secs), 0) FROM tracks", [], |row| row.get(0))?;
+        let duration: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(duration_secs), 0) FROM tracks",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(duration as u64)
     }
 
-    async fn recent(&self, limit: u32) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+    async fn recent(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         let mut stmt = conn.prepare("SELECT * FROM tracks ORDER BY date_added DESC LIMIT ?")?;
         let tracks = stmt
@@ -284,10 +348,17 @@ impl TrackRepository for SqliteTrackRepository {
         Ok(tracks)
     }
 
-    async fn most_played(&self, limit: u32) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.db.connection()
+    async fn most_played(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-        let mut stmt = conn.prepare("SELECT * FROM tracks WHERE play_count > 0 ORDER BY play_count DESC LIMIT ?")?;
+        let mut stmt = conn.prepare(
+            "SELECT * FROM tracks WHERE play_count > 0 ORDER BY play_count DESC LIMIT ?",
+        )?;
         let tracks = stmt
             .query_map(params![limit], Self::row_to_track)?
             .filter_map(|r| r.ok())

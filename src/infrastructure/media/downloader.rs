@@ -51,12 +51,15 @@ impl Downloader {
         // Build command
         let mut cmd = Command::new("yt-dlp");
         cmd.args([
-            "-x",                      // Extract audio
-            "--audio-format", format.extension(),
-            "-o", &self.output_template,
+            "-x", // Extract audio
+            "--audio-format",
+            format.extension(),
+            "-o",
+            &self.output_template,
             "--no-playlist",
             "--newline",
-            "-f", "bestaudio/best",
+            "-f",
+            "bestaudio/best",
         ]);
 
         if let Some(ref ffmpeg) = self.ffmpeg_path {
@@ -69,10 +72,13 @@ impl Downloader {
 
         debug!(command = ?cmd, "Executing yt-dlp");
 
-        let mut child = cmd.spawn()
+        let mut child = cmd
+            .spawn()
             .map_err(|e| DownloaderError::ProcessError(e.to_string()))?;
 
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| DownloaderError::ProcessError("Failed to capture stdout".to_string()))?;
 
         let mut reader = BufReader::new(stdout).lines();
@@ -92,13 +98,13 @@ impl Downloader {
             }
         }
 
-        let status = child.wait().await
+        let status = child
+            .wait()
+            .await
             .map_err(|e| DownloaderError::ProcessError(e.to_string()))?;
 
         if !status.success() {
-            return Err(DownloaderError::DownloadFailed(
-                status.code().unwrap_or(-1)
-            ));
+            return Err(DownloaderError::DownloadFailed(status.code().unwrap_or(-1)));
         }
 
         info!(url = %url, "Download completed");
@@ -149,7 +155,8 @@ impl Downloader {
     fn parse_percentage(&self, line: &str) -> Option<f32> {
         // Extract percentage from lines like "[download]  45.2% of ~100.00MiB"
         if let Some(idx) = line.find('%') {
-            let start = line[..idx].rfind(|c: char| !c.is_ascii_digit() && c != '.')
+            let start = line[..idx]
+                .rfind(|c: char| !c.is_ascii_digit() && c != '.')
                 .map(|i| i + 1)
                 .unwrap_or(0);
             line[start..idx].parse().ok()

@@ -4,8 +4,8 @@
 
 use crate::AudioFormat;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::fmt;
+use std::path::PathBuf;
 
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,10 +138,7 @@ impl Default for LibrarySettings {
                 "*.wav".to_string(),
                 "*.aac".to_string(),
             ],
-            exclude_patterns: vec![
-                ".*".to_string(),
-                ".*/".to_string(),
-            ],
+            exclude_patterns: vec![".*".to_string(), ".*/".to_string()],
         }
     }
 }
@@ -282,8 +279,7 @@ impl Settings {
 
     /// Get the configuration file path
     fn config_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let config_dir = dirs::config_dir()
-            .ok_or("Failed to get config directory")?;
+        let config_dir = dirs::config_dir().ok_or("Failed to get config directory")?;
         Ok(config_dir.join("auralis").join("settings.toml"))
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! Tauri command handlers for playlist management.
 
-use crate::templates::render;
 use crate::domain::models::{Playlist, SmartPlaylistCriteria, Track};
+use crate::templates::render;
 use crate::templates::{PlaylistDetailTemplate, PlaylistsTemplate};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -57,7 +57,10 @@ pub async fn create_playlist(request: CreatePlaylistRequest) -> Result<Playlist,
 
 /// Update playlist metadata.
 #[tauri::command]
-pub async fn update_playlist(_id: Uuid, _request: UpdatePlaylistRequest) -> Result<Playlist, String> {
+pub async fn update_playlist(
+    _id: Uuid,
+    _request: UpdatePlaylistRequest,
+) -> Result<Playlist, String> {
     // TODO: load + mutate + persist
     Err("update_playlist not yet implemented".to_string())
 }
@@ -71,28 +74,40 @@ pub async fn delete_playlist(_id: Uuid) -> Result<(), String> {
 
 /// Add tracks to a playlist.
 #[tauri::command]
-pub async fn add_tracks_to_playlist(_playlist_id: Uuid, _track_ids: Vec<Uuid>) -> Result<Playlist, String> {
+pub async fn add_tracks_to_playlist(
+    _playlist_id: Uuid,
+    _track_ids: Vec<Uuid>,
+) -> Result<Playlist, String> {
     // TODO: load playlist, append tracks, persist
     Err("add_tracks_to_playlist not yet implemented".to_string())
 }
 
 /// Remove tracks from a playlist.
 #[tauri::command]
-pub async fn remove_tracks_from_playlist(_playlist_id: Uuid, _track_ids: Vec<Uuid>) -> Result<Playlist, String> {
+pub async fn remove_tracks_from_playlist(
+    _playlist_id: Uuid,
+    _track_ids: Vec<Uuid>,
+) -> Result<Playlist, String> {
     // TODO: load playlist, remove tracks, persist
     Err("remove_tracks_from_playlist not yet implemented".to_string())
 }
 
 /// Reorder tracks within a playlist.
 #[tauri::command]
-pub async fn reorder_playlist_tracks(_playlist_id: Uuid, _request: ReorderRequest) -> Result<Playlist, String> {
+pub async fn reorder_playlist_tracks(
+    _playlist_id: Uuid,
+    _request: ReorderRequest,
+) -> Result<Playlist, String> {
     // TODO: load playlist, reorder, persist
     Err("reorder_playlist_tracks not yet implemented".to_string())
 }
 
 /// Create a smart playlist from criteria.
 #[tauri::command]
-pub async fn create_smart_playlist(_name: String, _criteria: SmartPlaylistCriteria) -> Result<Playlist, String> {
+pub async fn create_smart_playlist(
+    _name: String,
+    _criteria: SmartPlaylistCriteria,
+) -> Result<Playlist, String> {
     // TODO: persist and resolve tracks
     Err("create_smart_playlist not yet implemented".to_string())
 }
