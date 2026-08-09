@@ -43,11 +43,7 @@ fn main() {
     info!("Initializing Tauri application");
 
     // Run the Tauri application
-    if let Err(e) = AuralisApp::run() {
-        error!(error = %e, "Failed to run application");
-        eprintln!("Failed to run application: {e}");
-        std::process::exit(1);
-    }
+    AuralisApp::run();
 
     info!("Auralis v2 shutting down gracefully");
 }

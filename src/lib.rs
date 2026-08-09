@@ -55,11 +55,12 @@ pub struct AuralisApp;
 
 impl AuralisApp {
     /// Run the Tauri application
-    pub fn run() -> tauri::Result<()> {
+    pub fn run() {
         info!("Running Auralis application");
 
-        let app = Self::build()?;
-        app.run(|_app, _event| {})
+        if let Err(e) = Self::build().and_then(|mut app| app.run(|_app, _event| {})) {
+            error!(error = %e, "Failed to run Auralis application");
+        }
     }
 
     /// Build the Tauri application with all configurations
