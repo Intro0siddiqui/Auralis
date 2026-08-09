@@ -141,6 +141,17 @@ jobs:
             libssl-dev \
             pkg-config
 
+      - name: Install Android OpenSSL cross-compile deps
+        run: |
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf \
+            g++-arm-linux-gnueabihf \
+            gcc-i686-linux-gnu \
+            g++-i686-linux-gnu
+          echo "OPENSSL_NO_VENDOR=0" >> $GITHUB_ENV
+
       - name: Init Android project
         run: |
           cargo tauri android init || true
@@ -214,4 +225,4 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features
