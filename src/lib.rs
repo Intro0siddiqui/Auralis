@@ -196,4 +196,3 @@ impl AuralisApp {
 pub fn run() {
     AuralisApp::run()
 }
-
