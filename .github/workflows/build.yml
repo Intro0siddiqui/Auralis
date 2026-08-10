@@ -41,11 +41,16 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Package
+        run: |
+          cd target/release
+          tar czf auralis-${{ github.ref_name }}-linux-x64.tar.gz auralis
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: auralis-linux-x64
-          path: target/release/auralis
+          name: release-linux-x64
+          path: target/release/auralis-*.tar.gz
 
   build-macos:
     runs-on: macos-latest
@@ -66,11 +71,21 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            ARCH="aarch64"
+          else
+            ARCH="x86_64"
+          fi
+          tar czf auralis-${{ github.ref_name }}-macos-${ARCH}.tar.gz auralis
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: auralis-macos-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/auralis
+          name: release-macos-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/auralis-*.tar.gz
 
   build-windows:
     runs-on: windows-latest
@@ -88,11 +103,16 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Package
+        run: |
+          cd target/release
+          7z a auralis-${{ github.ref_name }}-windows-x64.zip auralis.exe
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: auralis-windows-x64
-          path: target/release/auralis.exe
+          name: release-windows-x64
+          path: target/release/auralis-*.zip
 
   build-android:
     runs-on: ubuntu-22.04
@@ -102,7 +122,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -127,7 +147,7 @@ jobs:
           node-version: 20
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0.0" || npm install -g @tauri-apps/cli
+        run: cargo install tauri-cli --version "^2.0.0" 2>/dev/null || npm install -g @tauri-apps/cli
 
       - name: Install system deps
         run: |
@@ -142,24 +162,32 @@ jobs:
             pkg-config
 
       - name: Init Android project
-        run: |
-          cargo tauri android init || true
+        run: cargo tauri android init || true
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
       - name: Build APK
-        run: |
-          cargo tauri android build --apk
+        run: cargo tauri android build --apk
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
-      - name: Upload APK
+      - name: Find and upload APK
+        run: |
+          APK_PATH=$(find gen/android -name "*.apk" | head -1)
+          if [ -n "$APK_PATH" ]; then
+            cp "$APK_PATH" auralis-${{ github.ref_name }}-android-universal.apk
+          else
+            echo "No APK found!"
+            exit 1
+          fi
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: auralis-android
-          path: gen/android/app/build/outputs/apk/**/*.apk
+          name: release-android
+          path: auralis-*-android-*.apk
 
   test:
     runs-on: ubuntu-22.04
@@ -215,3 +243,25 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features
+
+  release:
+    needs: [build-linux, build-macos, build-windows, build-android, test, lint]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: release-*
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/**/*/*
+          generate_release_notes: true
+          fail_on_unmatched_files: false
