@@ -204,18 +204,19 @@ jobs:
           with open("app/build.gradle.kts", "r") as f:
               content = f.read()
 
-          # Add import at top if not present
-          if "import java.io.FileInputStream" not in content:
-              content = "import java.io.FileInputStream\n" + content
+          # Add imports at top if not present
+          for imp in ["import java.io.FileInputStream", "import java.util.Properties"]:
+              if imp not in content:
+                  content = imp + "\n" + content
 
           # Add signingConfigs block before buildTypes
           signing_block = """
           signingConfigs {
               create("release") {
                   val keystorePropertiesFile = rootProject.file("keystore.properties")
-                  val keystoreProperties = java.util.Properties()
+                  val keystoreProperties = Properties()
                   if (keystorePropertiesFile.exists()) {
-                      keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+                      keystoreProperties.load(FileInputStream(keystorePropertiesFile))
                   }
                   keyAlias = keystoreProperties["keyAlias"] as String
                   keyPassword = keystoreProperties["password"] as String
