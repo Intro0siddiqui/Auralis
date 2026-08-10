@@ -167,6 +167,49 @@ jobs:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
+      - name: Generate keystore & configure signing
+        working-directory: gen/android
+        run: |
+          keytool -genkeypair -v \
+            -keystore $RUNNER_TEMP/auralis-release.jks \
+            -alias auralis \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass password -keypass password \
+            -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
+
+          cat > keystore.properties <<EOF
+          password=password
+          keyAlias=auralis
+          storeFile=$RUNNER_TEMP/auralis-release.jks
+          EOF
+
+          # Patch build.gradle.kts to add signing config
+          BUILD_GRADLE="app/build.gradle.kts"
+          cp "$BUILD_GRADLE" "$BUILD_GRADLE.bak"
+
+          # Add import
+          sed -i '1i import java.io.FileInputStream' "$BUILD_GRADLE"
+
+          # Add signingConfigs before buildTypes
+          sed -i '/^buildTypes {/i\
+          signingConfigs {\
+              create("release") {\
+                  val keystorePropertiesFile = rootProject.file("keystore.properties")\
+                  val keystoreProperties = java.util.Properties()\
+                  if (keystorePropertiesFile.exists()) {\
+                      keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))\
+                  }\
+                  keyAlias = keystoreProperties["keyAlias"] as String\
+                  keyPassword = keystoreProperties["password"] as String\
+                  storeFile = file(keystoreProperties["storeFile"] as String)\
+                  storePassword = keystoreProperties["password"] as String\
+              }\
+          }\
+          ' "$BUILD_GRADLE"
+
+          # Add signingConfig to release build type
+          sed -i '/getByName("release") {/a\        signingConfig = signingConfigs.getByName("release")' "$BUILD_GRADLE"
+
       - name: Build APK
         run: cargo tauri android build --apk
         env:
@@ -175,9 +218,9 @@ jobs:
 
       - name: Find and upload APK
         run: |
-          APK_PATH=$(find gen/android -name "*.apk" | head -1)
+          APK_PATH=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
           if [ -n "$APK_PATH" ]; then
-            cp "$APK_PATH" auralis-${{ github.ref_name }}-android-universal.apk
+            cp "$APK_PATH" auralis-${{ github.ref_name }}-android.apk
           else
             echo "No APK found!"
             exit 1
@@ -187,7 +230,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-android
-          path: auralis-*-android-*.apk
+          path: auralis-*-android.apk
 
   test:
     runs-on: ubuntu-22.04
