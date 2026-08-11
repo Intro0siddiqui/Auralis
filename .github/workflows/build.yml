@@ -182,8 +182,7 @@ jobs:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
-      - name: Generate keystore & configure signing
-        working-directory: gen/android
+      - name: Generate keystore
         run: |
           keytool -genkeypair -v \
             -keystore $RUNNER_TEMP/auralis-release.jks \
@@ -192,70 +191,35 @@ jobs:
             -storepass password -keypass password \
             -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
 
-          cat > keystore.properties <<EOF
-          password=password
-          keyAlias=auralis
-          storeFile=$RUNNER_TEMP/auralis-release.jks
-          EOF
-
-          python3 - <<'PYEOF'
-          import re
-
-          with open("app/build.gradle.kts", "r") as f:
-              content = f.read()
-
-          # Add imports at top if not present
-          for imp in ["import java.io.FileInputStream", "import java.util.Properties"]:
-              if imp not in content:
-                  content = imp + "\n" + content
-
-          # Add signingConfigs block before buildTypes
-          signing_block = """
-          signingConfigs {
-              create("release") {
-                  val keystorePropertiesFile = rootProject.file("keystore.properties")
-                  val keystoreProperties = Properties()
-                  if (keystorePropertiesFile.exists()) {
-                      keystoreProperties.load(FileInputStream(keystorePropertiesFile))
-                  }
-                  keyAlias = keystoreProperties["keyAlias"] as String
-                  keyPassword = keystoreProperties["password"] as String
-                  storeFile = file(keystoreProperties["storeFile"] as String)
-                  storePassword = keystoreProperties["password"] as String
-              }
-          }
-          """
-
-          content = content.replace("buildTypes {", signing_block + "buildTypes {")
-
-          # Add signingConfig to release build type
-          content = re.sub(
-              r'(getByName("release") \{[^}]*?)(\})',
-              r'\1        signingConfig = signingConfigs.getByName("release")\n    \2',
-              content
-          )
-
-          with open("app/build.gradle.kts", "w") as f:
-              f.write(content)
-
-          print("Patched build.gradle.kts successfully")
-          PYEOF
-
       - name: Build APK
         run: cargo tauri android build --apk
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
-      - name: Find and upload APK
+      - name: Sign APK
         run: |
           APK_PATH=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
-          if [ -n "$APK_PATH" ]; then
-            cp "$APK_PATH" auralis-${{ github.ref_name }}-android.apk
-          else
+          if [ -z "$APK_PATH" ]; then
             echo "No APK found!"
             exit 1
           fi
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "apksigner not found!"
+            exit 1
+          fi
+          "$APKSIGNER" sign \
+            --ks "$RUNNER_TEMP/auralis-release.jks" \
+            --ks-key-alias auralis \
+            --ks-pass pass:password \
+            --key-pass pass:password \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "auralis-${{ github.ref_name }}-android.apk" \
+            "$APK_PATH"
+          "$APKSIGNER" verify --verbose "auralis-${{ github.ref_name }}-android.apk"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
