@@ -6,8 +6,6 @@ use crate::domain::models::{PairedDevice, PairingInfo, SyncStatus};
 use crate::domain::repositories::{SettingsRepository, SyncRepository, TrackRepository};
 use crate::domain::services::SyncService;
 use crate::infrastructure::database::Database;
-use crate::templates::render;
-use crate::templates::SyncTemplate;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
@@ -91,12 +89,4 @@ pub async fn sync_with_device(
 #[tauri::command]
 pub async fn get_sync_status(service: State<'_, SyncService>) -> Result<SyncStatus, String> {
     Ok(service.get_sync_status().await)
-}
-
-/// Render the sync / devices page.
-#[tauri::command]
-pub async fn render_sync(service: State<'_, SyncService>) -> Result<String, String> {
-    let devices = service.get_paired_devices().await;
-    let tmpl = SyncTemplate { devices: &devices };
-    render(&tmpl).map_err(|e| e.to_string())
 }

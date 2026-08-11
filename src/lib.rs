@@ -118,7 +118,6 @@ impl AuralisApp {
                 commands::library::update_track_metadata,
                 commands::library::delete_tracks,
                 commands::library::scan_library_paths,
-                commands::library::search_tracks,
                 // Playback commands
                 commands::playback::play,
                 commands::playback::pause,
@@ -153,8 +152,6 @@ impl AuralisApp {
                 commands::playlists::remove_tracks_from_playlist,
                 commands::playlists::reorder_playlist_tracks,
                 commands::playlists::create_smart_playlist,
-                commands::playlists::render_playlists,
-                commands::playlists::render_playlist_detail,
                 // Sync commands
                 commands::sync::get_paired_devices,
                 commands::sync::start_pairing,
@@ -162,11 +159,9 @@ impl AuralisApp {
                 commands::sync::unpair_device,
                 commands::sync::sync_with_device,
                 commands::sync::get_sync_status,
-                commands::sync::render_sync,
                 // Settings commands
                 commands::settings::get_settings,
                 commands::settings::update_settings,
-                commands::settings::render_settings,
                 // Template commands
                 commands::templates::render_template,
                 commands::templates::render_partial,

@@ -4,8 +4,6 @@
 
 use crate::domain::models::{AudioFormat, DownloadProgress};
 use crate::infrastructure::media::downloader::Downloader;
-use crate::templates::render;
-use crate::templates::{DownloadItemPartial, DownloadsTemplate};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tracing::{error, info};
@@ -132,23 +130,4 @@ pub async fn list_downloads(
     info!("List downloads requested");
 
     Ok(downloader.list_active().await)
-}
-
-/// Render the downloads page as HTML.
-#[tauri::command]
-pub async fn render_downloads() -> Result<String, String> {
-    let downloads: Vec<DownloadProgress> = Vec::new();
-    let tmpl = DownloadsTemplate {
-        downloads: &downloads,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
-}
-
-/// Render a single download row (used for HTMX polling updates).
-#[tauri::command]
-pub async fn render_download_item(download: DownloadProgress) -> Result<String, String> {
-    let tmpl = DownloadItemPartial {
-        download: &download,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
 }

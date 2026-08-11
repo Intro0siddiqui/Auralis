@@ -6,8 +6,6 @@ use crate::domain::models::Settings;
 use crate::domain::repositories::SettingsRepository;
 use crate::domain::services::SettingsService;
 use crate::infrastructure::database::Database;
-use crate::templates::render;
-use crate::templates::SettingsTemplate;
 use std::sync::Arc;
 use tauri::State;
 
@@ -53,20 +51,4 @@ pub async fn update_settings(
 
     tracing::info!("Settings updated");
     Ok(settings)
-}
-
-/// Render the settings page as HTML.
-#[tauri::command]
-pub async fn render_settings(db: State<'_, Database>) -> Result<String, String> {
-    let repo = settings_repo(&db);
-
-    let settings = repo.get_settings().await.map_err(|e| {
-        tracing::error!(error = %e, "Failed to fetch settings for render");
-        format!("Failed to fetch settings: {e}")
-    })?;
-
-    let tmpl = SettingsTemplate {
-        settings: &settings,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
 }

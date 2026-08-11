@@ -7,8 +7,6 @@ use crate::domain::models::{ScanSummary, Track, TrackFilter, TrackMetadataUpdate
 use crate::domain::repositories::TrackRepository;
 use crate::infrastructure::database::Database;
 use crate::infrastructure::filesystem::scanner::DirectoryScanner;
-use crate::templates::render;
-use crate::templates::{LibraryTemplate, SearchResultsTemplate, TrackListPartial, TrackRowPartial};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
@@ -163,82 +161,4 @@ pub async fn scan_library_paths(
             tracing::error!(error = %e, "Scan failed");
             format!("Scan failed: {e}")
         })
-}
-
-/// Search tracks by free-text query (returns HTML fragment for HTMX).
-#[tauri::command]
-pub async fn search_tracks(db: State<'_, Database>, query: SearchQuery) -> Result<String, String> {
-    let repo = track_repo(&db);
-
-    let results = repo.search(&query.q).await.map_err(|e| {
-        tracing::error!(error = %e, "Search failed");
-        format!("Search failed: {e}")
-    })?;
-
-    let tmpl = SearchResultsTemplate {
-        tracks: &results,
-        query: &query.q,
-        show_album: true,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
-}
-
-/// Render the full library page as an HTML fragment (HTMX swap).
-#[tauri::command]
-pub async fn render_library(
-    db: State<'_, Database>,
-    filter: Option<TrackFilter>,
-) -> Result<String, String> {
-    let filter = filter.unwrap_or_default();
-    let repo = track_repo(&db);
-
-    let tracks = repo.find_all(filter.clone()).await.map_err(|e| {
-        tracing::error!(error = %e, "Failed to fetch tracks for render");
-        format!("Failed to fetch tracks: {e}")
-    })?;
-
-    let total_count = tracks.len();
-
-    let tmpl = LibraryTemplate {
-        tracks: &tracks,
-        filter: &filter,
-        total_count,
-        show_album: true,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
-}
-
-/// Render a track list as a partial (used for queue/search swaps).
-#[tauri::command]
-pub async fn render_track_list(
-    db: State<'_, Database>,
-    track_ids: Vec<Uuid>,
-    show_album: bool,
-) -> Result<String, String> {
-    let repo = track_repo(&db);
-
-    let mut tracks = Vec::new();
-    for id in track_ids {
-        match repo.find_by_id(id).await {
-            Ok(Some(track)) => tracks.push(track),
-            Ok(None) => tracing::warn!(id = %id, "Track not found for render"),
-            Err(e) => tracing::error!(id = %id, error = %e, "Failed to fetch track for render"),
-        }
-    }
-
-    let tmpl = TrackListPartial {
-        tracks: &tracks,
-        show_album,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
-}
-
-/// Render a single track row.
-#[tauri::command]
-pub async fn render_track_row(track: Track, show_album: bool) -> Result<String, String> {
-    let tmpl = TrackRowPartial {
-        track: &track,
-        show_album,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
 }

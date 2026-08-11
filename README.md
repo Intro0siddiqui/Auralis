@@ -2,7 +2,7 @@
 
 A lightweight, offline-first music player with integrated media downloading and P2P synchronization — rewritten from scratch in **Rust + Tauri + HTMX** to replace the original Kotlin/Compose Multiplatform application.
 
-> **Status: Early prototype.** Core architecture is in place (domain-driven design, SQLite schema, Tauri app lifecycle), but most command handlers are stubs. See the [Missing Features](#missing--incomplete-features) section below for details.
+> **Status: Active Development.** Core architecture is in place and most features are implemented (database, audio playback, downloads, playlists, settings, P2P networking). Sync transfers are still simulated.
 
 ---
 
@@ -25,49 +25,14 @@ The rewrite trades the JVM's startup cost and Compose's runtime overhead for a t
 
 | Feature | Status | Notes |
 | :--- | :--- | :--- |
-| **Music Library** | Partial | DB schema & scanner exist; command handlers return empty results |
-| **Audio Playback** | Partial | `rodio` integrated; no tracks actually loaded or played yet |
-| **Media Downloading** | Partial | `yt-dlp` infra exists; commands are stubs pending wiring |
-| **Playlist Management** | Partial | Models and repo traits exist; CRUD commands return stubs |
-| **P2P Sync (QR Pairing)** | Partial | QR code + PIN generation works; libp2p networking is stubbed |
-| **Settings** | Partial | DB persistence layer exists; UI wiring pending |
-| **Smart Playlists** | Not started | Criteria model exists; resolution logic missing |
-
----
-
-## Missing / Incomplete Features
-
-### Critical Gaps
-
-1. **P2P Networking (libp2p)** — `infrastructure/network.rs` contains stubs only. mDNS discovery, gossipsub broadcasts, and request-response transfers are not implemented. The `sync_service` uses simulated progress instead of real transfers.
-
-2. **Playback Engine** — `infrastructure/media/player.rs` exists but `commands/playback.rs` returns `Err("play not yet implemented")` for all actions. The `AudioPlayer` struct is not wired to the domain services.
-
-3. **Download Pipeline** — `infrastructure/media/downloader.rs` exists but `commands/downloads.rs` never invokes `yt-dlp`. Downloads return a `Pending` status and never execute.
-
-4. **Library Scanner** — `infrastructure/filesystem/scanner.rs` exists but `commands/library.rs` returns empty track lists. File system enumeration and metadata extraction are not wired.
-
-5. **Playlist Operations** — Most playlist commands (update, add/remove tracks, reorder, smart playlists) return `Err("not yet implemented")`.
-
-### Build & Infrastructure Debt
-
-6. **Unused Dependencies** — `reqwest` is imported but never used. `libp2p` is imported but only stubs exist.
-
-7. **Bloated Features** — `tokio` uses `features = ["full"]` (should use `["rt-multi-thread", "macros", "sync", "process", "io-util", "time"]`). `rodio` uses default features (should trim to specific codecs). `image` uses default features (should use `["png"]` only).
-
-8. **tauri.conf.json** — Has `"targets": "all"` causing duplicate builds. App identifier is `com.auralis.app` (should be `com.auralis.v2`).
-
-9. **Android CI** — Builds unnecessary ABIs (armv7, i686). Has redundant `cargo tauri android init` step that can cause build conflicts.
-
-### Project Structure Gaps
-
-10. **Missing `requirements/` directory** — No feature specification documents.
-
-11. **Missing Android icons** — Only SVG assets exist; no PNG mipmaps or proper Android icon structure.
-
-12. **Missing CHANGELOG.md** — No changelog for v2.0.0 release.
-
-13. **Missing test coverage** — `scripts/test.sh` exists but the project has very few tests. Most command handlers have no corresponding unit or integration tests.
+| **Music Library** | Implemented | SQLite-backed; scanner extracts metadata via lofty |
+| **Audio Playback** | Implemented | rodio with queue, shuffle, repeat, seek |
+| **Media Downloading** | Implemented | yt-dlp subprocess with progress tracking |
+| **Playlist Management** | Implemented | Full CRUD with SQLite persistence |
+| **P2P Networking** | Implemented | libp2p with mDNS, gossipsub, request-response |
+| **Settings** | Implemented | SQLite-backed load/save |
+| **P2P Sync Transfers** | Simulated | DB persistence works; actual transfer uses simulated progress |
+| **Smart Playlists** | Partial | Criteria model exists; built-in "Recently Added" / "Most Playlists" not pre-defined |
 
 ---
 
@@ -80,50 +45,58 @@ auralis-v2/
 ├── tauri.conf.json         # Tauri v2 configuration
 ├── capabilities/           # Tauri permission grants
 │   └── default.json
-├── ui/                     # Frontend (HTMX + vanilla HTML/CSS/JS)
-│   ├── index.html
-│   ├── downloads.html
-│   ├── settings.html
-│   ├── css/auralis.css
-│   ├── js/auralis.js
-│   ├── partials/           # HTMX partials for dynamic swaps
-│   └── icons/              # App icons (SVG only — PNG missing)
-├── templates/              # Askama HTML templates (compiled in)
-│   ├── layout.html
-│   ├── library.html
-│   ├── albums.html
-│   ├── artists.html
-│   ├── downloads.html
-│   ├── playlists.html
-│   ├── playlist_detail.html
-│   ├── sync.html
-│   ├── settings.html
-│   └── partials/
+├── ui/                     # Soft Glass Audio frontend (HTMX + vanilla HTML/CSS)
+│   ├── index.html          # App shell (sidebar + content + player bar + mobile nav)
+│   ├── styles/
+│   │   ├── tokens.css      # Design variables (glass/neu shadows, blur, radii)
+│   │   ├── base.css        # CSS reset + app-shell layout grid
+│   │   ├── components.css  # Glass, Neu, Buttons, Cards, Track rows
+│   │   └── responsive.css  # Mobile/tablet/desktop breakpoints
+│   ├── js/
+│   │   ├── bridge.js       # Tauri event listeners + player bar updates
+│   │   └── player.js       # Progress/seek logic + keyboard shortcuts
+│   ├── partials/           # HTMX fragments served by the Rust backend
+│   │   ├── nav.html
+│   │   ├── home.html
+│   │   ├── library.html
+│   │   ├── albums.html
+│   │   ├── artists.html
+│   │   ├── playlists.html
+│   │   ├── player-full.html
+│   │   ├── sync.html
+│   │   └── settings.html
+│   └── icons/
+│       ├── auralis.svg
+│       └── plus.svg
 ├── src/
 │   ├── main.rs             # Binary entry point
 │   ├── lib.rs              # Library root + Tauri builder
 │   ├── domain/             # Pure business logic (no I/O)
-│   │   ├── models/
+│   │   ├── models/         # Track, Album, Artist, Playlist, Settings, Sync, Download
 │   │   ├── repositories/   # Repository traits
-│   │   └── services/       # Service traits
+│   │   └── services/       # Service implementations
 │   ├── infrastructure/     # External integrations
 │   │   ├── database/       # SQLite + rusqlite
 │   │   ├── filesystem/     # Track scanner + metadata
-│   │   ├── media/          # Audio player (rodio) + downloader (yt-dlp)
-│   │   └── network.rs      # P2P discovery (libp2p) — stubs only
-│   ├── commands/           # Tauri command handlers (mostly stubs)
+│   │   ├── media/          # AudioPlayer (rodio) + Downloader (yt-dlp)
+│   │   └── network.rs      # libp2p: mDNS, gossipsub, request-response
+│   ├── commands/           # Tauri command handlers
 │   │   ├── library.rs
 │   │   ├── playback.rs
 │   │   ├── downloads.rs
 │   │   ├── playlists.rs
 │   │   ├── sync.rs
 │   │   ├── settings.rs
-│   │   └── templates.rs
-│   └── templates/          # Askama wrapper structs
-└── scripts/
-    ├── build.sh
-    ├── dev.sh
-    └── test.sh
+│   │   └── templates.rs    # Serves ui/partials/ as HTMX responses
+│   └── templates/mod.rs    # Reads ui/partials/ and caches them
+├── icons/                  # App icons (32x32.png, icon.ico)
+├── gen/                    # Generated schemas + Android project
+├── scripts/
+│   ├── build.sh
+│   ├── dev.sh
+│   └── test.sh
+└── .github/workflows/
+    └── build.yml           # CI/CD: Linux, macOS, Windows, Android
 ```
 
 The architecture is **Domain-Driven**: the `domain` layer is pure Rust types and trait definitions with no infrastructure dependencies. The `infrastructure` layer provides concrete implementations (SQLite, filesystem, etc.) that satisfy the domain's traits. The `commands` layer exposes Tauri-callable functions that wire everything together.
@@ -168,27 +141,31 @@ cargo tauri dev
 
 ## Frontend architecture
 
-The UI is built on **HTMX 2.0** — no React, no Vue, no client-side framework bloat. Every interaction is an HTTP-style request to a Tauri command, which returns an HTML fragment that HTMX swaps into the DOM.
+The UI is built on **HTMX 2.0** — no React, no Vue, no client-side framework bloat. The design system is **Soft Glass Audio** — a hybrid of glassmorphism (`.glass`, `.glass-weak`, `.glass-strong` with `backdrop-filter: blur()`) and neumorphism (`.neu`, `.neu-inset`, `.neu-glass` with dual box-shadows).
 
 ### Why HTMX over Compose?
 - **Zero JavaScript framework runtime** — the browser only loads ~30KB of HTMX
-- **Server-rendered** — the Rust backend renders HTML directly using Askama templates
+- **Server-driven** — the Rust backend serves static HTML partials from `ui/partials/`
 - **Progressive enhancement** — the app degrades gracefully if JavaScript is disabled
 - **Same codebase for desktop and mobile** — no separate Compose-for-Android layer
 
 ### How navigation works
 ```html
-<!-- A link with hx-get tells HTMX to fetch HTML and swap it into #main -->
-<a href="/library.html" hx-get="/api/templates/library" hx-push-url="true">Library</a>
+<!-- index.html loads content via HTMX on page load -->
+<main id="content" class="content"
+      hx-get="/partials/home"
+      hx-trigger="load"
+      hx-swap="innerHTML">
+</main>
 ```
 
-The Tauri command `commands::templates::render_template` returns the Askama-rendered HTML for the requested page. Smaller updates (now-playing, download progress) are polled every 1–2 seconds via partials.
+The Tauri command `commands::templates::render_template` reads the corresponding HTML file from `ui/partials/` and returns it as-is for HTMX to swap into the DOM. Smaller updates (now-playing, download progress) are handled via Tauri events in `js/bridge.js`.
 
 ---
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for detailed implementation guidelines and the roadmap for completing missing features.
+See [AGENTS.md](AGENTS.md) for detailed implementation guidelines and the roadmap.
 
 ---
 

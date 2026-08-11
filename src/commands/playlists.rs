@@ -7,8 +7,6 @@ use crate::domain::models::{
 };
 use crate::domain::repositories::{PlaylistRepository, TrackRepository};
 use crate::infrastructure::database::Database;
-use crate::templates::render;
-use crate::templates::{PlaylistDetailTemplate, PlaylistsTemplate};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
@@ -326,46 +324,4 @@ pub async fn create_smart_playlist(
 
     tracing::info!(id = %playlist.id, name = %playlist.name, "Smart playlist created");
     Ok(playlist)
-}
-
-/// Render the playlists index page.
-#[tauri::command]
-pub async fn render_playlists(db: State<'_, Database>) -> Result<String, String> {
-    let repo = playlist_repo(&db);
-
-    let playlists = repo.find_all().await.map_err(|e| {
-        tracing::error!(error = %e, "Failed to fetch playlists for render");
-        format!("Failed to fetch playlists: {e}")
-    })?;
-
-    let tmpl = PlaylistsTemplate {
-        playlists: &playlists,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
-}
-
-/// Render a single playlist detail page.
-#[tauri::command]
-pub async fn render_playlist_detail(db: State<'_, Database>, id: Uuid) -> Result<String, String> {
-    let repo = playlist_repo(&db);
-
-    let playlist = repo.find_by_id(id).await.map_err(|e| {
-        tracing::error!(error = %e, "Failed to fetch playlist for render");
-        format!("Failed to fetch playlist: {e}")
-    })?;
-
-    let (playlist, tracks) = match playlist {
-        Some(playlist) => {
-            let tracks = tracks_for_playlist(&track_repo(&db), &playlist.track_ids).await;
-            (playlist, tracks)
-        }
-        None => (Playlist::new("Unknown".to_string()), Vec::new()),
-    };
-
-    let tmpl = PlaylistDetailTemplate {
-        playlist: &playlist,
-        tracks: &tracks,
-        show_album: true,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
 }

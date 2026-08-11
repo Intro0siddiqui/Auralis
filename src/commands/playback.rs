@@ -5,8 +5,6 @@
 use crate::domain::models::{NowPlaying, RepeatMode, Track};
 use crate::infrastructure::database::Database;
 use crate::infrastructure::media::AudioPlayer;
-use crate::templates::render;
-use crate::templates::{NowPlayingPartial, QueuePartial};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -304,31 +302,6 @@ pub async fn clear_queue(player: State<'_, AudioPlayer>) -> Result<PlaybackQueue
         tracks: Vec::new(),
         current_index: None,
     })
-}
-
-/// Render the now-playing bar as an HTML fragment.
-#[tauri::command]
-pub async fn render_now_playing(player: State<'_, AudioPlayer>) -> Result<String, String> {
-    let now_playing = match player.get_current_track().await {
-        Some(track) => Some(build_now_playing(&player, &track).await),
-        None => None,
-    };
-    let tmpl = NowPlayingPartial {
-        now_playing: &now_playing,
-    };
-    render(&tmpl).map_err(|e| e.to_string())
-}
-
-/// Render the queue as an HTML fragment.
-#[tauri::command]
-pub async fn render_queue(player: State<'_, AudioPlayer>) -> Result<String, String> {
-    let tracks = player.get_queue().await;
-    let current_index = player.get_current_index().await;
-    let tmpl = QueuePartial {
-        queue: &tracks,
-        current_index: current_index.as_ref(),
-    };
-    render(&tmpl).map_err(|e| e.to_string())
 }
 
 // ============================================================================

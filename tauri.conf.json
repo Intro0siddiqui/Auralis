@@ -49,7 +49,7 @@
     "copyright": "Copyright \u00a9 2026 Auralis Team",
     "homepage": "https://github.com/Intro0siddiqui/Auralis",
     "resources": [
-      "templates/*"
+      "ui/partials/*"
     ],
     "externalBin": [],
     "windows": {

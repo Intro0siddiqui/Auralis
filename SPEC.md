@@ -70,26 +70,36 @@ Rationale: Clean Architecture separates concerns into distinct layers—Presenta
 
 ```toml
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+serde_yaml = "0.9"
+toml = "0.8"
+rusqlite = { version = "0.31", features = ["bundled", "chrono", "uuid"] }
 tokio = { version = "1", features = ["full"] }
-rodio = "0.19"
-lofty = "0.21"          # Audio metadata parsing (ID3, Vorbis comments)
-uuid = { version = "1", features = ["v4"] }
-libp2p = { version = "0.54", features = ["mdns", "tcp", "quic", "serde"] }
-hmac = "0.12"           # For sync authentication
-sha2 = "0.10"           # For sync authentication
-base64 = "0.22"         # For QR code encoding
-image = "0.25"          # QR code generation
-qrcode = "0.14"         # QR code rendering
-tracing = "0.1"         # Structured logging
-tracing-subscriber = "0.3"
-thiserror = "2"
-dirs = "5"              # Platform-specific directories
-glob = "0.3"            # File pattern matching
+rodio = { version = "0.17", features = ["symphonia-aac"] }
+lofty = "0.21"
+uuid = { version = "1", features = ["v4", "serde"] }
+libp2p = { version = "0.54", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio"] }
+base64 = "0.22"
+image = "0.25"
+qrcode = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+hostname = "0.4"
+rand = "0.8"
+glob = "0.3"
+futures = "0.3"
+async-trait = "0.1"
 ```
 
 ---
@@ -349,23 +359,29 @@ struct Playlist {
 }
 ```
 
-### SyncState
+### PairedDevice
 ```rust
-struct SyncState {
-    device_id: Uuid,
-    device_name: String,
-    last_sync: DateTime<Utc>,
-    sync_version: u64,
-    pending_changes: Vec<SyncChange>,
-}
-
-struct SyncChange {
+struct PairedDevice {
     id: Uuid,
-    change_type: ChangeType,
-    entity_type: EntityType,
-    entity_id: Uuid,
-    payload: serde_json::Value,
-    timestamp: DateTime<Utc>,
+    name: String,
+    device_type: DeviceType,
+    ip_address: Option<String>,
+    paired_at: DateTime<Utc>,
+    last_sync: Option<DateTime<Utc>>,
+    status: DeviceStatus,
+}
+```
+
+### SyncStatus
+```rust
+struct SyncStatus {
+    enabled: bool,
+    is_syncing: bool,
+    connected_devices: u32,
+    pending_changes: u32,
+    last_sync: Option<DateTime<Utc>>,
+    progress: f32,
+    error: Option<String>,
 }
 ```
 
@@ -386,8 +402,8 @@ struct SyncChange {
 - `pause() -> Result<()>`
 - `resume() -> Result<()>`
 - `stop() -> Result<()>`
-- `next() -> Result<Option<NowPlaying>>`
-- `previous() -> Result<Option<NowPlaying>>`
+- `next_track() -> Result<Option<NowPlaying>>`
+- `previous_track() -> Result<Option<NowPlaying>>`
 - `seek(position_secs: u32) -> Result<()>`
 - `set_volume(level: f32) -> Result<()>`  // 0.0 to 1.0
 - `set_repeat_mode(mode: RepeatMode) -> Result<()>`
