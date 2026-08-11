@@ -1,148 +1,53 @@
-//! HTML Template Engine
+//! HTML Partial Serves
 //!
-//! Renders server-side HTML fragments consumed by HTMX. Templates are
-//! embedded at compile time so the binary is self-contained.
+//! Serves the new Soft Glass Audio HTMX partials from the ui/partials/ directory.
+//! These are static HTML fragments with glassmorphism + neumorphism styling.
 
-use crate::domain::models::{
-    Album, Artist, DownloadProgress, NowPlaying, PairedDevice, Playlist, Settings, Track,
-    TrackFilter,
-};
-use askama::Template;
-use serde::Serialize;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
-/// Layout-level template shared across pages
-#[derive(Template)]
-#[template(path = "layout.html")]
-pub struct LayoutTemplate<'a> {
-    pub title: &'a str,
-    pub active_page: &'a str,
-    pub content: String,
-    pub now_playing: Option<NowPlaying>,
-    pub settings: Option<Settings>,
+static PARTIALS_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+fn partials_dir() -> &'static PathBuf {
+    PARTIALS_DIR.get_or_init(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("ui")
+            .join("partials")
+    })
 }
 
-/// Library page
-#[derive(Template)]
-#[template(path = "library.html")]
-pub struct LibraryTemplate<'a> {
-    pub tracks: &'a [Track],
-    pub filter: &'a TrackFilter,
-    pub total_count: usize,
-    pub show_album: bool,
+fn load_partial(name: &str) -> Option<String> {
+    let path = partials_dir().join(format!("{name}.html"));
+    std::fs::read_to_string(path).ok()
 }
 
-/// Album grid view
-#[derive(Template)]
-#[template(path = "albums.html")]
-pub struct AlbumsTemplate<'a> {
-    pub albums: &'a [Album],
+static PARTIAL_CACHE: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+fn partial_cache() -> &'static HashMap<String, String> {
+    PARTIAL_CACHE.get_or_init(|| {
+        let mut map = HashMap::new();
+        let dir = partials_dir();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("html") {
+                    if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            map.insert(name.to_string(), content);
+                        }
+                    }
+                }
+            }
+        }
+        map
+    })
 }
 
-/// Artists list
-#[derive(Template)]
-#[template(path = "artists.html")]
-pub struct ArtistsTemplate<'a> {
-    pub artists: &'a [Artist],
+pub fn get_partial(name: &str) -> Option<String> {
+    partial_cache().get(name).cloned()
 }
 
-/// Downloads page
-#[derive(Template)]
-#[template(path = "downloads.html")]
-pub struct DownloadsTemplate<'a> {
-    pub downloads: &'a [DownloadProgress],
-}
-
-/// Playlists page
-#[derive(Template)]
-#[template(path = "playlists.html")]
-pub struct PlaylistsTemplate<'a> {
-    pub playlists: &'a [Playlist],
-}
-
-/// Single playlist detail
-#[derive(Template)]
-#[template(path = "playlist_detail.html")]
-pub struct PlaylistDetailTemplate<'a> {
-    pub playlist: &'a Playlist,
-    pub tracks: &'a [Track],
-    pub show_album: bool,
-}
-
-/// Sync / devices page
-#[derive(Template)]
-#[template(path = "sync.html")]
-pub struct SyncTemplate<'a> {
-    pub devices: &'a [PairedDevice],
-}
-
-/// Settings page
-#[derive(Template)]
-#[template(path = "settings.html")]
-pub struct SettingsTemplate<'a> {
-    pub settings: &'a Settings,
-}
-
-/// Search results partial
-#[derive(Template)]
-#[template(path = "partials/search_results.html")]
-pub struct SearchResultsTemplate<'a> {
-    pub tracks: &'a [Track],
-    pub query: &'a str,
-    pub show_album: bool,
-}
-
-/// Track list partial (used for HTMX swaps)
-#[derive(Template)]
-#[template(path = "partials/track_list.html")]
-pub struct TrackListPartial<'a> {
-    pub tracks: &'a [Track],
-    pub show_album: bool,
-}
-
-/// Single track row partial
-#[derive(Template)]
-#[template(path = "partials/track_row.html")]
-pub struct TrackRowPartial<'a> {
-    pub track: &'a Track,
-    pub show_album: bool,
-}
-
-/// Now playing bar partial
-#[derive(Template)]
-#[template(path = "partials/now_playing.html")]
-pub struct NowPlayingPartial<'a> {
-    pub now_playing: &'a Option<NowPlaying>,
-}
-
-/// Queue partial
-#[derive(Template)]
-#[template(path = "partials/queue.html")]
-pub struct QueuePartial<'a> {
-    pub queue: &'a [Track],
-    pub current_index: Option<&'a usize>,
-}
-
-/// Download item partial
-#[derive(Template)]
-#[template(path = "partials/download_item.html")]
-pub struct DownloadItemPartial<'a> {
-    pub download: &'a DownloadProgress,
-}
-
-/// Toast / notification partial
-#[derive(Template)]
-#[template(path = "partials/toast.html")]
-pub struct ToastPartial<'a> {
-    pub message: &'a str,
-    pub level: &'a str, // "info" | "success" | "warn" | "error"
-}
-
-/// Helper to convert a value to JSON for inline data attributes
-pub fn json_value<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
-    serde_json::to_string(value)
-}
-
-/// Helper to render any askama template to a String
-pub fn render<T: Template>(template: &T) -> Result<String, askama::Error> {
-    template.render()
+pub fn all_partial_names() -> Vec<String> {
+    partial_cache().keys().cloned().collect()
 }

@@ -229,99 +229,70 @@ glob = "0.3"            # File pattern matching
 ## 5. Project Structure
 
 ```
-auralis/
-├── src/                          # Rust source code
-│   ├── main.rs                   # Application entry point
-│   ├── lib.rs                    # Library root (re-exports)
-│   ├── commands/                 # Tauri command handlers
+auralis-v2/
+├── Cargo.toml              # Rust package manifest
+├── build.rs                # tauri-build hook
+├── tauri.conf.json         # Tauri v2 configuration
+├── capabilities/           # Tauri permission grants
+│   └── default.json
+├── ui/                     # Soft Glass Audio frontend (HTMX + vanilla HTML/CSS)
+│   ├── index.html          # App shell only (loads nav/content via HTMX)
+│   ├── styles/
+│   │   ├── tokens.css      # Design variables (glass/neu shadows, blur, radii)
+│   │   ├── base.css        # Reset + app-shell layout grid
+│   │   ├── components.css  # Glass, Neu, Buttons, Cards, Track rows
+│   │   └── responsive.css  # Mobile/tablet/desktop breakpoints + performance
+│   ├── js/
+│   │   ├── bridge.js       # Tauri event listeners + player bar updates
+│   │   └── player.js       # Progress/seek logic + keyboard shortcuts
+│   ├── partials/           # HTMX fragments served by render_template command
+│   │   ├── nav.html        # Sidebar navigation
+│   │   ├── home.html       # Home view
+│   │   ├── library.html    # Track list
+│   │   ├── albums.html     # Album grid
+│   │   ├── artists.html    # Artist grid
+│   │   ├── playlists.html  # Playlists with tabs
+│   │   ├── player-full.html# Full-screen overlay player
+│   │   ├── sync.html       # P2P sync view
+│   │   └── settings.html   # Settings list
+│   └── icons/
+│       ├── auralis.svg
+│       └── plus.svg
+├── src/
+│   ├── main.rs             # Application entry point
+│   ├── lib.rs              # Library root + Tauri builder
+│   ├── commands/           # Tauri command handlers
 │   │   ├── mod.rs
-│   │   ├── library.rs            # Library management commands
-│   │   ├── playback.rs           # Playback control commands
-│   │   ├── downloads.rs          # Download management commands
-│   │   ├── playlists.rs          # Playlist CRUD commands
-│   │   ├── sync.rs               # P2P sync commands
-│   │   └── settings.rs           # Settings commands
-│   ├── domain/                   # Business logic (framework-agnostic)
+│   │   ├── library.rs
+│   │   ├── playback.rs
+│   │   ├── downloads.rs
+│   │   ├── playlists.rs
+│   │   ├── settings.rs
+│   │   ├── sync.rs
+│   │   └── templates.rs    # Serves ui/partials/ as HTMX responses
+│   ├── domain/             # Pure business logic (no I/O)
 │   │   ├── mod.rs
-│   │   ├── models/               # Domain entities
-│   │   │   ├── mod.rs
-│   │   │   ├── track.rs          # Track entity
-│   │   │   ├── playlist.rs       # Playlist entity
-│   │   │   ├── artist.rs         # Artist entity
-│   │   │   └── album.rs          # Album entity
-│   │   ├── services/             # Business logic services
-│   │   │   ├── mod.rs
-│   │   │   ├── library_service.rs # Library management logic
-│   │   │   ├── playback_service.rs# Playback state machine
-│   │   │   ├── download_service.rs# Download orchestration
-│   │   │   └── sync_service.rs   # P2P sync logic
-│   │   └── repositories/         # Data access interfaces
-│   │       ├── mod.rs
-│   │       ├── track_repository.rs
-│   │       ├── playlist_repository.rs
-│   │       └── settings_repository.rs
-│   ├── infrastructure/           # External integrations
+│   │   ├── models/         # Track, Album, Artist, Playlist, Settings, Sync, Download
+│   │   ├── services/       # Business logic traits
+│   │   └── repositories/   # Data access traits
+│   ├── infrastructure/     # External integrations
 │   │   ├── mod.rs
-│   │   ├── database/             # SQLite implementation
-│   │   │   ├── mod.rs
-│   │   │   ├── connection.rs     # Connection pool management
-│   │   │   ├── migrations.rs     # Schema migrations
-│   │   │   └── queries/         # SQL queries
-│   │   │       ├── mod.rs
-│   │   │       ├── tracks.rs
-│   │   │       ├── playlists.rs
-│   │   │       └── settings.rs
-│   │   ├── filesystem/           # File system operations
-│   │   │   ├── mod.rs
-│   │   │   ├── scanner.rs        # Library directory scanner
-│   │   │   └── metadata.rs       # Audio metadata extraction
-│   │   ├── media/                # Media processing
-│   │   │   ├── mod.rs
-│   │   │   ├── downloader.rs     # yt-dlp wrapper
-│   │   │   └── player.rs         # rodio wrapper
-│   │   └── network/              # Networking
-│   │       ├── mod.rs
-│   │       ├── p2p.rs            # libp2p implementation
-│   │       └── discovery.rs      # mDNS device discovery
-│   └── templates/                # HTMX HTML templates
-│       ├── mod.rs
-│       ├── layout.html           # Base layout
-│       ├── library.html          # Library view
-│       ├── player.html           # Now playing
-│       ├── downloads.html        # Downloads view
-│       ├── playlists.html        # Playlists view
-│       ├── sync.html             # P2P sync view
-│       └── settings.html         # Settings view
-├── src-tauri/                    # Tauri configuration
-│   ├── Cargo.toml
-│   ├── tauri.conf.json
-│   ├── icons/                    # Application icons
-│   └── capabilities/             # Tauri permissions
-├── templates/                    # HTMX templates (separate for web development)
-│   ├── layout.html
-│   ├── library.html
-│   ├── player.html
-│   ├── downloads.html
-│   ├── playlists.html
-│   ├── sync.html
-│   └── settings.html
-├── static/                       # Static assets
-│   ├── css/
-│   │   ├── main.css              # Core styles
-│   │   ├── variables.css         # CSS custom properties
-│   │   ├── components.css        # Component styles
-│   │   └── views.css             # View-specific styles
-│   └── js/
-│       └── app.js                # Minimal vanilla JS for HTMX
-├── migrations/                   # Database migrations
-│   └── 001_initial_schema.sql
-├── tests/                        # Integration tests
-│   ├── library_tests.rs
-│   ├── playback_tests.rs
-│   └── sync_tests.rs
-├── build.rs                      # Build script
-├── Cargo.toml                    # Workspace manifest
-└── SPEC.md                       # This document
+│   │   ├── database/       # SQLite via rusqlite
+│   │   ├── filesystem/     # Track scanner + metadata
+│   │   ├── media/          # AudioPlayer (rodio) + Downloader (yt-dlp)
+│   │   └── network.rs      # libp2p stubs
+│   └── templates/mod.rs    # Reads ui/partials/ and caches them
+├── icons/                  # App icons (including icon.ico for Windows)
+├── gen/                    # Generated Android project (created by cargo tauri android init)
+├── scripts/
+│   ├── build.sh
+│   ├── dev.sh
+│   └── test.sh
+├── .github/workflows/
+│   └── build.yml           # CI/CD: Linux, macOS, Windows, Android
+├── SPEC.md                 # This document
+├── README.md
+└── DEVELOPMENT_STATUS.md
 ```
 
 ---

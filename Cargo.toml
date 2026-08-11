@@ -40,9 +40,6 @@ tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 tauri-plugin-os = "2"
 
-# HTML templating (server-side, embedded at compile time)
-askama = "0.12"
-
 # Database
 rusqlite = { version = "0.31", features = ["bundled", "chrono", "uuid"] }
 

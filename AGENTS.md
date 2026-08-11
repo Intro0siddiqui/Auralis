@@ -6,7 +6,7 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 ## 1. Project Overview
 
-Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), Askama for server-side HTML templating, SQLite for persistence, and yt-dlp as a sidecar for downloads.
+Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and yt-dlp as a sidecar for downloads.
 
 **Current State: Early Prototype** — The architecture is scaffolded but most command handlers are stubs returning empty data or `"not yet implemented"` errors.
 
@@ -28,7 +28,7 @@ src/
 │   ├── media/        # AudioPlayer (rodio) + Downloader (yt-dlp)
 │   └── network.rs    # libp2p stubs (Discovery, SyncEngine)
 ├── commands/         # Tauri command handlers — bridge frontend ↔ services
-├── templates/        # Askama structs + render() function
+├── templates/        # Partial server — reads ui/partials/ and caches them
 └── lib.rs            # App builder + command registration
 ```
 
@@ -38,7 +38,7 @@ src/
 
 - **Never use `unwrap()`/`panic!()` in production code** — all fallible operations must return `Result` or `Option`.
 - **All Tauri commands return `Result<T, String>`** on the wire — internal errors are logged via `tracing` and converted to `String` for the frontend.
-- **Templates use Askama** — return rendered HTML strings, not JSON.
+- **Templates are static HTML partials** — the backend reads `ui/partials/*.html` and returns them as-is for HTMX swaps.
 - **State is managed via Tauri's `manage()`** — `Database`, `AudioPlayer`, and `Settings` are registered in the setup hook (`lib.rs:77`).
 - **`#[allow(dead_code)]` is used** in service structs for fields reserved for future use — do not remove without understanding the intent.
 
