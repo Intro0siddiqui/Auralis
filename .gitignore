@@ -2,3 +2,5 @@
 .env
 *.log
 .DS_Store
+/gen/schemas/
+/gen/android/

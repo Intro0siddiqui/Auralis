@@ -258,7 +258,6 @@ pub enum TrackSortField {
     Year,
 }
 
-
 /// Updates to track metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackMetadataUpdate {

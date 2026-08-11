@@ -55,7 +55,6 @@ impl PartialEq<&str> for DownloadStatus {
     }
 }
 
-
 /// Download progress information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadProgress {

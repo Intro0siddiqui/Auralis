@@ -3,7 +3,9 @@
 //! Downloads media using yt-dlp with progress tracking.
 
 use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
+#[cfg(unix)]
 use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -70,6 +72,39 @@ pub enum DownloaderError {
 }
 
 impl Downloader {
+    /// Send a signal to a child process to pause it (Unix: SIGSTOP).
+    #[cfg(unix)]
+    fn signal_pause(child: &tokio::process::Child) -> Result<(), DownloaderError> {
+        let pid = child
+            .id()
+            .ok_or_else(|| DownloaderError::ProcessError("Failed to get process ID".to_string()))?;
+        let nix_pid = Pid::from_raw(pid as i32);
+        kill(nix_pid, Signal::SIGSTOP)
+            .map_err(|e| DownloaderError::ProcessError(format!("Failed to send SIGSTOP: {e}")))
+    }
+
+    /// Send a signal to a child process to resume it (Unix: SIGCONT).
+    #[cfg(unix)]
+    fn signal_continue(child: &tokio::process::Child) -> Result<(), DownloaderError> {
+        let pid = child
+            .id()
+            .ok_or_else(|| DownloaderError::ProcessError("Failed to get process ID".to_string()))?;
+        let nix_pid = Pid::from_raw(pid as i32);
+        kill(nix_pid, Signal::SIGCONT)
+            .map_err(|e| DownloaderError::ProcessError(format!("Failed to send SIGCONT: {e}")))
+    }
+
+    /// Pause a child process (Windows fallback: no-op, marked unsupported).
+    #[cfg(windows)]
+    fn signal_pause(_child: &tokio::process::Child) -> Result<(), DownloaderError> {
+        Ok(())
+    }
+
+    /// Resume a child process (Windows fallback: no-op, marked unsupported).
+    #[cfg(windows)]
+    fn signal_continue(_child: &tokio::process::Child) -> Result<(), DownloaderError> {
+        Ok(())
+    }
     /// Create a new downloader
     pub fn new(output_dir: PathBuf) -> Self {
         Self {
@@ -163,14 +198,7 @@ impl Downloader {
 
         let child_guard = active.child.lock().await;
         if let Some(ref child) = *child_guard {
-            let pid = child.id().ok_or_else(|| {
-                DownloaderError::ProcessError("Failed to get process ID".to_string())
-            })?;
-
-            let nix_pid = Pid::from_raw(pid as i32);
-            kill(nix_pid, Signal::SIGSTOP).map_err(|e| {
-                DownloaderError::ProcessError(format!("Failed to send SIGSTOP: {e}"))
-            })?;
+            Self::signal_pause(child)?;
         }
         drop(child_guard);
 
@@ -200,14 +228,7 @@ impl Downloader {
 
         let child_guard = active.child.lock().await;
         if let Some(ref child) = *child_guard {
-            let pid = child.id().ok_or_else(|| {
-                DownloaderError::ProcessError("Failed to get process ID".to_string())
-            })?;
-
-            let nix_pid = Pid::from_raw(pid as i32);
-            kill(nix_pid, Signal::SIGCONT).map_err(|e| {
-                DownloaderError::ProcessError(format!("Failed to send SIGCONT: {e}"))
-            })?;
+            Self::signal_continue(child)?;
         }
         drop(child_guard);
 

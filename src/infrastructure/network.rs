@@ -823,7 +823,7 @@ async fn handle_swarm_event(
             runtime
                 .set_connection(peer_id, ConnectionState::Disconnected)
                 .await;
-                debug!(%peer_id, error = ?error, "Outgoing connection failed");
+            debug!(%peer_id, error = ?error, "Outgoing connection failed");
         }
         _ => {}
     }
