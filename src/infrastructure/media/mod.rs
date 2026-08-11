@@ -2,8 +2,8 @@
 //!
 //! Handles audio playback and media downloading.
 
-mod downloader;
-mod player;
+pub mod downloader;
+pub mod player;
 
 pub use downloader::Downloader;
 pub use player::AudioPlayer;

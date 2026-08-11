@@ -4,7 +4,7 @@
 //! and audio metadata extraction.
 
 mod metadata;
-mod scanner;
+pub mod scanner;
 
 pub use metadata::MetadataExtractor;
 pub use scanner::DirectoryScanner;

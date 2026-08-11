@@ -63,7 +63,7 @@ impl LibraryService {
             .find_by_id(id)
             .await
             .map_err(|e| LibraryError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| LibraryError::TrackNotFound(id))?;
+            .ok_or(LibraryError::TrackNotFound(id))?;
 
         // Apply updates
         if let Some(title) = update.title {

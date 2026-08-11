@@ -11,8 +11,10 @@ use uuid::Uuid;
 /// Download job status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum DownloadStatus {
     /// Download is queued but not started
+    #[default]
     Queued,
     /// Currently downloading
     Downloading,
@@ -53,11 +55,6 @@ impl PartialEq<&str> for DownloadStatus {
     }
 }
 
-impl Default for DownloadStatus {
-    fn default() -> Self {
-        DownloadStatus::Queued
-    }
-}
 
 /// Download progress information
 #[derive(Debug, Clone, Serialize, Deserialize)]

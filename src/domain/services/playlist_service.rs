@@ -90,7 +90,7 @@ impl PlaylistService {
             .find_by_id(id)
             .await
             .map_err(|e| PlaylistError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| PlaylistError::PlaylistNotFound(id))?;
+            .ok_or(PlaylistError::PlaylistNotFound(id))?;
 
         if let Some(name) = name {
             if name.trim().is_empty() {
@@ -153,7 +153,7 @@ impl PlaylistService {
             .find_by_id(playlist_id)
             .await
             .map_err(|e| PlaylistError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| PlaylistError::PlaylistNotFound(playlist_id))?;
+            .ok_or(PlaylistError::PlaylistNotFound(playlist_id))?;
 
         playlist.add_tracks(track_ids);
 
@@ -186,7 +186,7 @@ impl PlaylistService {
             .find_by_id(playlist_id)
             .await
             .map_err(|e| PlaylistError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| PlaylistError::PlaylistNotFound(playlist_id))?;
+            .ok_or(PlaylistError::PlaylistNotFound(playlist_id))?;
 
         for track_id in track_ids {
             playlist.remove_track(track_id);
@@ -221,7 +221,7 @@ impl PlaylistService {
             .find_by_id(playlist_id)
             .await
             .map_err(|e| PlaylistError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| PlaylistError::PlaylistNotFound(playlist_id))?;
+            .ok_or(PlaylistError::PlaylistNotFound(playlist_id))?;
 
         playlist.reorder(track_ids);
 

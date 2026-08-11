@@ -83,6 +83,11 @@ impl AuralisApp {
                     tracing::error!(error = %e, "Failed to initialize database");
                 }
 
+                // Initialize sync service (depends on the database)
+                if let Err(e) = Self::init_sync_service(&app_handle) {
+                    tracing::error!(error = %e, "Failed to initialize sync service");
+                }
+
                 // Initialize audio player
                 if let Err(e) = Self::init_audio_player(&app_handle) {
                     tracing::error!(error = %e, "Failed to initialize audio player");
@@ -91,6 +96,16 @@ impl AuralisApp {
                 // Load settings
                 if let Err(e) = Self::load_settings(&app_handle) {
                     tracing::error!(error = %e, "Failed to load settings");
+                }
+
+                // Initialize downloader
+                if let Err(e) = Self::init_downloader(&app_handle) {
+                    tracing::error!(error = %e, "Failed to initialize downloader");
+                }
+
+                // Initialize P2P networking (libp2p mDNS discovery)
+                if let Err(e) = Self::init_network(&app_handle) {
+                    tracing::error!(error = %e, "Failed to initialize network");
                 }
 
                 info!("Setup phase completed successfully");
@@ -127,6 +142,7 @@ impl AuralisApp {
                 commands::downloads::resume_download,
                 commands::downloads::cancel_download,
                 commands::downloads::get_download_progress,
+                commands::downloads::list_downloads,
                 // Playlist commands
                 commands::playlists::get_playlists,
                 commands::playlists::get_playlist,
@@ -136,6 +152,9 @@ impl AuralisApp {
                 commands::playlists::add_tracks_to_playlist,
                 commands::playlists::remove_tracks_from_playlist,
                 commands::playlists::reorder_playlist_tracks,
+                commands::playlists::create_smart_playlist,
+                commands::playlists::render_playlists,
+                commands::playlists::render_playlist_detail,
                 // Sync commands
                 commands::sync::get_paired_devices,
                 commands::sync::start_pairing,
@@ -143,9 +162,11 @@ impl AuralisApp {
                 commands::sync::unpair_device,
                 commands::sync::sync_with_device,
                 commands::sync::get_sync_status,
+                commands::sync::render_sync,
                 // Settings commands
                 commands::settings::get_settings,
                 commands::settings::update_settings,
+                commands::settings::render_settings,
                 // Template commands
                 commands::templates::render_template,
                 commands::templates::render_partial,
@@ -176,6 +197,24 @@ impl AuralisApp {
         Ok(())
     }
 
+    /// Initialize the sync service with database-backed repositories
+    fn init_sync_service(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Initializing sync service");
+
+        let db = app_handle
+            .try_state::<Database>()
+            .map(|state| state.inner().clone())
+            .ok_or("Database not initialized; sync service requires it")?;
+
+        let service = commands::sync::build_sync_service(&db);
+
+        tauri::async_runtime::block_on(service.init())?;
+
+        app_handle.manage(service);
+
+        Ok(())
+    }
+
     /// Initialize the audio player
     fn init_audio_player(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         info!("Initializing audio player");
@@ -192,6 +231,40 @@ impl AuralisApp {
 
         let settings = Settings::load()?;
         app_handle.manage(settings);
+
+        Ok(())
+    }
+
+    /// Initialize the media downloader
+    fn init_downloader(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Initializing media downloader");
+
+        let app_data_dir = app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("Failed to get app data directory: {e}"))?;
+
+        let download_dir = app_data_dir.join("downloads");
+        std::fs::create_dir_all(&download_dir)?;
+
+        let downloader = Downloader::new(download_dir);
+        app_handle.manage(downloader);
+
+        Ok(())
+    }
+
+    /// Initialize P2P networking: starts libp2p mDNS discovery so this node
+    /// is advertised on the LAN and can discover + dial other Auralis devices.
+    fn init_network(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Initializing P2P network");
+
+        let discovery = crate::infrastructure::network::Discovery::new(0);
+        tauri::async_runtime::block_on(discovery.start())
+            .map_err(|e| format!("Failed to start network discovery: {e}"))?;
+
+        let sync_engine = discovery.sync_engine();
+        app_handle.manage(discovery);
+        app_handle.manage(sync_engine);
 
         Ok(())
     }

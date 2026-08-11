@@ -245,10 +245,12 @@ pub struct TrackFilter {
 /// Fields available for sorting tracks
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TrackSortField {
     Title,
     Artist,
     Album,
+    #[default]
     DateAdded,
     LastPlayed,
     PlayCount,
@@ -256,11 +258,6 @@ pub enum TrackSortField {
     Year,
 }
 
-impl Default for TrackSortField {
-    fn default() -> Self {
-        TrackSortField::DateAdded
-    }
-}
 
 /// Updates to track metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]

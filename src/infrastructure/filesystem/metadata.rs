@@ -90,17 +90,17 @@ impl MetadataExtractor {
     }
 
     fn get_track_number(tag: &dyn lofty::tag::Accessor) -> Option<u32> {
-        tag.track().map(|t| t as u32)
+        tag.track().map(|t| t)
     }
 
     fn get_disc_number(tag: &dyn lofty::tag::Accessor) -> Option<u32> {
-        tag.disk().map(|d| d as u32)
+        tag.disk().map(|d| d)
     }
 
     fn detect_format(path: &Path) -> AudioFormat {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .and_then(|ext| AudioFormat::from_extension(ext))
+            .and_then(AudioFormat::from_extension)
             .unwrap_or(AudioFormat::Mp3)
     }
 }

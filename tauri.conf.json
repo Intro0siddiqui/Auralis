@@ -46,9 +46,11 @@
     "shortDescription": "Lightweight offline-first music player",
     "longDescription": "Auralis is a privacy-focused music player with integrated media downloading and P2P synchronization. Built on Rust + Tauri for tiny binaries under 50MB.",
     "publisher": "Auralis Team",
-    "copyright": "Copyright © 2026 Auralis Team",
+    "copyright": "Copyright \u00a9 2026 Auralis Team",
     "homepage": "https://github.com/Intro0siddiqui/Auralis",
-    "resources": ["templates/*"],
+    "resources": [
+      "templates/*"
+    ],
     "externalBin": [],
     "windows": {
       "wix": {
@@ -57,7 +59,10 @@
     },
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ]
       }
     },
     "macOS": {

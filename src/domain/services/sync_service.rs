@@ -129,7 +129,7 @@ impl SyncService {
             let pairing = self.active_pairing.read().await;
             pairing.clone()
         }
-        .ok_or_else(|| SyncError::NoActivePairing)?;
+        .ok_or(SyncError::NoActivePairing)?;
 
         // Validate PIN
         if active.pin != pin {
@@ -196,7 +196,7 @@ impl SyncService {
             devices
                 .get(&device_id)
                 .cloned()
-                .ok_or_else(|| SyncError::DeviceNotFound(device_id))?
+                .ok_or(SyncError::DeviceNotFound(device_id))?
         };
 
         // Update status

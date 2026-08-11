@@ -54,7 +54,7 @@ impl SettingsService {
         info!("Updating settings");
 
         // Validate settings
-        self.validate_settings(&settings)?;
+        Self::validate_settings(&settings)?;
 
         self.repository
             .save_settings(&settings)
@@ -75,7 +75,7 @@ impl SettingsService {
     }
 
     /// Validate settings
-    fn validate_settings(&self, settings: &Settings) -> Result<(), SettingsError> {
+    pub fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
         // Validate volume
         if settings.audio.volume < 0.0 || settings.audio.volume > 1.0 {
             return Err(SettingsError::ValidationError(

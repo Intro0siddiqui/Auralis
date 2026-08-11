@@ -226,7 +226,7 @@ impl DownloadService {
             .map_err(|e| DownloadError::SettingsError(e.to_string()))?;
 
         let output_dir = settings.downloads.download_path;
-        std::fs::create_dir_all(&output_dir).map_err(|e| DownloadError::IoError(e))?;
+        std::fs::create_dir_all(&output_dir).map_err(DownloadError::IoError)?;
 
         let output_file =
             output_dir.join(format!("download_{}.{}", download_id, format.extension()));

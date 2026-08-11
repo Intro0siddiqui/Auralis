@@ -9,7 +9,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::params;
 use std::sync::Arc;
+use tracing::{debug, error, info};
 use uuid::Uuid;
+
+// ============================================================================
+// Track Repository
+// ============================================================================
 
 /// SQLite-backed track repository
 pub struct SqliteTrackRepository {
@@ -24,7 +29,7 @@ impl SqliteTrackRepository {
     fn row_to_track(row: &rusqlite::Row) -> rusqlite::Result<Track> {
         let last_played_str: Option<String> = row.get(17)?;
         Ok(Track {
-            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
+            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::new_v4()),
             title: row.get(1)?,
             artist: row.get(2)?,
             album: row.get(3)?,
@@ -367,7 +372,486 @@ impl TrackRepository for SqliteTrackRepository {
     }
 }
 
+// ============================================================================
+// Playlist Repository
+// ============================================================================
+
+/// SQLite-backed playlist repository
+pub struct SqlitePlaylistRepository {
+    db: Arc<Database>,
+}
+
+impl SqlitePlaylistRepository {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+
+    fn row_to_playlist(row: &rusqlite::Row) -> rusqlite::Result<Playlist> {
+        let track_ids_json: String = row.get(6)?;
+        let track_ids: Vec<Uuid> = serde_json::from_str(&track_ids_json).unwrap_or_default();
+        let smart_criteria_json: Option<String> = row.get(7)?;
+        let smart_criteria = smart_criteria_json
+            .and_then(|s| serde_json::from_str::<SmartPlaylistCriteria>(&s).ok());
+
+        Ok(Playlist {
+            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::new_v4()),
+            name: row.get(1)?,
+            description: row.get(2)?,
+            created_at: parse_datetime(&row.get::<_, String>(3)?),
+            updated_at: parse_datetime(&row.get::<_, String>(4)?),
+            is_smart: row.get::<_, i32>(5)? != 0,
+            track_ids,
+            smart_criteria,
+        })
+    }
+}
+
+#[async_trait]
+impl PlaylistRepository for SqlitePlaylistRepository {
+    async fn find_all(&self) -> Result<Vec<Playlist>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let mut stmt = conn.prepare("SELECT * FROM playlists ORDER BY updated_at DESC")?;
+
+        let playlists = stmt
+            .query_map([], Self::row_to_playlist)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(playlists)
+    }
+
+    async fn find_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<Playlist>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let mut stmt = conn.prepare("SELECT * FROM playlists WHERE id = ?")?;
+
+        let playlist = stmt
+            .query_row(params![id.to_string()], Self::row_to_playlist)
+            .ok();
+
+        Ok(playlist)
+    }
+
+    async fn find_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<Playlist>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let mut stmt = conn.prepare("SELECT * FROM playlists WHERE name = ?")?;
+
+        let playlist = stmt.query_row(params![name], Self::row_to_playlist).ok();
+
+        Ok(playlist)
+    }
+
+    async fn insert(
+        &self,
+        playlist: &Playlist,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let track_ids_json = serde_json::to_string(&playlist.track_ids).unwrap_or_default();
+        let smart_criteria_json = playlist
+            .smart_criteria
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok());
+
+        conn.execute(
+            r#"INSERT INTO playlists (
+                id, name, description, created_at, updated_at, is_smart, track_ids, smart_criteria
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+            params![
+                playlist.id.to_string(),
+                playlist.name,
+                playlist.description,
+                playlist.created_at.to_rfc3339(),
+                playlist.updated_at.to_rfc3339(),
+                playlist.is_smart as i32,
+                track_ids_json,
+                smart_criteria_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    async fn update(
+        &self,
+        playlist: &Playlist,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let track_ids_json = serde_json::to_string(&playlist.track_ids).unwrap_or_default();
+        let smart_criteria_json = playlist
+            .smart_criteria
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok());
+
+        conn.execute(
+            r#"UPDATE playlists SET
+                name = ?, description = ?, updated_at = ?, is_smart = ?,
+                track_ids = ?, smart_criteria = ?
+            WHERE id = ?"#,
+            params![
+                playlist.name,
+                playlist.description,
+                Utc::now().to_rfc3339(),
+                playlist.is_smart as i32,
+                track_ids_json,
+                smart_criteria_json,
+                playlist.id.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    async fn delete(&self, id: Uuid) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        conn.execute(
+            "DELETE FROM playlists WHERE id = ?",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    async fn count(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM playlists", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+}
+
+// ============================================================================
+// Settings Repository
+// ============================================================================
+
+/// SQLite-backed settings repository
+pub struct SqliteSettingsRepository {
+    db: Arc<Database>,
+}
+
+impl SqliteSettingsRepository {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl SettingsRepository for SqliteSettingsRepository {
+    async fn get_settings(&self) -> Result<Settings, Box<dyn std::error::Error + Send + Sync>> {
+        let data: Option<String> = {
+            let conn = self
+                .db
+                .connection()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+            conn.query_row("SELECT data FROM settings WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .ok()
+        };
+
+        match data {
+            Some(json_str) => {
+                let settings: Settings = serde_json::from_str(&json_str).map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to parse settings: {e}"),
+                    )) as Box<dyn std::error::Error + Send + Sync>
+                })?;
+                Ok(settings)
+            }
+            None => {
+                let default_settings = Settings::default();
+                self.save_settings(&default_settings).await.map_err(|e| {
+                    error!(error = %e, "Failed to save default settings");
+                    e
+                })?;
+                Ok(default_settings)
+            }
+        }
+    }
+
+    async fn save_settings(
+        &self,
+        settings: &Settings,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let json_str = serde_json::to_string(settings).map_err(|e| {
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to serialize settings: {e}"),
+            )) as Box<dyn std::error::Error + Send + Sync>
+        })?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (id, data) VALUES (1, ?)",
+            params![json_str],
+        )?;
+
+        info!("Settings saved successfully");
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Sync Repository
+// ============================================================================
+
+/// SQLite-backed sync repository
+pub struct SqliteSyncRepository {
+    db: Arc<Database>,
+}
+
+impl SqliteSyncRepository {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+
+    fn row_to_device(row: &rusqlite::Row) -> rusqlite::Result<PairedDevice> {
+        let last_sync_str: Option<String> = row.get(5)?;
+        let device_type_str: String = row.get(2)?;
+        let status_str: String = row.get(6)?;
+
+        Ok(PairedDevice {
+            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::new_v4()),
+            name: row.get(1)?,
+            device_type: match device_type_str.as_str() {
+                "mobile" => DeviceType::Mobile,
+                _ => DeviceType::Desktop,
+            },
+            ip_address: row.get(3)?,
+            paired_at: parse_datetime(&row.get::<_, String>(4)?),
+            last_sync: last_sync_str.as_deref().map(parse_datetime),
+            status: match status_str.as_str() {
+                "connected" => DeviceStatus::Connected,
+                "connecting" => DeviceStatus::Connecting,
+                "error" => DeviceStatus::Error,
+                _ => DeviceStatus::Disconnected,
+            },
+            library_version: row.get::<_, i64>(7)? as u64,
+        })
+    }
+
+    fn row_to_change(row: &rusqlite::Row) -> rusqlite::Result<SyncChange> {
+        let change_type_str: String = row.get(1)?;
+        let entity_type_str: String = row.get(2)?;
+        let payload_str: String = row.get(4)?;
+
+        Ok(SyncChange {
+            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::new_v4()),
+            change_type: match change_type_str.as_str() {
+                "updated" => ChangeType::Updated,
+                "deleted" => ChangeType::Deleted,
+                _ => ChangeType::Created,
+            },
+            entity_type: match entity_type_str.as_str() {
+                "playlist" => EntityType::Playlist,
+                "settings" => EntityType::Settings,
+                "playback_state" => EntityType::PlaybackState,
+                _ => EntityType::Track,
+            },
+            entity_id: Uuid::parse_str(&row.get::<_, String>(3)?)
+                .unwrap_or_else(|_| Uuid::new_v4()),
+            payload: serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null),
+            timestamp: parse_datetime(&row.get::<_, String>(5)?),
+            applied: row.get::<_, i32>(6)? != 0,
+        })
+    }
+}
+
+#[async_trait]
+impl SyncRepository for SqliteSyncRepository {
+    async fn get_paired_devices(
+        &self,
+    ) -> Result<Vec<PairedDevice>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let mut stmt = conn.prepare("SELECT * FROM paired_devices ORDER BY paired_at DESC")?;
+
+        let devices = stmt
+            .query_map([], Self::row_to_device)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(devices)
+    }
+
+    async fn get_paired_device(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<PairedDevice>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let mut stmt = conn.prepare("SELECT * FROM paired_devices WHERE id = ?")?;
+
+        let device = stmt
+            .query_row(params![id.to_string()], Self::row_to_device)
+            .ok();
+
+        Ok(device)
+    }
+
+    async fn save_paired_device(
+        &self,
+        device: &PairedDevice,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        conn.execute(
+            r#"INSERT OR REPLACE INTO paired_devices (
+                id, name, device_type, ip_address, paired_at, last_sync, status, library_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+            params![
+                device.id.to_string(),
+                device.name,
+                device.device_type.to_string(),
+                device.ip_address,
+                device.paired_at.to_rfc3339(),
+                device.last_sync.map(|d| d.to_rfc3339()),
+                device.status.to_string(),
+                device.library_version as i64,
+            ],
+        )?;
+
+        info!(device_id = %device.id, name = %device.name, "Paired device saved");
+        Ok(())
+    }
+
+    async fn delete_paired_device(
+        &self,
+        id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        conn.execute(
+            "DELETE FROM paired_devices WHERE id = ?",
+            params![id.to_string()],
+        )?;
+        info!(device_id = %id, "Paired device deleted");
+        Ok(())
+    }
+
+    async fn get_pending_changes(
+        &self,
+    ) -> Result<Vec<SyncChange>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let mut stmt =
+            conn.prepare("SELECT * FROM sync_changes WHERE applied = 0 ORDER BY timestamp ASC")?;
+
+        let changes = stmt
+            .query_map([], Self::row_to_change)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(changes)
+    }
+
+    async fn save_change(
+        &self,
+        change: &SyncChange,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        conn.execute(
+            r#"INSERT OR REPLACE INTO sync_changes (
+                id, change_type, entity_type, entity_id, payload, timestamp, applied
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            params![
+                change.id.to_string(),
+                match change.change_type {
+                    ChangeType::Created => "created",
+                    ChangeType::Updated => "updated",
+                    ChangeType::Deleted => "deleted",
+                },
+                match change.entity_type {
+                    EntityType::Track => "track",
+                    EntityType::Playlist => "playlist",
+                    EntityType::Settings => "settings",
+                    EntityType::PlaybackState => "playback_state",
+                },
+                change.entity_id.to_string(),
+                change.payload.to_string(),
+                change.timestamp.to_rfc3339(),
+                change.applied as i32,
+            ],
+        )?;
+
+        debug!(change_id = %change.id, "Sync change saved");
+        Ok(())
+    }
+
+    async fn mark_change_applied(
+        &self,
+        id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        conn.execute(
+            "UPDATE sync_changes SET applied = 1 WHERE id = ?",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    async fn clear_changes(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        conn.execute("DELETE FROM sync_changes WHERE applied = 1", [])?;
+        info!("Applied sync changes cleared");
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Helper functions
+// ============================================================================
+
 fn parse_format(s: &str) -> AudioFormat {
     match s.to_lowercase().as_str() {
         "mp3" => AudioFormat::Mp3,

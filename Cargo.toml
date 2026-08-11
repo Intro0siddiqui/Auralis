@@ -68,7 +68,9 @@ hostname = "0.4"
 rand = "0.8"
 
 # P2P networking (light use — main runtime would be libp2p over IPC)
-libp2p = { version = "0.54", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio"] }
+# `macros` enables the NetworkBehaviour derive; `json` enables the serde_json
+# request-response codec for sync payload transfer.
+libp2p = { version = "0.54", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "json"] }
 
 # QR code generation
 qrcode = "0.14"
@@ -79,13 +81,20 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # Audio playback
-rodio = "0.17"
+# AAC/OPUS: rodio 0.17 has NO built-in OPUS decoder. AAC is enabled via
+# rodio's symphonia backend ("symphonia-aac"). OPUS files are not decodable by
+# this stack (symphonia 0.5 has no opus codec); they are rejected with a clear
+# error in the player (see player.rs:UnsupportedFormat).
+rodio = { version = "0.17", features = ["symphonia-aac"] }
 
 # Audio metadata
 lofty = "0.21"
 
 # Filesystem globbing
 glob = "0.3"
+
+# Unix signals for process control (pause/resume downloads)
+nix = { version = "0.28", features = ["signal", "process"] }
 
 [profile.release]
 panic = "abort"

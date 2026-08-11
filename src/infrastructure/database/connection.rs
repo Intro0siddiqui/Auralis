@@ -14,6 +14,7 @@ use tracing::{debug, info};
 /// `RefCell`s). A `std::sync::Mutex<T>` is `Sync` whenever `T: Send`, so
 /// `Arc<Mutex<Connection>>` is `Send + Sync`, which is what Tauri's
 /// `State<...>` requires.
+#[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
 }
@@ -97,6 +98,7 @@ impl Database {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     is_smart INTEGER NOT NULL DEFAULT 0,
+                    track_ids TEXT NOT NULL DEFAULT '[]',
                     smart_criteria TEXT
                 );
 

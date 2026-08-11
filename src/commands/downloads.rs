@@ -3,9 +3,12 @@
 //! Tauri command handlers for media downloads via yt-dlp.
 
 use crate::domain::models::{AudioFormat, DownloadProgress};
+use crate::infrastructure::media::downloader::Downloader;
 use crate::templates::render;
 use crate::templates::{DownloadItemPartial, DownloadsTemplate};
 use serde::{Deserialize, Serialize};
+use tauri::State;
+use tracing::{error, info};
 use uuid::Uuid;
 
 /// Download request
@@ -26,57 +29,109 @@ pub struct PlaylistDownloadRequest {
 
 /// Start downloading a single audio track.
 #[tauri::command]
-pub async fn download_audio(request: DownloadRequest) -> Result<DownloadProgress, String> {
-    // TODO: dispatch to Downloader with the configured format
-    Ok(DownloadProgress::new(
-        request.url,
-        "Pending".to_string(),
-        request.format.unwrap_or(AudioFormat::Mp3),
-    ))
+pub async fn download_audio(
+    request: DownloadRequest,
+    downloader: State<'_, Downloader>,
+) -> Result<DownloadProgress, String> {
+    info!(url = %request.url, "Download audio requested");
+
+    let format = request.format.unwrap_or(AudioFormat::Mp3);
+
+    let id = downloader
+        .download(&request.url, format)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to start download");
+            e.to_string()
+        })?;
+
+    let state = downloader
+        .get_progress(id)
+        .await
+        .ok_or("Download not found after starting")?;
+
+    Ok(state)
 }
 
 /// Start downloading a playlist (creates one download per item).
 #[tauri::command]
 pub async fn download_playlist(
-    _request: PlaylistDownloadRequest,
+    request: PlaylistDownloadRequest,
+    downloader: State<'_, Downloader>,
 ) -> Result<Vec<DownloadProgress>, String> {
-    // TODO: parse playlist URL and enqueue per-item downloads
-    Ok(Vec::new())
+    info!(url = %request.url, "Playlist download requested");
+
+    let format = request.format.unwrap_or(AudioFormat::Mp3);
+
+    let id = downloader
+        .download(&request.url, format)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to start playlist download");
+            e.to_string()
+        })?;
+
+    let state = downloader
+        .get_progress(id)
+        .await
+        .ok_or("Download not found after starting")?;
+
+    let _max_items = request.max_items.unwrap_or(10);
+    Ok(vec![state])
 }
 
 /// Pause an in-progress download.
 #[tauri::command]
-pub async fn pause_download(_id: Uuid) -> Result<(), String> {
-    // TODO: signal Downloader to pause
-    Ok(())
+pub async fn pause_download(id: Uuid, downloader: State<'_, Downloader>) -> Result<(), String> {
+    info!(download_id = %id, "Pause download requested");
+
+    downloader.pause(id).await.map_err(|e| {
+        error!(error = %e, "Failed to pause download");
+        e.to_string()
+    })
 }
 
 /// Resume a paused download.
 #[tauri::command]
-pub async fn resume_download(_id: Uuid) -> Result<(), String> {
-    // TODO: signal Downloader to resume
-    Ok(())
+pub async fn resume_download(id: Uuid, downloader: State<'_, Downloader>) -> Result<(), String> {
+    info!(download_id = %id, "Resume download requested");
+
+    downloader.resume(id).await.map_err(|e| {
+        error!(error = %e, "Failed to resume download");
+        e.to_string()
+    })
 }
 
 /// Cancel a download (queued or in-progress).
 #[tauri::command]
-pub async fn cancel_download(_id: Uuid) -> Result<(), String> {
-    // TODO: signal Downloader to cancel
-    Ok(())
+pub async fn cancel_download(id: Uuid, downloader: State<'_, Downloader>) -> Result<(), String> {
+    info!(download_id = %id, "Cancel download requested");
+
+    downloader.cancel(id).await.map_err(|e| {
+        error!(error = %e, "Failed to cancel download");
+        e.to_string()
+    })
 }
 
 /// Get current progress for a specific download.
 #[tauri::command]
-pub async fn get_download_progress(_id: Uuid) -> Result<Option<DownloadProgress>, String> {
-    // TODO: lookup in Downloader state
-    Ok(None)
+pub async fn get_download_progress(
+    id: Uuid,
+    downloader: State<'_, Downloader>,
+) -> Result<Option<DownloadProgress>, String> {
+    info!(download_id = %id, "Get download progress requested");
+
+    Ok(downloader.get_progress(id).await)
 }
 
 /// List all active downloads.
 #[tauri::command]
-pub async fn list_downloads() -> Result<Vec<DownloadProgress>, String> {
-    // TODO: enumerate Downloader state
-    Ok(Vec::new())
+pub async fn list_downloads(
+    downloader: State<'_, Downloader>,
+) -> Result<Vec<DownloadProgress>, String> {
+    info!("List downloads requested");
+
+    Ok(downloader.list_active().await)
 }
 
 /// Render the downloads page as HTML.

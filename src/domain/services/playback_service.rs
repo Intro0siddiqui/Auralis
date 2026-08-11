@@ -85,7 +85,7 @@ impl PlaybackService {
             .find_by_id(track_id)
             .await
             .map_err(|e| PlaybackError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| PlaybackError::TrackNotFound(track_id))?;
+            .ok_or(PlaybackError::TrackNotFound(track_id))?;
 
         let mut state = self.state.write().await;
 

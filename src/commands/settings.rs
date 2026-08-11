@@ -3,27 +3,68 @@
 //! Tauri command handlers for application settings.
 
 use crate::domain::models::Settings;
+use crate::domain::repositories::SettingsRepository;
+use crate::domain::services::SettingsService;
+use crate::infrastructure::database::Database;
 use crate::templates::render;
 use crate::templates::SettingsTemplate;
+use std::sync::Arc;
+use tauri::State;
+
+/// Create a settings repository from the database state
+fn settings_repo(db: &Database) -> Arc<dyn SettingsRepository> {
+    Arc::new(
+        crate::infrastructure::database::repositories::SqliteSettingsRepository::new(Arc::new(
+            db.clone(),
+        )),
+    )
+}
 
 /// Get the current settings.
 #[tauri::command]
-pub async fn get_settings() -> Result<Settings, String> {
-    // TODO: read from SettingsRepository
-    Ok(Settings::default())
+pub async fn get_settings(db: State<'_, Database>) -> Result<Settings, String> {
+    let repo = settings_repo(&db);
+
+    let settings = repo.get_settings().await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to fetch settings");
+        format!("Failed to fetch settings: {e}")
+    })?;
+
+    Ok(settings)
 }
 
-/// Update settings (partial — only provided fields are changed).
+/// Update settings.
 #[tauri::command]
-pub async fn update_settings(settings: Settings) -> Result<Settings, String> {
-    // TODO: persist and broadcast change
+pub async fn update_settings(
+    db: State<'_, Database>,
+    settings: Settings,
+) -> Result<Settings, String> {
+    SettingsService::validate_settings(&settings).map_err(|e| {
+        tracing::error!(error = %e, "Invalid settings");
+        e.to_string()
+    })?;
+
+    let repo = settings_repo(&db);
+
+    repo.save_settings(&settings).await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to save settings");
+        format!("Failed to save settings: {e}")
+    })?;
+
+    tracing::info!("Settings updated");
     Ok(settings)
 }
 
 /// Render the settings page as HTML.
 #[tauri::command]
-pub async fn render_settings() -> Result<String, String> {
-    let settings = Settings::default();
+pub async fn render_settings(db: State<'_, Database>) -> Result<String, String> {
+    let repo = settings_repo(&db);
+
+    let settings = repo.get_settings().await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to fetch settings for render");
+        format!("Failed to fetch settings: {e}")
+    })?;
+
     let tmpl = SettingsTemplate {
         settings: &settings,
     };
