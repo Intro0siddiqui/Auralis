@@ -41,11 +41,17 @@ jobs:
         run: cargo build --release
 
       - name: Package
+        # Release artifact bundling is only meaningful on tag pushes. On
+        # pull_request runs github.ref_name is "<PR>/merge" (contains a slash),
+        # which breaks these path-based artifact names — so skip packaging/upload
+        # and let PRs just validate compilation.
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           cd target/release
           tar czf auralis-${{ github.ref_name }}-linux-x64.tar.gz auralis
 
       - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: release-linux-x64
@@ -53,38 +59,44 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
-    strategy:
-      matrix:
-        target: [x86_64-apple-darwin, aarch64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Install Tauri CLI
+        # `cargo tauri build` produces a real .app/.dmg instead of a bare binary.
+        run: cargo install tauri-cli --version "^2.0.0" 2>/dev/null || npm install -g @tauri-apps/cli
 
-      - name: Package
+      - name: Install bundled sidecars (yt-dlp, ffmpeg)
+        # `tauri.conf.json` declares these as `externalBin`; Tauri resolves them
+        # next to the executable on every platform. They must be present at
+        # build time or `tauri build` fails.
         run: |
-          cd target/${{ matrix.target }}/release
-          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
-            ARCH="aarch64"
-          else
-            ARCH="x86_64"
-          fi
-          tar czf auralis-${{ github.ref_name }}-macos-${ARCH}.tar.gz auralis
+          mkdir -p src-tauri/bin
+          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o src-tauri/bin/yt-dlp
+          chmod +x src-tauri/bin/yt-dlp
+          brew install ffmpeg
+          cp "$(which ffmpeg)" src-tauri/bin/ffmpeg
+          chmod +x src-tauri/bin/ffmpeg
+
+      - name: Build (compile gate)
+        run: cargo build --release
+
+      - name: Bundle (.app / .dmg)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cargo tauri build
 
       - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: release-macos-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/auralis-*.tar.gz
+          name: release-macos
+          path: src-tauri/target/release/bundle
 
   build-windows:
     runs-on: windows-latest
@@ -99,19 +111,31 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Build
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" 2>/dev/null || npm install -g @tauri-apps/cli
+
+      - name: Install bundled sidecars (yt-dlp, ffmpeg)
+        shell: bash
+        run: |
+          mkdir -p src-tauri/bin
+          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -o src-tauri/bin/yt-dlp.exe
+          curl -L https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -o ffmpeg.zip
+          unzip -o ffmpeg.zip
+          cp ffmpeg-*-essentials/bin/ffmpeg.exe src-tauri/bin/ffmpeg.exe
+
+      - name: Build (compile gate)
         run: cargo build --release
 
-      - name: Package
-        run: |
-          cd target/release
-          7z a auralis-${{ github.ref_name }}-windows-x64.zip auralis.exe
+      - name: Bundle (.msi / .exe installer)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cargo tauri build
 
       - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: release-windows-x64
-          path: target/release/auralis-*.zip
+          path: src-tauri/target/release/bundle
 
   build-android:
     runs-on: ubuntu-22.04
@@ -199,6 +223,7 @@ jobs:
           done
 
       - name: Generate keystore
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           keytool -genkeypair -v \
             -keystore $RUNNER_TEMP/auralis-release.jks \
@@ -214,6 +239,7 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
       - name: Sign APK
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           APK_PATH=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
           if [ -z "$APK_PATH" ]; then
@@ -238,6 +264,7 @@ jobs:
           "$APKSIGNER" verify --verbose "auralis-${{ github.ref_name }}-android.apk"
 
       - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: release-android
