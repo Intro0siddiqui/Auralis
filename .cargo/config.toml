@@ -1,0 +1,16 @@
+# Link the Android C++ runtime so libauralis_lib.so records libc++_shared.so
+# as a DT_NEEDED dependency. cpal's Android backend (Oboe/AAudio) is C++ and
+# references __cxa_pure_virtual, __cxa_throw, std::* vtables, etc. Without this,
+# the Android linker cannot resolve those symbols at app startup and the app
+# crashes with UnsatisfiedLinkError on loadLibrary.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-lc++_shared"]
+
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "link-arg=-lc++_shared"]
+
+[target.i686-linux-android]
+rustflags = ["-C", "link-arg=-lc++_shared"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-lc++_shared"]
