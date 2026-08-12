@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "auralis"
-version = "2.0.11"
+version = "2.0.12"
 dependencies = [
  "anyhow",
  "async-trait",
