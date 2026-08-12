@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "2.0.10"
+version = "2.0.11"
 edition = "2021"
 authors = ["Auralis Team"]
 description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
@@ -89,6 +89,12 @@ glob = "0.3"
 # Unix signals for process control (pause/resume downloads)
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal", "process"] }
+
+# Android: initialize the ndk-context global used by cpal/oboe's audio
+# backend. Tauri v2 does not set it up, so we export JNI_OnLoad ourselves.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
 
 [profile.release]
 panic = "abort"

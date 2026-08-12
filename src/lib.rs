@@ -17,9 +17,7 @@ pub use domain::models::{
     SmartSortField, SyncChange, SyncSettings, SyncStatus, ThemeMode, Track, TrackFilter,
     TrackMetadataUpdate, TrackSortField,
 };
-pub use domain::services::{
-    DownloadService, LibraryService, PlaybackService, PlaylistService, SettingsService, SyncService,
-};
+pub use domain::services::SyncService;
 
 // ============================================================================
 // Infrastructure Layer - External Integrations
@@ -83,7 +81,12 @@ impl AuralisApp {
                     tracing::error!(error = %e, "Failed to initialize database");
                 }
 
-                // Initialize sync service (depends on the database)
+                // Initialize P2P networking (libp2p mDNS discovery)
+                if let Err(e) = Self::init_network(&app_handle) {
+                    tracing::error!(error = %e, "Failed to initialize network");
+                }
+
+                // Initialize sync service (depends on the database + network runtime)
                 if let Err(e) = Self::init_sync_service(&app_handle) {
                     tracing::error!(error = %e, "Failed to initialize sync service");
                 }
@@ -101,11 +104,6 @@ impl AuralisApp {
                 // Initialize downloader
                 if let Err(e) = Self::init_downloader(&app_handle) {
                     tracing::error!(error = %e, "Failed to initialize downloader");
-                }
-
-                // Initialize P2P networking (libp2p mDNS discovery)
-                if let Err(e) = Self::init_network(&app_handle) {
-                    tracing::error!(error = %e, "Failed to initialize network");
                 }
 
                 info!("Setup phase completed successfully");
@@ -201,7 +199,12 @@ impl AuralisApp {
             .map(|state| state.inner().clone())
             .ok_or("Database not initialized; sync service requires it")?;
 
-        let service = commands::sync::build_sync_service(&db);
+        let sync_engine = app_handle
+            .try_state::<crate::infrastructure::network::SyncEngine>()
+            .map(|state| state.inner().clone())
+            .ok_or("Network not initialized; sync service requires SyncEngine")?;
+
+        let service = commands::sync::build_sync_service(&db, sync_engine);
 
         tauri::async_runtime::block_on(service.init())?;
 
@@ -268,4 +271,48 @@ impl AuralisApp {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     AuralisApp::run()
+}
+
+/// Export the Android JNI context for NDK crates that read the global
+/// `ndk-context`.
+///
+/// Tauri v2's Android backend does not call `ndk_context::initialize_android_context`,
+/// but `oboe` (cpal's Android audio backend) panics with "android context was not
+/// initialized" if the global is left empty. The runtime invokes `JNI_OnLoad` once
+/// when the library is loaded, before any command runs, so we seed the global here.
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _reserved: *mut std::ffi::c_void) -> i32 {
+    use std::ffi::c_void;
+
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return jni::sys::JNI_VERSION_1_6 as i32;
+    };
+    // android.app.ActivityThread.currentApplication() -> the global Application (a Context).
+    let Ok(activity_thread) = env.find_class("android/app/ActivityThread") else {
+        return jni::sys::JNI_VERSION_1_6 as i32;
+    };
+    let Ok(current_application) = env.call_static_method(
+        activity_thread,
+        "currentApplication",
+        "()Landroid/app/Application;",
+        &[],
+    ) else {
+        return jni::sys::JNI_VERSION_1_6 as i32;
+    };
+    let Ok(context_global) = env.new_global_ref(
+        jni::objects::JObject::from(current_application.l().unwrap_or(jni::objects::JObject::null())),
+    ) else {
+        return jni::sys::JNI_VERSION_1_6 as i32;
+    };
+    let ctx_ptr = context_global.as_raw() as *mut c_void;
+    let vm_ptr = vm.get_java_vm_pointer() as *mut c_void;
+    // Leak the global ref so the context stays valid for the process lifetime.
+    std::mem::forget(context_global);
+    unsafe {
+        ndk_context::initialize_android_context(vm_ptr, ctx_ptr);
+    }
+
+    jni::sys::JNI_VERSION_1_6 as i32
 }
