@@ -266,6 +266,7 @@ impl DirectoryScanner {
 
 /// Result of scanning a single file
 #[derive(Debug)]
+#[allow(dead_code)]
 enum ScanResult {
     Added,
     Updated,

@@ -166,6 +166,7 @@ impl Database {
 
 /// Database-related errors
 #[derive(Debug, thiserror::Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum DatabaseError {
     #[error("Connection error: {0}")]
     ConnectionError(String),

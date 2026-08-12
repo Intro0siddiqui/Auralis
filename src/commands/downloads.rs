@@ -2,12 +2,11 @@
 //!
 //! Tauri command handlers for media downloads via yt-dlp.
 
-use crate::domain::models::{AudioFormat, DownloadProgress};
+use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
 use crate::infrastructure::media::downloader::Downloader;
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
-use tauri::State;
-use tokio::io::AsyncBufReadExt;
+use tauri::{AppHandle, Emitter, State};
 use tokio::process::Command;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -32,6 +31,7 @@ pub struct PlaylistDownloadRequest {
 #[tauri::command]
 pub async fn download_audio(
     request: DownloadRequest,
+    app: AppHandle,
     downloader: State<'_, Downloader>,
 ) -> Result<DownloadProgress, String> {
     info!(url = %request.url, "Download audio requested");
@@ -50,6 +50,31 @@ pub async fn download_audio(
         .get_progress(id)
         .await
         .ok_or("Download not found after starting")?;
+
+    // Stream progress + completion events to the frontend while the
+    // underlying yt-dlp process runs.
+    let app_handle = app.clone();
+    let dl = (*downloader).clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match dl.get_progress(id).await {
+                Some(progress) => {
+                    let _ = app_handle.emit("download:progress", &progress);
+                    if matches!(
+                        progress.status,
+                        DownloadStatus::Completed
+                            | DownloadStatus::Failed
+                            | DownloadStatus::Cancelled
+                    ) {
+                        let _ = app_handle.emit("download:completed", &progress);
+                        break;
+                    }
+                }
+                None => break,
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
 
     Ok(state)
 }

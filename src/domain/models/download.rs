@@ -152,10 +152,8 @@ impl DownloadProgress {
         if let Some(total) = total_bytes {
             if total > 0 {
                 self.progress = downloaded_bytes as f32 / total as f32;
-                if speed_bps > 0 {
-                    let remaining = total.saturating_sub(downloaded_bytes);
-                    self.eta_secs = Some((remaining / speed_bps) as u32);
-                }
+                let remaining = total.saturating_sub(downloaded_bytes);
+                self.eta_secs = (remaining as u32).checked_div(speed_bps as u32);
             }
         }
 

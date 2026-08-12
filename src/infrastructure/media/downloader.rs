@@ -18,6 +18,7 @@ use tracing::{debug, error, info};
 use uuid::Uuid;
 
 /// Active download process handle
+#[allow(dead_code)]
 struct ActiveDownload {
     id: Uuid,
     url: String,

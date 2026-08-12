@@ -55,6 +55,7 @@ pub struct SwarmBehaviour {
 }
 
 /// Commands sent from the public API to the background swarm task.
+#[allow(dead_code)]
 enum NetworkCommand {
     Dial {
         peer_id: Option<PeerId>,
@@ -144,6 +145,7 @@ impl NetworkRuntime {
 
     /// Builds the swarm behaviour from a fresh session and a command channel.
     /// The receiver is moved into the background task by the caller.
+    #[allow(clippy::type_complexity)]
     fn build(
         &self,
         listen_port: u16,
@@ -209,6 +211,7 @@ impl NetworkRuntime {
         self.last_gossip.read().await.clone()
     }
 
+    #[allow(dead_code)]
     fn record_bytes_received(&self, n: u64) {
         if let Ok(mut stats) = self.stats.lock() {
             stats.bytes_received = stats.bytes_received.saturating_add(n);
@@ -810,20 +813,19 @@ async fn handle_swarm_event(
                 debug!(%peer_id, "Connection closed");
             }
         }
-        SwarmEvent::Dialing { peer_id, .. } => {
-            if let Some(peer_id) = peer_id {
-                runtime
-                    .set_connection(peer_id, ConnectionState::Dialing)
-                    .await;
-            }
+        SwarmEvent::Dialing {
+            peer_id: Some(peer_id),
+            ..
+        } => {
+            runtime
+                .set_connection(peer_id, ConnectionState::Dialing)
+                .await;
         }
         SwarmEvent::NewListenAddr { address, .. } => {
             info!(%address, "Listening on address");
         }
-        SwarmEvent::ListenerClosed { reason, .. } => {
-            if let Err(e) = reason {
-                error!(error = ?e, "Listener closed with error");
-            }
+        SwarmEvent::ListenerClosed { reason: Err(e), .. } => {
+            error!(error = ?e, "Listener closed with error");
         }
         SwarmEvent::OutgoingConnectionError {
             peer_id: Some(peer_id),

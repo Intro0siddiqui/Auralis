@@ -8,7 +8,7 @@ use crate::infrastructure::database::Database;
 use crate::infrastructure::media::AudioPlayer;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -30,6 +30,7 @@ pub struct SeekRequest {
 pub async fn play(
     track_id: Uuid,
     queue_index: Option<usize>,
+    app: AppHandle,
     player: State<'_, AudioPlayer>,
     db: State<'_, Database>,
 ) -> Result<NowPlaying, String> {
@@ -61,13 +62,16 @@ pub async fn play(
         shuffle_enabled: player.get_shuffle().await,
     };
 
+    emit_track_changed(&app, &player).await;
+    emit_state_changed(&app, &player).await;
+
     debug!(%track_id, "Playback started");
     Ok(now_playing)
 }
 
 /// Pause current playback.
 #[tauri::command]
-pub async fn pause(player: State<'_, AudioPlayer>) -> Result<(), String> {
+pub async fn pause(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<(), String> {
     info!("Pause command received");
 
     player
@@ -75,13 +79,15 @@ pub async fn pause(player: State<'_, AudioPlayer>) -> Result<(), String> {
         .await
         .map_err(|e| format!("Pause error: {e}"))?;
 
+    emit_state_changed(&app, &player).await;
+
     debug!("Playback paused");
     Ok(())
 }
 
 /// Resume paused playback.
 #[tauri::command]
-pub async fn resume(player: State<'_, AudioPlayer>) -> Result<(), String> {
+pub async fn resume(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<(), String> {
     info!("Resume command received");
 
     player
@@ -89,13 +95,15 @@ pub async fn resume(player: State<'_, AudioPlayer>) -> Result<(), String> {
         .await
         .map_err(|e| format!("Resume error: {e}"))?;
 
+    emit_state_changed(&app, &player).await;
+
     debug!("Playback resumed");
     Ok(())
 }
 
 /// Stop playback and clear the queue.
 #[tauri::command]
-pub async fn stop(player: State<'_, AudioPlayer>) -> Result<(), String> {
+pub async fn stop(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<(), String> {
     info!("Stop command received");
 
     player
@@ -103,13 +111,18 @@ pub async fn stop(player: State<'_, AudioPlayer>) -> Result<(), String> {
         .await
         .map_err(|e| format!("Stop error: {e}"))?;
 
+    emit_state_changed(&app, &player).await;
+
     debug!("Playback stopped");
     Ok(())
 }
 
 /// Skip to next track in queue.
 #[tauri::command]
-pub async fn next_track(player: State<'_, AudioPlayer>) -> Result<Option<NowPlaying>, String> {
+pub async fn next_track(
+    app: AppHandle,
+    player: State<'_, AudioPlayer>,
+) -> Result<Option<NowPlaying>, String> {
     info!("Next track command received");
 
     let track = player
@@ -119,6 +132,8 @@ pub async fn next_track(player: State<'_, AudioPlayer>) -> Result<Option<NowPlay
 
     match track {
         Some(t) => {
+            emit_track_changed(&app, &player).await;
+            emit_state_changed(&app, &player).await;
             let now_playing = build_now_playing(&player, &t).await;
             debug!(%t.id, "Now playing next track");
             Ok(Some(now_playing))
@@ -132,7 +147,10 @@ pub async fn next_track(player: State<'_, AudioPlayer>) -> Result<Option<NowPlay
 
 /// Go back to previous track.
 #[tauri::command]
-pub async fn previous_track(player: State<'_, AudioPlayer>) -> Result<Option<NowPlaying>, String> {
+pub async fn previous_track(
+    app: AppHandle,
+    player: State<'_, AudioPlayer>,
+) -> Result<Option<NowPlaying>, String> {
     info!("Previous track command received");
 
     let track = player
@@ -142,6 +160,8 @@ pub async fn previous_track(player: State<'_, AudioPlayer>) -> Result<Option<Now
 
     match track {
         Some(t) => {
+            emit_track_changed(&app, &player).await;
+            emit_state_changed(&app, &player).await;
             let now_playing = build_now_playing(&player, &t).await;
             debug!(%t.id, "Now playing previous track");
             Ok(Some(now_playing))
@@ -247,6 +267,7 @@ pub async fn get_queue(player: State<'_, AudioPlayer>) -> Result<PlaybackQueue, 
 #[tauri::command]
 pub async fn add_to_queue(
     track_id: Uuid,
+    app: AppHandle,
     player: State<'_, AudioPlayer>,
     db: State<'_, Database>,
 ) -> Result<PlaybackQueue, String> {
@@ -258,20 +279,18 @@ pub async fn add_to_queue(
 
     player.add_to_queue(track).await;
 
-    let tracks = player.get_queue().await;
-    let current_index = player.get_current_index().await;
+    let queue = build_queue(&player).await;
+    emit_queue_updated(&app, &queue).await;
 
     debug!(%track_id, "Track added to queue");
-    Ok(PlaybackQueue {
-        tracks,
-        current_index,
-    })
+    Ok(queue)
 }
 
 /// Remove the track at the given queue index.
 #[tauri::command]
 pub async fn remove_from_queue(
     index: usize,
+    app: AppHandle,
     player: State<'_, AudioPlayer>,
 ) -> Result<PlaybackQueue, String> {
     info!(index, "Remove from queue command received");
@@ -281,27 +300,27 @@ pub async fn remove_from_queue(
         .await
         .map_err(|e| format!("Remove from queue error: {e}"))?;
 
-    let tracks = player.get_queue().await;
-    let current_index = player.get_current_index().await;
+    let queue = build_queue(&player).await;
+    emit_queue_updated(&app, &queue).await;
 
     debug!(index, "Track removed from queue");
-    Ok(PlaybackQueue {
-        tracks,
-        current_index,
-    })
+    Ok(queue)
 }
 
 /// Clear the playback queue.
 #[tauri::command]
-pub async fn clear_queue(player: State<'_, AudioPlayer>) -> Result<PlaybackQueue, String> {
+pub async fn clear_queue(
+    app: AppHandle,
+    player: State<'_, AudioPlayer>,
+) -> Result<PlaybackQueue, String> {
     info!("Clear queue command received");
 
     player.clear_queue().await;
 
-    Ok(PlaybackQueue {
-        tracks: Vec::new(),
-        current_index: None,
-    })
+    let queue = build_queue(&player).await;
+    emit_queue_updated(&app, &queue).await;
+
+    Ok(queue)
 }
 
 // ============================================================================
@@ -369,4 +388,32 @@ async fn build_now_playing(player: &AudioPlayer, track: &Track) -> NowPlaying {
         repeat_mode: player.get_repeat_mode().await,
         shuffle_enabled: player.get_shuffle().await,
     }
+}
+
+/// Build the current queue snapshot for emission to the frontend.
+async fn build_queue(player: &AudioPlayer) -> PlaybackQueue {
+    PlaybackQueue {
+        tracks: player.get_queue().await,
+        current_index: player.get_current_index().await,
+    }
+}
+
+/// Notify the frontend of a playback-state change (play/pause/stop/seek).
+async fn emit_state_changed(app: &AppHandle, player: &AudioPlayer) {
+    if let Some(track) = player.get_current_track().await {
+        let now_playing = build_now_playing(player, &track).await;
+        let _ = app.emit("playback:state_changed", &now_playing);
+    }
+}
+
+/// Notify the frontend that the currently playing track changed.
+async fn emit_track_changed(app: &AppHandle, player: &AudioPlayer) {
+    if let Some(track) = player.get_current_track().await {
+        let _ = app.emit("playback:track_changed", &track);
+    }
+}
+
+/// Notify the frontend that the playback queue changed.
+async fn emit_queue_updated(app: &AppHandle, queue: &PlaybackQueue) {
+    let _ = app.emit("playback:queue_updated", queue);
 }
