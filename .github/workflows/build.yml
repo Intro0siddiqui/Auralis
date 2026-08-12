@@ -182,6 +182,23 @@ jobs:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
+      - name: Bundle C++ runtime (libc++_shared.so)
+        run: |
+          NDK_SYSROOT="$ANDROID_HOME/ndk/25.2.9519653/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
+          for spec in "aarch64-linux-android:arm64-v8a" "arm-linux-androideabi:armeabi-v7a" "i686-linux-android:x86" "x86_64-linux-android:x86_64"; do
+            lib="${spec%%:*}"
+            abi="${spec##*:}"
+            src="$NDK_SYSROOT/$lib/libc++_shared.so"
+            if [ ! -f "$src" ]; then
+              echo "WARN: libc++_shared.so not found for $lib at $src"
+              continue
+            fi
+            dest="gen/android/app/src/main/jniLibs/$abi"
+            mkdir -p "$dest"
+            cp "$src" "$dest/"
+            echo "Bundled libc++_shared.so -> $dest"
+          done
+
       - name: Generate keystore
         run: |
           keytool -genkeypair -v \
