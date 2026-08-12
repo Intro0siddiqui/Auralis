@@ -301,9 +301,11 @@ pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _reserved: *mut std::ffi::c_v
     ) else {
         return jni::sys::JNI_VERSION_1_6 as i32;
     };
-    let Ok(context_global) = env.new_global_ref(
-        jni::objects::JObject::from(current_application.l().unwrap_or(jni::objects::JObject::null())),
-    ) else {
+    let Ok(context_global) = env.new_global_ref(jni::objects::JObject::from(
+        current_application
+            .l()
+            .unwrap_or(jni::objects::JObject::null()),
+    )) else {
         return jni::sys::JNI_VERSION_1_6 as i32;
     };
     let ctx_ptr = context_global.as_raw() as *mut c_void;

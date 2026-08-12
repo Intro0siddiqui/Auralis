@@ -5,7 +5,7 @@
                 hx-post="/api/library/scan"
                 hx-trigger="click"
                 hx-swap="none"
-                hx-on::after-request="window.Auralis.toast('Library scan started','info')">
+                hx-on::after-request="window.Auralis.bridge.showToast('Library scan started','info')">
             <i data-lucide="folder-search"></i>
             Scan Library
         </button>

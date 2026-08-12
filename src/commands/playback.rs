@@ -3,9 +3,9 @@
 //! Tauri command handlers for the audio playback domain.
 
 use crate::domain::models::{NowPlaying, RepeatMode, Track};
+use crate::infrastructure::database::repositories::{parse_datetime, parse_format};
 use crate::infrastructure::database::Database;
 use crate::infrastructure::media::AudioPlayer;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tauri::State;
@@ -358,24 +358,6 @@ async fn lookup_track(
         .map_err(|e| format!("Track lookup error: {e}"))?;
 
     Ok(track)
-}
-
-fn parse_format(s: &str) -> crate::domain::models::AudioFormat {
-    match s.to_lowercase().as_str() {
-        "mp3" => crate::domain::models::AudioFormat::Mp3,
-        "flac" => crate::domain::models::AudioFormat::Flac,
-        "aac" => crate::domain::models::AudioFormat::Aac,
-        "ogg" => crate::domain::models::AudioFormat::Ogg,
-        "wav" => crate::domain::models::AudioFormat::Wav,
-        "m4a" => crate::domain::models::AudioFormat::M4a,
-        _ => crate::domain::models::AudioFormat::Mp3,
-    }
-}
-
-fn parse_datetime(s: &str) -> chrono::DateTime<chrono::Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
 }
 
 async fn build_now_playing(player: &AudioPlayer, track: &Track) -> NowPlaying {

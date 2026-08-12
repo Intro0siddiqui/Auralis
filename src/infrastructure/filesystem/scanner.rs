@@ -2,7 +2,7 @@
 //!
 //! Scans directories for music files.
 
-use crate::domain::models::{AudioFormat, ScanSummary};
+use crate::domain::models::{AudioFormat, ScanSummary, TrackFilter};
 use crate::domain::repositories::TrackRepository;
 use crate::infrastructure::filesystem::metadata::MetadataExtractor;
 use std::path::{Path, PathBuf};
@@ -84,7 +84,10 @@ impl DirectoryScanner {
         all_files
     }
 
-    /// Scan library paths and insert tracks into the repository
+    /// Scan library paths and insert tracks into the repository.
+    ///
+    /// After scanning, removes any database tracks whose file paths fall
+    /// within the scanned directories but no longer exist on disk.
     pub async fn scan_library_paths(
         &self,
         paths: &[PathBuf],
@@ -99,6 +102,10 @@ impl DirectoryScanner {
             errors: Vec::new(),
         };
 
+        // Collect the set of files found on disk for later comparison.
+        let mut found_files: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+
         for path in paths {
             info!(path = %path.display(), "Scanning path");
 
@@ -112,6 +119,10 @@ impl DirectoryScanner {
 
             let audio_files = self.scan(path).await?;
             info!(path = %path.display(), count = audio_files.len(), "Found audio files");
+
+            for file_path in &audio_files {
+                found_files.insert(file_path.clone());
+            }
 
             for file_path in audio_files {
                 debug!(path = %file_path.display(), "Processing file");
@@ -130,9 +141,41 @@ impl DirectoryScanner {
             }
         }
 
+        // Detect and remove tracks no longer present in the scanned directories.
+        let scan_prefixes: Vec<std::path::PathBuf> = paths.to_vec();
+        let all_tracks = track_repo
+            .find_all(TrackFilter::default())
+            .await
+            .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+
+        let mut ids_to_remove: Vec<uuid::Uuid> = Vec::new();
+        for track in &all_tracks {
+            let track_path = std::path::PathBuf::from(&track.file_path);
+            // Only consider tracks that live inside one of the scanned directories.
+            let in_scan_scope = scan_prefixes.iter().any(|p| track_path.starts_with(p));
+            if in_scan_scope && !found_files.contains(&track_path) {
+                ids_to_remove.push(track.id);
+            }
+        }
+
+        if !ids_to_remove.is_empty() {
+            let count = ids_to_remove.len() as u32;
+            summary.tracks_removed = count;
+            if let Err(e) = track_repo.delete_many(ids_to_remove).await {
+                error!(count = count, error = %e, "Failed to remove stale tracks");
+                summary
+                    .errors
+                    .push(format!("Failed to remove {count} stale tracks: {e}"));
+                summary.tracks_removed = 0;
+            } else {
+                info!(count = count, "Removed stale tracks");
+            }
+        }
+
         info!(
             added = summary.tracks_added,
             updated = summary.tracks_updated,
+            removed = summary.tracks_removed,
             errors = summary.errors.len(),
             "Library scan completed"
         );
