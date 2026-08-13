@@ -59,12 +59,15 @@
     }
     
     #content {
+        position: fixed;
+        top: 0;
         left: 0;
+        right: 0;
         width: 100vw;
-        height: calc(100vh - var(--player-height-mobile) - var(--mobile-nav-height) - env(safe-area-inset-bottom) - env(safe-area-inset-top));
-        padding-top: calc(var(--space-3) + env(safe-area-inset-top));
-        padding-bottom: calc(var(--space-6) + env(safe-area-inset-bottom));
         bottom: calc(var(--player-height-mobile) + var(--mobile-nav-height) + env(safe-area-inset-bottom));
+        height: auto;
+        padding-top: calc(var(--space-3) + env(safe-area-inset-top));
+        padding-bottom: var(--space-4);
     }
     
     #mobile-nav {
@@ -75,6 +78,8 @@
         right: 0;
         height: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom));
         padding-bottom: env(safe-area-inset-bottom);
+        align-items: flex-start;
+        padding-top: 8px;
         z-index: var(--z-mobile-nav);
     }
     
@@ -88,6 +93,17 @@
         padding: var(--space-2) var(--space-4);
         gap: var(--space-2);
         z-index: var(--z-player-bar);
+    }
+
+    /* Android Soft Keyboard Active State */
+    body.keyboard-open #mobile-nav,
+    body.keyboard-open #player-bar {
+        display: none !important;
+    }
+    
+    body.keyboard-open #content {
+        bottom: 0 !important;
+        height: 100% !important;
     }
     
     .player-track {

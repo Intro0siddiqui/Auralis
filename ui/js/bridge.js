@@ -41,6 +41,17 @@ class Bridge {
         } catch (e) {
             console.warn('Tauri bridge not available:', e);
         }
+
+        this.initKeyboardHandler();
+    }
+
+    initKeyboardHandler() {
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', () => {
+                const isKeyboardOpen = window.visualViewport.height < window.innerHeight - 150;
+                document.body.classList.toggle('keyboard-open', isKeyboardOpen);
+            });
+        }
     }
 
     on(event, callback) {
