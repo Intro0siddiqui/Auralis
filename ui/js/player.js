@@ -181,7 +181,7 @@ class PlayerController {
         this.updatePlayButton();
         this.startTimeTracking();
         if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('plugin:playback|resume').catch(() => {});
+            window.__TAURI_INTERNALS__.invoke('resume').catch(() => {});
         }
     }
 
@@ -190,19 +190,19 @@ class PlayerController {
         this.updatePlayButton();
         this.stopTimeTracking();
         if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('plugin:playback|pause').catch(() => {});
+            window.__TAURI_INTERNALS__.invoke('pause').catch(() => {});
         }
     }
 
     next() {
         if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('plugin:playback|next').catch(() => {});
+            window.__TAURI_INTERNALS__.invoke('next_track').catch(() => {});
         }
     }
 
     previous() {
         if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('plugin:playback|previous').catch(() => {});
+            window.__TAURI_INTERNALS__.invoke('previous_track').catch(() => {});
         }
     }
 
@@ -210,7 +210,7 @@ class PlayerController {
         this.progress = pct * this.duration;
         this.updateProgressUI();
         if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('plugin:playback|seek', { positionSecs: Math.floor(this.progress) }).catch(() => {});
+            window.__TAURI_INTERNALS__.invoke('seek', { position_secs: Math.floor(this.progress) }).catch(() => {});
         }
     }
 

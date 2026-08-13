@@ -75,8 +75,15 @@ impl AuralisApp {
             .setup(|app| {
                 info!("Running Tauri setup phase");
 
-                // Initialize database
                 let app_handle = app.handle().clone();
+
+                // Seed the Android ndk-context global (no-op on non-Android and
+                // when JNI_OnLoad already did it). Must run before audio init.
+                if let Err(e) = Self::init_android_context(&app_handle) {
+                    tracing::error!(error = %e, "Failed to initialize android context");
+                }
+
+                // Initialize database
                 if let Err(e) = Self::init_database(&app_handle) {
                     tracing::error!(error = %e, "Failed to initialize database");
                 }
@@ -165,6 +172,38 @@ impl AuralisApp {
                 commands::templates::render_partial,
             ])
             .build(tauri::generate_context!())
+    }
+
+    /// Seed the Android `ndk_context` global used by the cpal/oboe audio backend.
+    ///
+    /// `JNI_OnLoad` already seeds this as early as possible, but the global
+    /// Android `Application` may not exist yet at `.so` load time. By the time
+    /// `setup` runs the `Application` is guaranteed to be live, so retry here as
+    /// a belt-and-suspenders fallback. Idempotent (no-op if already seeded) and
+    /// a no-op on non-Android targets.
+    fn init_android_context(
+        _app_handle: &tauri::AppHandle,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(target_os = "android")]
+        {
+            use std::sync::atomic::Ordering;
+
+            let vm_ptr = android_jni::INITIAL_VM.load(Ordering::SeqCst);
+            if vm_ptr.is_null() {
+                tracing::warn!(
+                    "Android JavaVM was not captured in JNI_OnLoad; ndk_context may be unset"
+                );
+            } else {
+                // SAFETY: `vm_ptr` was captured from the live JavaVM in JNI_OnLoad.
+                let Ok(vm) = (unsafe { jni::JavaVM::from_raw(vm_ptr as *mut jni::sys::JavaVM) })
+                else {
+                    tracing::warn!("Failed to reconstruct JavaVM from JNI_OnLoad pointer");
+                    return Ok(());
+                };
+                android_jni::try_seed(&vm);
+            }
+        }
+        Ok(())
     }
 
     /// Initialize the database connection and run migrations
@@ -273,46 +312,93 @@ pub fn run() {
     AuralisApp::run()
 }
 
-/// Export the Android JNI context for NDK crates that read the global
-/// `ndk-context`.
+/// Android-only helpers for seeding the `ndk-context` global consumed by the
+/// cpal/oboe audio backend.
 ///
 /// Tauri v2's Android backend does not call `ndk_context::initialize_android_context`,
 /// but `oboe` (cpal's Android audio backend) panics with "android context was not
-/// initialized" if the global is left empty. The runtime invokes `JNI_OnLoad` once
-/// when the library is loaded, before any command runs, so we seed the global here.
+/// initialized" if the global is left empty. We are the sole initializer (no
+/// `android_activity` / `ndk-glue` in the dep tree), so our `SEEDED` flag is
+/// authoritative and prevents the double-seed abort that `ndk_context` asserts
+/// against.
+#[cfg(target_os = "android")]
+mod android_jni {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+
+    /// Set once we have successfully seeded the ndk-context global.
+    static SEEDED: AtomicBool = AtomicBool::new(false);
+
+    /// The live `JavaVM*` captured in `JNI_OnLoad`, so `setup` can retry the seed
+    /// later once the `Application` object is guaranteed to exist.
+    pub static INITIAL_VM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+    /// Seed the `ndk_context` global from `android.app.ActivityThread.currentApplication()`.
+    ///
+    /// Returns `true` when the global is (or already was) seeded. Fails silently
+    /// and returns `false` when the `Application` is not available yet, leaving the
+    /// global untouched — we never write a null context, which would poison the
+    /// audio backend.
+    pub fn try_seed(vm: &jni::JavaVM) -> bool {
+        if SEEDED.load(Ordering::SeqCst) {
+            return true;
+        }
+
+        // No-op (non-detaching) when the current thread is already attached, as
+        // in `setup`.
+        let Ok(mut env) = vm.attach_current_thread() else {
+            return false;
+        };
+        let Ok(activity_thread) = env.find_class("android/app/ActivityThread") else {
+            return false;
+        };
+        let Ok(current_application) = env.call_static_method(
+            activity_thread,
+            "currentApplication",
+            "()Landroid/app/Application;",
+            &[],
+        ) else {
+            return false;
+        };
+        let Ok(app_object) = current_application.l() else {
+            return false;
+        };
+        if app_object.is_null() {
+            // Application not ready yet — do not poison the global with a null
+            // context. `setup` retries once it is guaranteed present.
+            return false;
+        }
+
+        let Ok(context_global) = env.new_global_ref(app_object) else {
+            return false;
+        };
+        let context_ptr = context_global.as_raw() as *mut c_void;
+        let vm_ptr = vm.get_java_vm_pointer() as *mut c_void;
+        // Leak the global ref so the Application jobject stays valid for the whole
+        // process lifetime (ndk-context only stores the raw pointer).
+        std::mem::forget(context_global);
+        unsafe {
+            ndk_context::initialize_android_context(vm_ptr, context_ptr);
+        }
+        SEEDED.store(true, Ordering::SeqCst);
+        tracing::debug!("ndk_context seeded from ActivityThread.currentApplication()");
+        true
+    }
+}
+
+/// The runtime invokes `JNI_OnLoad` once when the library is loaded, before any
+/// command runs. We capture the live `JavaVM` here and attempt an early seed of
+/// the `ndk-context` global; if the `Application` isn't present yet, `setup`
+/// retries via [`AuralisApp::init_android_context`].
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
 #[no_mangle]
 pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _reserved: *mut std::ffi::c_void) -> i32 {
     use std::ffi::c_void;
+    use std::sync::atomic::Ordering;
 
-    let Ok(mut env) = vm.attach_current_thread() else {
-        return jni::sys::JNI_VERSION_1_6 as i32;
-    };
-    // android.app.ActivityThread.currentApplication() -> the global Application (a Context).
-    let Ok(activity_thread) = env.find_class("android/app/ActivityThread") else {
-        return jni::sys::JNI_VERSION_1_6 as i32;
-    };
-    let Ok(current_application) = env.call_static_method(
-        activity_thread,
-        "currentApplication",
-        "()Landroid/app/Application;",
-        &[],
-    ) else {
-        return jni::sys::JNI_VERSION_1_6 as i32;
-    };
-    let Ok(context_global) = env.new_global_ref(
-        jni::objects::JObject::from(current_application.l().unwrap_or(jni::objects::JObject::null())),
-    ) else {
-        return jni::sys::JNI_VERSION_1_6 as i32;
-    };
-    let ctx_ptr = context_global.as_raw() as *mut c_void;
-    let vm_ptr = vm.get_java_vm_pointer() as *mut c_void;
-    // Leak the global ref so the context stays valid for the process lifetime.
-    std::mem::forget(context_global);
-    unsafe {
-        ndk_context::initialize_android_context(vm_ptr, ctx_ptr);
-    }
+    android_jni::INITIAL_VM.store(vm.get_java_vm_pointer() as *mut c_void, Ordering::SeqCst);
+    android_jni::try_seed(&vm);
 
     jni::sys::JNI_VERSION_1_6 as i32
 }

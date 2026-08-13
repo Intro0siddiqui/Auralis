@@ -17,11 +17,6 @@ fn partials_dir() -> &'static PathBuf {
     })
 }
 
-fn load_partial(name: &str) -> Option<String> {
-    let path = partials_dir().join(format!("{name}.html"));
-    std::fs::read_to_string(path).ok()
-}
-
 static PARTIAL_CACHE: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 fn partial_cache() -> &'static HashMap<String, String> {

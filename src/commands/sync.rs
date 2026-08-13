@@ -3,9 +3,10 @@
 //! Tauri command handlers for P2P device synchronization.
 
 use crate::domain::models::{PairedDevice, PairingInfo, SyncStatus};
-use crate::domain::repositories::{SettingsRepository, SyncRepository, TrackRepository};
+use crate::domain::repositories::{SettingsRepository, SyncRepository};
 use crate::domain::services::SyncService;
 use crate::infrastructure::database::Database;
+use crate::infrastructure::network::SyncEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
@@ -19,18 +20,18 @@ pub struct CompletePairingRequest {
 }
 
 /// Build a SyncService wired to database-backed repositories.
-pub fn build_sync_service(db: &Database) -> SyncService {
+pub fn build_sync_service(db: &Database, sync_engine: SyncEngine) -> SyncService {
     use crate::infrastructure::database::repositories::{
-        SqliteSettingsRepository, SqliteSyncRepository, SqliteTrackRepository,
+        SqliteSettingsRepository, SqliteSyncRepository,
     };
 
     let db = Arc::new(db.clone());
     let settings_repository: Arc<dyn SettingsRepository> =
         Arc::new(SqliteSettingsRepository::new(db.clone()));
     let sync_repository: Arc<dyn SyncRepository> = Arc::new(SqliteSyncRepository::new(db.clone()));
-    let track_repository: Arc<dyn TrackRepository> = Arc::new(SqliteTrackRepository::new(db));
+    let sync_engine = Arc::new(sync_engine);
 
-    SyncService::new(settings_repository, sync_repository, track_repository)
+    SyncService::new(settings_repository, sync_repository, sync_engine)
 }
 
 /// Get all paired devices.
@@ -56,10 +57,13 @@ pub async fn complete_pairing(
     service: State<'_, SyncService>,
     request: CompletePairingRequest,
 ) -> Result<PairedDevice, String> {
-    service.complete_pairing(request.pin).await.map_err(|e| {
-        tracing::error!(error = %e, "Failed to complete pairing");
-        format!("Failed to complete pairing: {e}")
-    })
+    service
+        .complete_pairing(request.pin.clone(), request.device_name)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to complete pairing");
+            format!("Failed to complete pairing: {e}")
+        })
 }
 
 /// Unpair (remove) a device.

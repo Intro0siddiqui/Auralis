@@ -20,11 +20,6 @@ class Bridge {
                     this.updatePlayerBar(event.payload);
                 });
 
-                await listen('playback:progress', (event) => {
-                    this.emit('playback:progress', event.payload);
-                    this.updateProgress(event.payload);
-                });
-
                 await listen('playback:queue_updated', (event) => {
                     this.emit('playback:queue', event.payload);
                 });
@@ -40,16 +35,7 @@ class Bridge {
 
                 await listen('library:scan_complete', (event) => {
                     this.emit('library:scan', event.payload);
-                    this.showToast(`Library scan complete: ${event.payload.new_tracks} new tracks`, 'info');
-                });
-
-                await listen('sync:device_discovered', (event) => {
-                    this.emit('sync:device', event.payload);
-                });
-
-                await listen('sync:pairing_request', (event) => {
-                    this.emit('sync:pairing', event.payload);
-                    this.showToast('Pairing request received', 'info');
+                    this.showToast(`Library scan complete: ${event.payload.tracks_added} new tracks`, 'info');
                 });
             }
         } catch (e) {

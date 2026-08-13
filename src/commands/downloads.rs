@@ -2,11 +2,13 @@
 //!
 //! Tauri command handlers for media downloads via yt-dlp.
 
-use crate::domain::models::{AudioFormat, DownloadProgress};
-use crate::infrastructure::media::downloader::Downloader;
+use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
+use crate::infrastructure::media::downloader::{ytdlp_executable, Downloader};
 use serde::{Deserialize, Serialize};
-use tauri::State;
-use tracing::{error, info};
+use std::process::Stdio;
+use tauri::{AppHandle, Emitter, State};
+use tokio::process::Command;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 /// Download request
@@ -29,6 +31,7 @@ pub struct PlaylistDownloadRequest {
 #[tauri::command]
 pub async fn download_audio(
     request: DownloadRequest,
+    app: AppHandle,
     downloader: State<'_, Downloader>,
 ) -> Result<DownloadProgress, String> {
     info!(url = %request.url, "Download audio requested");
@@ -48,6 +51,31 @@ pub async fn download_audio(
         .await
         .ok_or("Download not found after starting")?;
 
+    // Stream progress + completion events to the frontend while the
+    // underlying yt-dlp process runs.
+    let app_handle = app.clone();
+    let dl = (*downloader).clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match dl.get_progress(id).await {
+                Some(progress) => {
+                    let _ = app_handle.emit("download:progress", &progress);
+                    if matches!(
+                        progress.status,
+                        DownloadStatus::Completed
+                            | DownloadStatus::Failed
+                            | DownloadStatus::Cancelled
+                    ) {
+                        let _ = app_handle.emit("download:completed", &progress);
+                        break;
+                    }
+                }
+                None => break,
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
+
     Ok(state)
 }
 
@@ -60,22 +88,73 @@ pub async fn download_playlist(
     info!(url = %request.url, "Playlist download requested");
 
     let format = request.format.unwrap_or(AudioFormat::Mp3);
+    let max_items = request.max_items.unwrap_or(50) as usize;
 
-    let id = downloader
-        .download(&request.url, format)
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to start playlist download");
-            e.to_string()
-        })?;
+    // Use yt-dlp to extract individual track URLs from the playlist.
+    // Resolves the bundled sidecar if present, otherwise falls back to PATH.
+    let mut cmd = Command::new(ytdlp_executable());
+    cmd.args([
+        "--flat-playlist",
+        "--dump-json",
+        "--playlist-end",
+        &max_items.to_string(),
+        &request.url,
+    ]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
-    let state = downloader
-        .get_progress(id)
-        .await
-        .ok_or("Download not found after starting")?;
+    let output = cmd.output().await.map_err(|e| {
+        error!(error = %e, "Failed to launch yt-dlp for playlist extraction");
+        format!("Failed to launch yt-dlp: {e}")
+    })?;
 
-    let _max_items = request.max_items.unwrap_or(10);
-    Ok(vec![state])
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!(stderr = %stderr, "yt-dlp playlist extraction failed");
+        return Err(format!("Failed to extract playlist: {stderr}"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut track_urls: Vec<String> = Vec::new();
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(entry) => {
+                if let Some(url) = entry.get("url").and_then(|u| u.as_str()) {
+                    track_urls.push(url.to_string());
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, line = %line, "Failed to parse playlist entry JSON");
+            }
+        }
+    }
+
+    if track_urls.is_empty() {
+        return Err("No tracks found in playlist".to_string());
+    }
+
+    info!(count = track_urls.len(), "Extracted playlist track URLs");
+
+    let mut results: Vec<DownloadProgress> = Vec::with_capacity(track_urls.len());
+
+    for url in track_urls {
+        match downloader.download(&url, format).await {
+            Ok(id) => {
+                if let Some(progress) = downloader.get_progress(id).await {
+                    results.push(progress);
+                }
+            }
+            Err(e) => {
+                error!(url = %url, error = %e, "Failed to queue playlist track");
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 /// Pause an in-progress download.

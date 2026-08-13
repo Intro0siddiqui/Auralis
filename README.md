@@ -169,6 +169,21 @@ See [AGENTS.md](AGENTS.md) for detailed implementation guidelines and the roadma
 
 ---
 
+## Media Downloading Dependencies (yt-dlp / ffmpeg)
+
+Downloads are handled by spawning `yt-dlp` as a subprocess (with `ffmpeg` used by
+yt-dlp for post-processing). These binaries are **required** at runtime:
+
+- **Bundled sidecar (recommended):** `tauri.conf.json` lists `bin/yt-dlp` and
+  `bin/ffmpeg` under `bundle.externalBin`. Place the matching binaries in
+  `src-tauri/bin/` (Tauri appends `.exe` automatically on Windows) so they are
+  shipped next to the executable. The Rust code resolves them via
+  `std::env::current_exe()`'s directory and falls back to `PATH`.
+- **System `PATH`:** if no sidecar is bundled, the bare `yt-dlp` / `ffmpeg`
+  names are used and must exist on the `PATH`.
+
+---
+
 ## License
 
 MIT — see the original Auralis v1 repository for details.

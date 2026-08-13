@@ -852,7 +852,7 @@ impl SyncRepository for SqliteSyncRepository {
 // Helper functions
 // ============================================================================
 
-fn parse_format(s: &str) -> AudioFormat {
+pub fn parse_format(s: &str) -> AudioFormat {
     match s.to_lowercase().as_str() {
         "mp3" => AudioFormat::Mp3,
         "flac" => AudioFormat::Flac,
@@ -864,7 +864,7 @@ fn parse_format(s: &str) -> AudioFormat {
     }
 }
 
-fn parse_datetime(s: &str) -> DateTime<Utc> {
+pub fn parse_datetime(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())

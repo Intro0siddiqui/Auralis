@@ -55,6 +55,7 @@ pub struct SwarmBehaviour {
 }
 
 /// Commands sent from the public API to the background swarm task.
+#[allow(dead_code)]
 enum NetworkCommand {
     Dial {
         peer_id: Option<PeerId>,
@@ -144,6 +145,7 @@ impl NetworkRuntime {
 
     /// Builds the swarm behaviour from a fresh session and a command channel.
     /// The receiver is moved into the background task by the caller.
+    #[allow(clippy::type_complexity)]
     fn build(
         &self,
         listen_port: u16,
@@ -209,9 +211,17 @@ impl NetworkRuntime {
         self.last_gossip.read().await.clone()
     }
 
+    #[allow(dead_code)]
     fn record_bytes_received(&self, n: u64) {
         if let Ok(mut stats) = self.stats.lock() {
             stats.bytes_received = stats.bytes_received.saturating_add(n);
+        }
+    }
+
+    /// Record bytes sent over the network.
+    fn record_bytes_sent(&self, n: u64) {
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.bytes_sent = stats.bytes_sent.saturating_add(n);
         }
     }
 }
@@ -376,6 +386,16 @@ pub struct SyncEngine {
     queue: StdMutex<Vec<serde_json::Value>>,
 }
 
+impl Clone for SyncEngine {
+    fn clone(&self) -> Self {
+        Self {
+            peer_id: self.peer_id.clone(),
+            runtime: self.runtime.clone(),
+            queue: StdMutex::new(Vec::new()),
+        }
+    }
+}
+
 impl SyncEngine {
     /// Create a standalone sync engine with its own keypair/swarm.
     pub fn new() -> Self {
@@ -495,31 +515,6 @@ impl SyncEngine {
             Err(_) => Err(NetworkError::Timeout),
         }
     }
-
-    /// Connection status for a single peer (from libp2p swarm events).
-    pub async fn connection_status(&self, peer: &str) -> ConnectionState {
-        match PeerId::from_str(peer) {
-            Ok(pid) => self
-                .runtime
-                .connections
-                .read()
-                .await
-                .get(&pid)
-                .copied()
-                .unwrap_or(ConnectionState::Disconnected),
-            Err(_) => ConnectionState::Disconnected,
-        }
-    }
-
-    /// Connection status for all known peers.
-    pub async fn connections(&self) -> Vec<(String, ConnectionState)> {
-        self.runtime.connections().await
-    }
-
-    /// The most recently received sync request (populated by the swarm task).
-    pub async fn last_received_sync(&self) -> Option<SyncRequest> {
-        self.runtime.last_received_sync().await
-    }
 }
 
 impl Default for SyncEngine {
@@ -568,6 +563,18 @@ pub struct NetworkStats {
     pub bytes_received: u64,
     pub active_connections: u32,
     pub discovered_peers: u32,
+}
+
+impl NetworkStats {
+    /// Record bytes sent over the network.
+    pub fn record_bytes_sent(&mut self, n: u64) {
+        self.bytes_sent = self.bytes_sent.saturating_add(n);
+    }
+
+    /// Record bytes received from the network.
+    pub fn record_bytes_received(&mut self, n: u64) {
+        self.bytes_received = self.bytes_received.saturating_add(n);
+    }
 }
 
 /// Builds the fully configured libp2p swarm for a node.
@@ -659,11 +666,17 @@ async fn run_swarm(
                         for addr in addrs {
                             swarm.add_peer_address(peer_id, addr);
                         }
+                        let req_bytes = serde_json::to_vec(&request)
+                            .unwrap_or_default()
+                            .len() as u64;
+                        runtime.record_bytes_sent(req_bytes);
                         let request_id =
                             swarm.behaviour_mut().request_response.send_request(&peer_id, request);
                         pending.insert(request_id, reply);
                     }
                     Some(NetworkCommand::Publish { topic, data }) => {
+                        let msg_len = data.len() as u64;
+                        runtime.record_bytes_sent(msg_len);
                         let topic = gossipsub::IdentTopic::new(topic);
                         let hash = topic.hash();
                         match swarm.behaviour_mut().gossipsub.publish(hash, data) {
@@ -800,20 +813,19 @@ async fn handle_swarm_event(
                 debug!(%peer_id, "Connection closed");
             }
         }
-        SwarmEvent::Dialing { peer_id, .. } => {
-            if let Some(peer_id) = peer_id {
-                runtime
-                    .set_connection(peer_id, ConnectionState::Dialing)
-                    .await;
-            }
+        SwarmEvent::Dialing {
+            peer_id: Some(peer_id),
+            ..
+        } => {
+            runtime
+                .set_connection(peer_id, ConnectionState::Dialing)
+                .await;
         }
         SwarmEvent::NewListenAddr { address, .. } => {
             info!(%address, "Listening on address");
         }
-        SwarmEvent::ListenerClosed { reason, .. } => {
-            if let Err(e) = reason {
-                error!(error = ?e, "Listener closed with error");
-            }
+        SwarmEvent::ListenerClosed { reason: Err(e), .. } => {
+            error!(error = ?e, "Listener closed with error");
         }
         SwarmEvent::OutgoingConnectionError {
             peer_id: Some(peer_id),

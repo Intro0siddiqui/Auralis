@@ -1,0 +1,36 @@
+<section class="page-downloads">
+    <header class="section-header">
+        <h2 class="section-title">Download Audio</h2>
+    </header>
+
+    <div class="card" style="padding: var(--space-2);">
+        <form id="download-form" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
+            <input type="url" name="url" class="input" placeholder="YouTube / SoundCloud / Bandcamp URL"
+                   style="flex: 1; min-width: 200px;" required>
+            <select name="format" class="input">
+                <option value="mp3">MP3</option>
+                <option value="flac">FLAC</option>
+                <option value="m4a">M4A</option>
+                <option value="wav">WAV</option>
+            </select>
+            <button type="submit" class="btn btn-primary">
+                <i data-lucide="download"></i>
+                Start Download
+            </button>
+        </form>
+    </div>
+
+    <div class="section-header" style="margin-top: var(--space-6);">
+        <h2 class="section-title">Active Downloads</h2>
+    </div>
+
+    <div id="downloads-list" class="track-list">
+        <div class="empty-state">
+            <div class="empty-state-icon">
+                <i data-lucide="download"></i>
+            </div>
+            <h2 class="empty-state-title">No active downloads</h2>
+            <p class="empty-state-description">Add a URL above to start downloading.</p>
+        </div>
+    </div>
+</section>

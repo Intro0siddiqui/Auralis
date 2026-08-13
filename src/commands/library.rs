@@ -9,6 +9,7 @@ use crate::infrastructure::database::Database;
 use crate::infrastructure::filesystem::scanner::DirectoryScanner;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tauri::Emitter;
 use tauri::State;
 use uuid::Uuid;
 
@@ -139,6 +140,7 @@ pub async fn delete_tracks(db: State<'_, Database>, ids: Vec<Uuid>) -> Result<u3
 /// Trigger a library scan over the configured paths.
 #[tauri::command]
 pub async fn scan_library_paths(
+    app: tauri::AppHandle,
     db: State<'_, Database>,
     paths: Option<Vec<String>>,
 ) -> Result<ScanSummary, String> {
@@ -154,11 +156,16 @@ pub async fn scan_library_paths(
 
     let repo = track_repo(&db);
 
-    scanner
+    let summary = scanner
         .scan_library_paths(&scan_paths, repo)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Scan failed");
             format!("Scan failed: {e}")
-        })
+        })?;
+
+    // Notify the frontend that the scan finished so it can refresh.
+    let _ = app.emit("library:scan_complete", &summary);
+
+    Ok(summary)
 }

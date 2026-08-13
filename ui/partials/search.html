@@ -1,0 +1,26 @@
+<section class="page-search">
+    <header class="section-header">
+        <h2 class="section-title">Search</h2>
+    </header>
+
+    <div class="card" style="padding: var(--space-3);">
+        <form id="search-form" style="display: flex; gap: var(--space-2);">
+            <input type="search" name="q" class="input" placeholder="Search tracks, artists, albums..."
+                   style="flex: 1;" autocomplete="off">
+            <button type="submit" class="btn btn-primary">
+                <i data-lucide="search"></i>
+                Search
+            </button>
+        </form>
+    </div>
+
+    <div id="search-results" class="track-list">
+        <div class="empty-state">
+            <div class="empty-state-icon">
+                <i data-lucide="search"></i>
+            </div>
+            <h2 class="empty-state-title">Search your library</h2>
+            <p class="empty-state-description">Enter a query above to find tracks, artists, or albums.</p>
+        </div>
+    </div>
+</section>
