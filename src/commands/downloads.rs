@@ -3,7 +3,7 @@
 //! Tauri command handlers for media downloads via yt-dlp.
 
 use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
-use crate::infrastructure::media::downloader::Downloader;
+use crate::infrastructure::media::downloader::{ytdlp_executable, Downloader};
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use tauri::{AppHandle, Emitter, State};
@@ -91,7 +91,8 @@ pub async fn download_playlist(
     let max_items = request.max_items.unwrap_or(50) as usize;
 
     // Use yt-dlp to extract individual track URLs from the playlist.
-    let mut cmd = Command::new("yt-dlp");
+    // Resolves the bundled sidecar if present, otherwise falls back to PATH.
+    let mut cmd = Command::new(ytdlp_executable());
     cmd.args([
         "--flat-playlist",
         "--dump-json",

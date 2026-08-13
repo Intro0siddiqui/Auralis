@@ -44,6 +44,43 @@ pub struct MediaInfo {
     pub thumbnail: Option<String>,
 }
 
+/// Resolve the path to a Tauri sidecar (an `externalBin` binary bundled next to
+/// the application executable). If no sidecar is bundled, falls back to the
+/// bare program name so the system `PATH` is used.
+///
+/// Tauri copies `externalBin` entries into the same directory as the main
+/// executable on every platform (appending `.exe` on Windows), so checking the
+/// executable's parent directory is the portable way to locate a bundled
+/// `yt-dlp` / `ffmpeg` without relying on `PATH`.
+fn resolve_sidecar(name: &str) -> PathBuf {
+    let candidates: &[&str] = if cfg!(windows) {
+        &[&format!("{name}.exe"), name]
+    } else {
+        &[name]
+    };
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for candidate in candidates {
+                let path = dir.join(candidate);
+                if path.is_file() {
+                    return path;
+                }
+            }
+        }
+    }
+
+    PathBuf::from(name)
+}
+
+/// Path to the `yt-dlp` executable (bundled sidecar if present, else `PATH`).
+///
+/// Exposed so command handlers that invoke `yt-dlp` directly (e.g. playlist
+/// extraction) resolve the same binary as the downloader.
+pub fn ytdlp_executable() -> PathBuf {
+    resolve_sidecar("yt-dlp")
+}
+
 /// Downloader errors
 #[derive(Debug, thiserror::Error)]
 pub enum DownloaderError {
@@ -67,6 +104,9 @@ pub enum DownloaderError {
 
     #[error("Download not found: {0}")]
     DownloadNotFound(Uuid),
+
+    #[error("Operation not supported on this platform: {0}")]
+    PlatformUnsupported(String),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -95,22 +135,42 @@ impl Downloader {
             .map_err(|e| DownloaderError::ProcessError(format!("Failed to send SIGCONT: {e}")))
     }
 
-    /// Pause a child process (Windows fallback: no-op, marked unsupported).
+    /// Pause a child process on Windows.
+    ///
+    /// NOTE: Pausing an *active* child process is not implemented on Windows.
+    /// Unlike Unix (`SIGSTOP`/`SIGCONT`), Windows has no portable process-level
+    /// suspend signal exposed through the standard library, and adding the
+    /// `windows` crate just to call `NtSuspendProcess` is out of scope here.
+    /// Rather than silently doing nothing (the previous behavior), we return a
+    /// clear error so the UI/command layer can surface it instead of appearing
+    /// to pause while the download keeps running.
     #[cfg(windows)]
     fn signal_pause(_child: &tokio::process::Child) -> Result<(), DownloaderError> {
-        Ok(())
+        Err(DownloaderError::PlatformUnsupported(
+            "Pausing an active download is not supported on Windows".to_string(),
+        ))
     }
 
-    /// Resume a child process (Windows fallback: no-op, marked unsupported).
+    /// Resume a child process on Windows. See `signal_pause` for rationale.
     #[cfg(windows)]
     fn signal_continue(_child: &tokio::process::Child) -> Result<(), DownloaderError> {
-        Ok(())
+        Err(DownloaderError::PlatformUnsupported(
+            "Resuming a paused download is not supported on Windows".to_string(),
+        ))
     }
     /// Create a new downloader
     pub fn new(output_dir: PathBuf) -> Self {
+        // If a bundled `ffmpeg` sidecar is present next to the executable, point
+        // yt-dlp at its directory so post-processing works without `ffmpeg`
+        // being on the system `PATH`.
+        let ffmpeg_sidecar = resolve_sidecar("ffmpeg");
+        let ffmpeg_path = ffmpeg_sidecar
+            .is_file()
+            .then(|| ffmpeg_sidecar.to_string_lossy().to_string());
+
         Self {
             output_dir,
-            ffmpeg_path: None,
+            ffmpeg_path,
             active_downloads: Arc::new(RwLock::new(HashMap::new())),
             processes: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -293,7 +353,7 @@ impl Downloader {
     pub async fn get_info(&self, url: &str) -> Result<MediaInfo, DownloaderError> {
         info!(url = %url, "Getting media info");
 
-        let output = Command::new("yt-dlp")
+        let output = Command::new(ytdlp_executable())
             .args(["--dump-json", "--no-download", url])
             .output()
             .await
@@ -317,7 +377,7 @@ impl Downloader {
 
     /// Check if yt-dlp is available
     async fn is_ytdlp_available(&self) -> bool {
-        Command::new("yt-dlp")
+        Command::new(ytdlp_executable())
             .arg("--version")
             .output()
             .await
@@ -355,7 +415,7 @@ impl Downloader {
             .to_string_lossy()
             .to_string();
 
-        let mut cmd = Command::new("yt-dlp");
+        let mut cmd = Command::new(ytdlp_executable());
         cmd.args([
             "-x",
             "--audio-format",

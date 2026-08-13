@@ -36,6 +36,12 @@ impl DirectoryScanner {
                 "**/*.opus".to_string(),
                 "**/*.m4a".to_string(),
             ],
+            // NOTE: The `".*"` / `".*/"` exclude patterns only filter Unix-style
+            // dotfiles (files/dirs whose name begins with `.`). Windows marks
+            // hidden files via filesystem attributes instead, so this pattern
+            // will NOT exclude them. This is a deliberate Unix-centric
+            // assumption; filtering Windows hidden files would require checking
+            // file attributes via the `windows` crate.
             vec![".*".to_string(), ".*/".to_string()],
         )
     }
@@ -47,10 +53,17 @@ impl DirectoryScanner {
         let mut files = Vec::new();
 
         for pattern in &self.include_patterns {
-            let full_pattern = path.join(pattern);
-            debug!(pattern = %full_pattern.display(), "Scanning with pattern");
+            // Build a glob pattern with a single, consistent separator. A naive
+            // `path.join(pattern)` mixes `\` (from the base path on Windows)
+            // with `/` (from the `**/*.ext` suffix), which confuses the `glob`
+            // parser and yields zero matches. Normalizing every separator to
+            // `/` is safe on all platforms: `glob` treats `/` as the pattern
+            // separator everywhere and matches path components by name.
+            let base = path.to_string_lossy().replace('\\', "/");
+            let full_pattern = format!("{}/{}", base.trim_end_matches('/'), pattern);
+            debug!(pattern = %full_pattern, "Scanning with pattern");
 
-            match glob::glob(full_pattern.to_str().unwrap_or("")) {
+            match glob::glob(&full_pattern) {
                 Ok(entries) => {
                     for entry in entries.filter_map(|e| e.ok()) {
                         if entry.is_file() && !self.is_excluded(&entry) {
@@ -229,6 +242,10 @@ impl DirectoryScanner {
     }
 
     /// Check if a path should be excluded
+    ///
+    /// NOTE: This is Unix-centric — it only matches names beginning with `.`
+    /// (dotfiles). Windows hidden files are marked via filesystem attributes
+    /// and are not excluded by these patterns. See `default_audio`.
     fn is_excluded(&self, path: &Path) -> bool {
         let path_str = path.to_string_lossy();
 
