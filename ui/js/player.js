@@ -133,7 +133,7 @@ class PlayerController {
 
     bindKeyboard() {
         document.addEventListener('keydown', (e) => {
-            if (e.target.matches('input, textarea')) return;
+            if (e.target.matches('input, textarea, select, [contenteditable="true"]')) return;
 
             switch (e.code) {
                 case 'Space':
@@ -166,6 +166,26 @@ class PlayerController {
                     break;
             }
         });
+
+        this.bindMediaSession();
+    }
+
+    bindMediaSession() {
+        if (!('mediaSession' in navigator)) return;
+
+        try {
+            navigator.mediaSession.setActionHandler('play', () => this.play());
+            navigator.mediaSession.setActionHandler('pause', () => this.pause());
+            navigator.mediaSession.setActionHandler('previoustrack', () => this.previous());
+            navigator.mediaSession.setActionHandler('nexttrack', () => this.next());
+            navigator.mediaSession.setActionHandler('seekto', (details) => {
+                if (details.seekTime !== undefined && this.duration) {
+                    this.seek(details.seekTime);
+                }
+            });
+        } catch (err) {
+            console.warn('MediaSession handler error:', err);
+        }
     }
 
     togglePlay() {

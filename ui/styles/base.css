@@ -27,6 +27,22 @@ body {
     line-height: var(--leading-normal);
     min-height: 100vh;
     overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+}
+
+button, a, input, select, .card, .track-row, .nav-item, .mobile-nav-item {
+    -webkit-tap-highlight-color: transparent;
+}
+
+[data-tauri-drag-region] {
+    -webkit-app-region: drag;
+    app-region: drag;
+}
+
+button, a, input, select, [data-tauri-drag-region] button {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
 }
 
 /* ==========================================================================
@@ -68,6 +84,8 @@ body {
     height: calc(100vh - var(--player-bar-height));
     overflow-y: auto;
     overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
     contain: layout paint style;
 }
 
