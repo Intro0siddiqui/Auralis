@@ -71,6 +71,10 @@ jobs:
       - name: Install Tauri CLI
         # `cargo tauri build` produces a real .app/.dmg instead of a bare binary.
         run: cargo install tauri-cli --version "^2.0.0" 2>/dev/null || npm install -g @tauri-apps/cli
+        # `2>/dev/null` is Unix syntax; the Windows runner's default pwsh shell
+        # misparses it as a path (D:\dev\null). Run with bash so it works on
+        # both platforms.
+        shell: bash
 
       - name: Install bundled sidecars (yt-dlp, ffmpeg)
         # `tauri.conf.json` declares these as `externalBin`; Tauri resolves them
@@ -112,7 +116,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install Tauri CLI
+        # `2>/dev/null` is Unix syntax; the Windows runner's default pwsh shell
+        # misparses it as a path (D:\dev\null). Run with bash so it works on
+        # both platforms.
         run: cargo install tauri-cli --version "^2.0.0" 2>/dev/null || npm install -g @tauri-apps/cli
+        shell: bash
 
       - name: Install bundled sidecars (yt-dlp, ffmpeg)
         shell: bash
