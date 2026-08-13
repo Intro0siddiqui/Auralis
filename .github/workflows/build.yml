@@ -129,7 +129,9 @@ jobs:
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -o src-tauri/bin/yt-dlp.exe
           curl -L https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -o ffmpeg.zip
           unzip -o ffmpeg.zip
-          cp ffmpeg-*-essentials/bin/ffmpeg.exe src-tauri/bin/ffmpeg.exe
+          # The extracted dir is ffmpeg-<ver>-essentials or ffmpeg-<ver>-essentials_build
+          # (newer 9.x releases append `_build`), so widen the glob to `essentials*`.
+          cp ffmpeg-*-essentials*/bin/ffmpeg.exe src-tauri/bin/ffmpeg.exe
 
       - name: Build (compile gate)
         run: cargo build --release
