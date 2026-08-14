@@ -89,7 +89,7 @@ jobs:
 
       - name: Bundle (.app / .dmg)
         if: startsWith(github.ref, 'refs/tags/')
-        run: cargo tauri build
+        run: npx @tauri-apps/cli build
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/')
@@ -131,7 +131,7 @@ jobs:
 
       - name: Bundle (.msi / .exe installer)
         if: startsWith(github.ref, 'refs/tags/')
-        run: cargo tauri build
+        run: npx @tauri-apps/cli build
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/')
@@ -205,7 +205,7 @@ jobs:
             pkg-config
 
       - name: Init Android project
-        run: cargo tauri android init || true
+        run: npx @tauri-apps/cli android init || true
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
@@ -238,7 +238,7 @@ jobs:
             -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
 
       - name: Build APK
-        run: cargo tauri android build --apk
+        run: npx @tauri-apps/cli android build --apk
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
