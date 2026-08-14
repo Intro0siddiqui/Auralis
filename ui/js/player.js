@@ -251,6 +251,9 @@ class PlayerController {
         if (this.shuffleBtn) {
             this.shuffleBtn.classList.toggle('active', this.shuffle);
         }
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.invoke('set_shuffle', { enabled: this.shuffle });
+        }
     }
 
     cycleRepeat() {
@@ -259,6 +262,9 @@ class PlayerController {
         this.repeatMode = modes[(idx + 1) % modes.length];
         if (this.repeatBtn) {
             this.repeatBtn.classList.toggle('active', this.repeatMode !== 'off');
+        }
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.invoke('set_repeat_mode', { mode: this.repeatMode });
         }
     }
 
