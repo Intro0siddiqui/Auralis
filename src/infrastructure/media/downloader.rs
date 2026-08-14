@@ -332,7 +332,7 @@ impl Downloader {
             if let Some(state) = guard.get_mut(&id) {
                 state.status = DownloadStatus::Downloading;
                 state.total_bytes = if total_size > 0 { Some(total_size) } else { None };
-                state.filename = Some(filename.clone());
+                state.output_path = Some(out_path.to_string_lossy().to_string());
                 state.updated_at = chrono::Utc::now();
             }
         }
@@ -421,7 +421,7 @@ impl Downloader {
             if let Some(state) = guard.get_mut(&id) {
                 state.status = DownloadStatus::Downloading;
                 state.total_bytes = total_size;
-                state.filename = Some(filename.clone());
+                state.output_path = Some(out_path.to_string_lossy().to_string());
                 state.updated_at = chrono::Utc::now();
             }
         }

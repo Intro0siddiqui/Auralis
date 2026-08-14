@@ -68,6 +68,14 @@ impl TrackRepository for SqliteTrackRepository {
         let mut sql = String::from("SELECT * FROM tracks WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
+        if let Some(search) = &filter.search {
+            sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
+            let pattern = format!("%{}%", search);
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
+
         if let Some(artist) = &filter.artist {
             sql.push_str(" AND artist LIKE ?");
             params_vec.push(Box::new(format!("%{}%", artist)));

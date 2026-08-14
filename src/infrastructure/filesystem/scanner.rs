@@ -33,7 +33,6 @@ impl DirectoryScanner {
                 "**/*.wav".to_string(),
                 "**/*.aac".to_string(),
                 "**/*.ogg".to_string(),
-                "**/*.opus".to_string(),
                 "**/*.m4a".to_string(),
             ],
             // NOTE: The `".*"` / `".*/"` exclude patterns only filter Unix-style

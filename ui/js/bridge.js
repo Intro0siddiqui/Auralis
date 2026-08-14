@@ -104,7 +104,7 @@ class Bridge {
         } else if (content.querySelector('.page-search')) {
             this.activeView = 'search';
             this.loadSearchView();
-        } else if (content.querySelector('.page-settings')) {
+        } else if (content.querySelector('.page-settings, #settings-view')) {
             this.activeView = 'settings';
             this.loadSettingsView();
         } else if (content.querySelector('.page-playlists')) {
@@ -209,7 +209,7 @@ class Bridge {
                                     <i data-lucide="folder-search"></i>
                                     Scan Device Storage
                                 </button>
-                                <button class="btn btn-secondary neu" hx-get="/partials/download" hx-target="#content" hx-swap="innerHTML transition:true">
+                                <button class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML transition:true">
                                     <i data-lucide="download"></i>
                                     Download Audio
                                 </button>
@@ -364,17 +364,87 @@ class Bridge {
     }
 
     async loadSyncView() {
-        const deviceIdEl = document.getElementById('sync-device-id');
-        if (deviceIdEl) {
-            deviceIdEl.textContent = `mDNS Peer Discovery: Active (Port 5353)`;
+        try {
+            const pairingInfo = await this.invoke('start_pairing');
+            if (pairingInfo) {
+                const deviceIdEl = document.getElementById('sync-device-id');
+                if (deviceIdEl) {
+                    deviceIdEl.textContent = `Pairing PIN: ${pairingInfo.pin}`;
+                }
+                const qrContainer = document.getElementById('sync-qr-container');
+                if (qrContainer && pairingInfo.qr_image) {
+                    qrContainer.innerHTML = `<img src="data:image/png;base64,${pairingInfo.qr_image}" alt="Pairing QR" style="width: 100%; height: 100%; object-fit: contain; border-radius: var(--radius-sm);">`;
+                }
+            }
+        } catch (e) {
+            console.warn('Pairing info query failed:', e);
+        }
+
+        try {
+            const devices = await this.invoke('get_paired_devices');
+            const list = document.getElementById('synced-devices-list');
+            if (list) {
+                if (devices && devices.length > 0) {
+                    list.innerHTML = devices.map(d => `
+                        <div class="track-row neu-glass" style="margin-bottom: var(--space-2); border-radius: var(--radius-md); display: flex; align-items: center; justify-content: space-between; padding: var(--space-3);">
+                            <div style="display: flex; align-items: center; gap: var(--space-3);">
+                                <i data-lucide="${d.device_type === 'mobile' ? 'smartphone' : 'laptop'}" style="width: 24px; height: 24px; color: var(--accent);"></i>
+                                <div>
+                                    <div style="font-weight: var(--font-semibold); color: var(--text-1);">${this.escapeHtml(d.name)}</div>
+                                    <div style="font-size: var(--text-xs); color: var(--text-3);">${d.ip_address || 'LAN Peer'} · Status: ${d.status || 'paired'}</div>
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: var(--space-2);">
+                                <button class="btn btn-primary btn-sm neu" onclick="window.Auralis.bridge.syncWithDevice('${d.id}')">
+                                    <i data-lucide="refresh-cw"></i>
+                                    Sync
+                                </button>
+                            </div>
+                        </div>
+                    `).join('');
+                    if (window.lucide) window.lucide.createIcons();
+                } else {
+                    list.innerHTML = `
+                        <div class="empty-state glass neu" style="padding: var(--space-6); text-align: center; border-radius: var(--radius-md);">
+                            <i data-lucide="wifi" style="width: 32px; height: 32px; color: var(--accent); margin-bottom: var(--space-2);"></i>
+                            <h4 style="color: var(--text-1); font-size: var(--text-base); margin-bottom: var(--space-1);">No paired devices</h4>
+                            <p style="color: var(--text-3); font-size: var(--text-xs);">Use the pairing PIN above on another device to start sharing your library.</p>
+                        </div>
+                    `;
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            }
+        } catch (e) {
+            console.error('Failed to load paired devices:', e);
+        }
+    }
+
+    async syncWithDevice(deviceId) {
+        if (!deviceId) return;
+        this.showToast('Syncing with device...', 'info');
+        try {
+            await this.invoke('sync_with_device', { id: deviceId });
+            this.showToast('Device synchronization complete!', 'success');
+            this.loadSyncView();
+        } catch (err) {
+            this.showToast(`Sync failed: ${err}`, 'error');
         }
     }
 
     async syncNow() {
         this.showToast('Initiating peer synchronization...', 'info');
         try {
-            await this.scanLibrary();
-            this.showToast('Sync updated!', 'success');
+            const devices = await this.invoke('get_paired_devices');
+            if (devices && devices.length > 0) {
+                for (const device of devices) {
+                    await this.invoke('sync_with_device', { id: device.id });
+                }
+                this.showToast(`Synced with ${devices.length} device(s)!`, 'success');
+            } else {
+                await this.scanLibrary();
+                this.showToast('Library scan & sync complete!', 'success');
+            }
+            this.loadSyncView();
         } catch (err) {
             this.showToast(`Sync failed: ${err}`, 'error');
         }
@@ -449,12 +519,125 @@ class Bridge {
     }
 
     async loadSettingsView() {
+        const settingsView = document.querySelector('.page-settings, #settings-view');
+        if (!settingsView || settingsView.dataset.bound) return;
+        settingsView.dataset.bound = 'true';
+
         try {
             const settings = await this.invoke('get_settings');
             if (!settings) return;
+            this.currentSettings = settings;
 
-            const volInput = document.querySelector('input[name="volume"]');
-            if (volInput) volInput.value = settings.audio ? settings.audio.volume : 0.8;
+            const volInput = settingsView.querySelector('input[name="volume"]');
+            if (volInput && settings.audio) {
+                volInput.value = Math.round(settings.audio.volume * 100);
+            }
+
+            const downloadPathInput = settingsView.querySelector('input[name="download_path"]');
+            if (downloadPathInput && settings.downloads) {
+                downloadPathInput.value = settings.downloads.download_path || '';
+            }
+
+            const formatSelect = settingsView.querySelector('select[name="default_format"]');
+            if (formatSelect && settings.downloads && settings.downloads.default_format) {
+                formatSelect.value = String(settings.downloads.default_format).toLowerCase();
+            }
+
+            const themeSelect = settingsView.querySelector('select[name="theme"]');
+            if (themeSelect && settings.appearance && settings.appearance.theme) {
+                themeSelect.value = String(settings.appearance.theme).toLowerCase();
+            }
+
+            const syncToggle = settingsView.querySelector('[name="sync_enabled"], [data-name="sync_enabled"]');
+            if (syncToggle && settings.sync) {
+                if (syncToggle.type === 'checkbox') {
+                    syncToggle.checked = Boolean(settings.sync.enabled);
+                } else {
+                    syncToggle.classList.toggle('active', Boolean(settings.sync.enabled));
+                    syncToggle.setAttribute('aria-checked', Boolean(settings.sync.enabled).toString());
+                }
+            }
+
+            const wifiToggle = settingsView.querySelector('[name="sync_wifi_only"], [data-name="sync_wifi_only"]');
+            if (wifiToggle && settings.sync) {
+                if (wifiToggle.type === 'checkbox') {
+                    wifiToggle.checked = Boolean(settings.sync.wifi_only);
+                } else {
+                    wifiToggle.classList.toggle('active', Boolean(settings.sync.wifi_only));
+                    wifiToggle.setAttribute('aria-checked', Boolean(settings.sync.wifi_only).toString());
+                }
+            }
+
+            const saveSettings = async () => {
+                if (!this.currentSettings) return;
+                try {
+                    await this.invoke('update_settings', { settings: this.currentSettings });
+                    this.showToast('Settings saved', 'success');
+                } catch (err) {
+                    this.showToast(`Failed to save settings: ${err}`, 'error');
+                }
+            };
+
+            if (volInput) {
+                volInput.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.audio) {
+                        this.currentSettings.audio.volume = parseFloat(e.target.value) / 100;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (downloadPathInput) {
+                downloadPathInput.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.downloads) {
+                        this.currentSettings.downloads.download_path = e.target.value;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (formatSelect) {
+                formatSelect.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.downloads) {
+                        this.currentSettings.downloads.default_format = e.target.value;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (themeSelect) {
+                themeSelect.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.appearance) {
+                        this.currentSettings.appearance.theme = e.target.value;
+                        document.documentElement.setAttribute('data-theme', e.target.value);
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (syncToggle) {
+                syncToggle.addEventListener('click', async () => {
+                    if (this.currentSettings && this.currentSettings.sync) {
+                        const newState = !syncToggle.classList.contains('active');
+                        syncToggle.classList.toggle('active', newState);
+                        syncToggle.setAttribute('aria-checked', newState.toString());
+                        this.currentSettings.sync.enabled = newState;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (wifiToggle) {
+                wifiToggle.addEventListener('click', async () => {
+                    if (this.currentSettings && this.currentSettings.sync) {
+                        const newState = !wifiToggle.classList.contains('active');
+                        wifiToggle.classList.toggle('active', newState);
+                        wifiToggle.setAttribute('aria-checked', newState.toString());
+                        this.currentSettings.sync.wifi_only = newState;
+                        await saveSettings();
+                    }
+                });
+            }
         } catch (err) {
             console.error('Settings load error:', err);
         }

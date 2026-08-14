@@ -1,4 +1,4 @@
-<div id="settings-view" class="view">
+<div id="settings-view" class="view page-settings">
     <div class="section-header">
         <h2 class="section-title">Settings</h2>
     </div>
@@ -10,7 +10,7 @@
                     <div class="settings-label">Audio Volume</div>
                     <div class="settings-description">Default playback volume for new sessions.</div>
                 </div>
-                <input type="range" min="0" max="100" value="70" class="settings-slider" aria-label="Audio Volume">
+                <input type="range" name="volume" min="0" max="100" value="70" class="settings-slider" aria-label="Audio Volume">
             </div>
 
             <div class="settings-item">
@@ -18,7 +18,7 @@
                     <div class="settings-label">Download Path</div>
                     <div class="settings-description">Where downloaded tracks are stored.</div>
                 </div>
-                <input type="text" class="input settings-control" value="/music/auralis" aria-label="Download Path">
+                <input type="text" name="download_path" class="input settings-control" value="/music/auralis" aria-label="Download Path">
             </div>
 
             <div class="settings-item">
@@ -26,11 +26,11 @@
                     <div class="settings-label">Default Format</div>
                     <div class="settings-description">Preferred format for new downloads.</div>
                 </div>
-                <select class="input settings-control" aria-label="Default Format">
-                    <option>MP3</option>
-                    <option selected>FLAC</option>
-                    <option>M4A</option>
-                    <option>OGG</option>
+                <select name="default_format" class="input settings-control" aria-label="Default Format">
+                    <option value="mp3">MP3</option>
+                    <option value="flac" selected>FLAC</option>
+                    <option value="m4a">M4A</option>
+                    <option value="ogg">OGG</option>
                 </select>
             </div>
 
@@ -39,10 +39,10 @@
                     <div class="settings-label">Theme</div>
                     <div class="settings-description">Appearance mode for the interface.</div>
                 </div>
-                <select class="input settings-control" aria-label="Theme">
-                    <option selected>Dark</option>
-                    <option>Light</option>
-                    <option>System</option>
+                <select name="theme" class="input settings-control" aria-label="Theme">
+                    <option value="dark" selected>Dark</option>
+                    <option value="light">Light</option>
+                    <option value="system">System</option>
                 </select>
             </div>
 
@@ -51,7 +51,7 @@
                     <div class="settings-label">Enable P2P Sync</div>
                     <div class="settings-description">Share your library across devices.</div>
                 </div>
-                <div class="toggle active" role="switch" aria-checked="true" aria-label="Enable P2P Sync"></div>
+                <div class="toggle active" role="switch" name="sync_enabled" data-name="sync_enabled" aria-checked="true" aria-label="Enable P2P Sync"></div>
             </div>
 
             <div class="settings-item">
@@ -59,7 +59,7 @@
                     <div class="settings-label">Sync over WiFi only</div>
                     <div class="settings-description">Avoid using cellular data for syncs.</div>
                 </div>
-                <div class="toggle" role="switch" aria-checked="false" aria-label="Sync over WiFi only"></div>
+                <div class="toggle" role="switch" name="sync_wifi_only" data-name="sync_wifi_only" aria-checked="false" aria-label="Sync over WiFi only"></div>
             </div>
         </div>
     </div>

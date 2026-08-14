@@ -24,14 +24,14 @@
     <div class="app-shell">
         <!-- Sidebar Navigation - loaded via HTMX -->
         <aside id="sidebar" class="glass sidebar" 
-              hx-get="/partials/nav" 
+              hx-get="/partials/nav.html" 
               hx-trigger="load" 
               hx-target="this">
         </aside>
         
         <!-- Main Content Area - loaded via HTMX -->
         <main id="content" class="content" 
-              hx-get="/partials/home" 
+              hx-get="/partials/home.html" 
               hx-trigger="load" 
               hx-swap="innerHTML">
         </main>
@@ -103,28 +103,28 @@
         <!-- Mobile Navigation -->
         <nav id="mobile-nav" class="neu-glass mobile-nav">
             <a href="#" class="mobile-nav-item" 
-               hx-get="/partials/home" 
+               hx-get="/partials/home.html" 
                hx-target="#content" 
                hx-swap="innerHTML">
                 <i data-lucide="home"></i>
                 <span>Home</span>
             </a>
             <a href="#" class="mobile-nav-item" 
-               hx-get="/partials/library" 
+               hx-get="/partials/library.html" 
                hx-target="#content" 
                hx-swap="innerHTML">
                 <i data-lucide="library"></i>
                 <span>Library</span>
             </a>
             <a href="#" class="mobile-nav-item" 
-               hx-get="/partials/search" 
+               hx-get="/partials/search.html" 
                hx-target="#content" 
                hx-swap="innerHTML">
                 <i data-lucide="search"></i>
                 <span>Search</span>
             </a>
             <a href="#" class="mobile-nav-item" 
-               hx-get="/partials/settings" 
+               hx-get="/partials/settings.html" 
                hx-target="#content" 
                hx-swap="innerHTML">
                 <i data-lucide="settings"></i>

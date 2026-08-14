@@ -163,6 +163,10 @@
   --transition-base: var(--speed-base) var(--ease);
 
   /* Layout dimensions */
+  --player-height-desktop: 80px;
+  --queue-width: 320px;
+  --nav-height: 64px;
+  --sidebar-width: 240px;
   --player-bar-height: var(--player-height-desktop);
   --player-track-width: 280px;
   --queue-panel-width: var(--queue-width);
