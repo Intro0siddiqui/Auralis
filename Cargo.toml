@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "2.0.12"
+version = "2.0.13"
 edition = "2021"
 authors = ["Auralis Team"]
 description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
