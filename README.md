@@ -66,11 +66,10 @@ auralis-v2/
 │   │   ├── sync.html
 │   │   └── settings.html
 │   └── icons/
-│       ├── auralis.svg
-│       └── plus.svg
+│       └── auralis.svg
 ├── src/
 │   ├── main.rs             # Binary entry point
-│   ├── lib.rs              # Library root + Tauri builder
+│   ├── lib.rs              # Library root + Tauri builder + Android NDK context
 │   ├── domain/             # Pure business logic (no I/O)
 │   │   ├── models/         # Track, Album, Artist, Playlist, Settings, Sync, Download
 │   │   ├── repositories/   # Repository traits
@@ -78,7 +77,7 @@ auralis-v2/
 │   ├── infrastructure/     # External integrations
 │   │   ├── database/       # SQLite + rusqlite
 │   │   ├── filesystem/     # Track scanner + metadata
-│   │   ├── media/          # AudioPlayer (rodio) + Downloader (yt-dlp)
+│   │   ├── media/          # AudioPlayer (rodio/cpal/oboe) + Downloader (yt-dlp)
 │   │   └── network.rs      # libp2p: mDNS, gossipsub, request-response
 │   ├── commands/           # Tauri command handlers
 │   │   ├── library.rs
@@ -89,14 +88,14 @@ auralis-v2/
 │   │   ├── settings.rs
 │   │   └── templates.rs    # Serves ui/partials/ as HTMX responses
 │   └── templates/mod.rs    # Reads ui/partials/ and caches them
-├── icons/                  # App icons (32x32.png, icon.ico)
+├── icons/                  # App icon suite (128x128, 128x128@2x, icon.icns, icon.ico, etc.)
 ├── gen/                    # Generated schemas + Android project
 ├── scripts/
 │   ├── build.sh
 │   ├── dev.sh
 │   └── test.sh
 └── .github/workflows/
-    └── build.yml           # CI/CD: Linux, macOS, Windows, Android
+    └── build.yml           # CI/CD: Linux, macOS, Windows, Android (Tag-Gated)
 ```
 
 The architecture is **Domain-Driven**: the `domain` layer is pure Rust types and trait definitions with no infrastructure dependencies. The `infrastructure` layer provides concrete implementations (SQLite, filesystem, etc.) that satisfy the domain's traits. The `commands` layer exposes Tauri-callable functions that wire everything together.
