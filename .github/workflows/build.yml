@@ -189,11 +189,6 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Tauri CLI
-        run: |
-          npm install -g @tauri-apps/cli@^2.0.0
-          cargo install tauri-cli --version "^2.0.0" 2>/dev/null || true
-
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -206,8 +201,11 @@ jobs:
             libssl-dev \
             pkg-config
 
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" 2>/dev/null || npm install -g @tauri-apps/cli
+
       - name: Init Android project
-        run: npx @tauri-apps/cli android init || true
+        run: cargo tauri android init || npx @tauri-apps/cli android init || true
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
@@ -240,7 +238,7 @@ jobs:
             -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
 
       - name: Build APK
-        run: cargo tauri android build --apk 2>/dev/null || npx @tauri-apps/cli android build --apk
+        run: cargo tauri android build --apk
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
