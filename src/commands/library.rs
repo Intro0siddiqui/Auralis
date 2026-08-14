@@ -22,12 +22,7 @@ pub struct TracksPage {
     pub limit: usize,
 }
 
-/// Search query parameters
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SearchQuery {
-    pub q: String,
-    pub limit: Option<u32>,
-}
+
 
 /// Create a track repository from the database state
 fn track_repo(db: &Database) -> Arc<dyn TrackRepository> {

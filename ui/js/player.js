@@ -226,15 +226,22 @@ class PlayerController {
         }
     }
 
+    seek(secs) {
+        if (!this.duration || this.duration <= 0) return;
+        const pct = Math.max(0, Math.min(1, secs / this.duration));
+        this.seekToPercent(pct);
+    }
+
     seekToPercent(pct) {
-        this.progress = pct * this.duration;
+        this.progress = pct * (this.duration || 0);
         this.updateProgressUI();
-        if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('seek', { position_secs: Math.floor(this.progress) }).catch(() => {});
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } });
         }
     }
 
     seekRelative(delta) {
+        if (!this.duration) return;
         this.progress = Math.max(0, Math.min(this.duration, this.progress + delta));
         this.seekToPercent(this.progress / this.duration);
     }
