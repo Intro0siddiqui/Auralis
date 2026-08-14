@@ -3,7 +3,7 @@
 </div>
 
 <section class="quick-actions">
-    <button class="btn btn-primary" hx-post="/api/library/scan" hx-target="#content" hx-swap="outerHTML">
+    <button class="btn btn-primary" onclick="window.Auralis.bridge.scanLibrary()">
         <i data-lucide="refresh-cw"></i>
         Scan Library
     </button>

@@ -1,11 +1,7 @@
 <section class="page-library">
     <header class="section-header">
         <h2 class="section-title">Library</h2>
-        <button class="btn btn-primary"
-                hx-post="/api/library/scan"
-                hx-trigger="click"
-                hx-swap="none"
-                hx-on::after-request="window.Auralis.bridge.showToast('Library scan started','info')">
+        <button class="btn btn-primary" onclick="window.Auralis.bridge.scanLibrary()">
             <i data-lucide="folder-search"></i>
             Scan Library
         </button>
