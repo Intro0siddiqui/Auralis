@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 /// Scans directories for music files
 pub struct DirectoryScanner {
+    #[allow(dead_code)]
     include_patterns: Vec<String>,
     exclude_patterns: Vec<String>,
 }

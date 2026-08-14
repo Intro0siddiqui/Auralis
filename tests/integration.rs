@@ -96,7 +96,7 @@ fn create_realistic_mp3(path: &std::path::Path, title: &str, artist: &str, album
 
     // Build ID3v2.3 tag
     let mut tag_body = Vec::new();
-    let mut add_frame = |tag_body: &mut Vec<u8>, frame_id: &[u8; 4], text: &str| {
+    let add_frame = |tag_body: &mut Vec<u8>, frame_id: &[u8; 4], text: &str| {
         let text_bytes = text.as_bytes();
         let frame_size = (text_bytes.len() + 1) as u32;
         tag_body.extend_from_slice(frame_id);

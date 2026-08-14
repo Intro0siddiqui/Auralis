@@ -37,7 +37,10 @@ jobs:
             libssl-dev \
             pkg-config
 
-      - name: Build
+      - name: End-to-end test (audio scan & ingestion)
+        run: cargo test --test integration -- --nocapture
+
+      - name: Build binary
         run: cargo build --release
 
       - name: Package
@@ -72,6 +75,9 @@ jobs:
         run: npm install -g @tauri-apps/cli@^2.0.0
         shell: bash
 
+      - name: End-to-end test (audio scan & ingestion)
+        run: cargo test --test integration -- --nocapture
+
       - name: Build (compile gate)
         run: cargo build --release
 
@@ -102,6 +108,9 @@ jobs:
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2.0.0
         shell: bash
+
+      - name: End-to-end test (audio scan & ingestion)
+        run: cargo test --test integration -- --nocapture
 
       - name: Build (compile gate)
         run: cargo build --release
@@ -280,7 +289,7 @@ jobs:
             libssl-dev \
             pkg-config
 
-      - name: Run tests
+      - name: Run end-to-end tests (audio scan, ingestion & library)
         run: cargo test --all-features
 
   lint:
