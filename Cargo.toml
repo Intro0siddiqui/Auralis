@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "2.0.14"
+version = "2.0.15"
 edition = "2021"
 authors = ["Auralis Team"]
 description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
@@ -31,6 +31,9 @@ tauri-build = { version = "2", features = [] }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 async-trait = "0.1"
+
+# HTTP streaming client (pure-Rust for native audio downloads)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 # Tauri runtime (v2)
 tauri = { version = "2", features = [] }

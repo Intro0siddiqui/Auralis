@@ -186,11 +186,27 @@ impl Downloader {
     pub async fn download(&self, url: &str, format: AudioFormat) -> Result<Uuid, DownloaderError> {
         info!(url = %url, format = ?format, "Starting download");
 
-        if !self.is_ytdlp_available().await {
+        let is_ytdlp = self.is_ytdlp_available().await;
+        let is_http_audio = url.starts_with("http://") || url.starts_with("https://");
+        let is_video_platform = url.contains("youtube.com")
+            || url.contains("youtu.be")
+            || url.contains("soundcloud.com")
+            || url.contains("bandcamp.com");
+
+        if is_video_platform && !is_ytdlp {
             return Err(DownloaderError::YtDlpNotFound);
         }
 
-        let title = format!("Download from {}", Self::detect_platform(url));
+        let title = if is_video_platform {
+            format!("Download from {}", Self::detect_platform(url))
+        } else {
+            url.split('/')
+                .last()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("audio_track")
+                .to_string()
+        };
+
         let progress = DownloadProgress::new(url.to_string(), title, format);
         let id = progress.id;
 
@@ -215,21 +231,36 @@ impl Downloader {
         let processes = self.processes.clone();
         let ffmpeg_path = self.ffmpeg_path.clone();
         let output_dir = self.output_dir.clone();
-
-        let url = url.to_string();
+        let url_str = url.to_string();
 
         tokio::spawn(async move {
-            if let Err(e) = Self::run_download(
-                id,
-                &url,
-                format,
-                ffmpeg_path,
-                output_dir,
-                downloads.clone(),
-                processes.clone(),
-            )
-            .await
-            {
+            let res = if is_video_platform || (is_ytdlp && !is_http_audio) {
+                Self::run_download(
+                    id,
+                    &url_str,
+                    format,
+                    ffmpeg_path,
+                    output_dir.clone(),
+                    downloads.clone(),
+                    processes.clone(),
+                )
+                .await
+            } else if is_http_audio {
+                Self::run_http_stream_download(
+                    id,
+                    &url_str,
+                    format,
+                    output_dir.clone(),
+                    downloads.clone(),
+                )
+                .await
+            } else {
+                Err(DownloaderError::ProcessError(
+                    "Unsupported URL protocol".to_string(),
+                ))
+            };
+
+            if let Err(e) = res {
                 error!(download_id = %id, error = %e, "Download failed");
                 let mut guard = downloads.write().await;
                 if let Some(state) = guard.get_mut(&id) {
@@ -239,6 +270,97 @@ impl Downloader {
         });
 
         Ok(id)
+    }
+
+    /// Run native pure-Rust HTTP stream download for direct media audio links
+    async fn run_http_stream_download(
+        id: Uuid,
+        url: &str,
+        format: AudioFormat,
+        output_dir: PathBuf,
+        downloads: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
+    ) -> Result<(), DownloaderError> {
+        info!(download_id = %id, url = %url, "Executing native HTTP stream download");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .map_err(|e| DownloaderError::ProcessError(format!("Failed to build HTTP client: {e}")))?;
+
+        let mut res = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| DownloaderError::ProcessError(format!("HTTP request failed: {e}")))?;
+
+        if !res.status().is_success() {
+            return Err(DownloaderError::ProcessError(format!(
+                "HTTP error: status {}",
+                res.status()
+            )));
+        }
+
+        let total_size = res.content_length();
+        let ext = format.extension();
+        let filename = format!("track_{}.{}", &id.to_string()[..8], ext);
+        let out_path = output_dir.join(&filename);
+
+        std::fs::create_dir_all(&output_dir)?;
+        let mut file = tokio::fs::File::create(&out_path)
+            .await
+            .map_err(DownloaderError::IoError)?;
+
+        {
+            let mut guard = downloads.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.status = DownloadStatus::Downloading;
+                state.total_bytes = total_size;
+                state.filename = Some(filename.clone());
+                state.updated_at = chrono::Utc::now();
+            }
+        }
+
+        let mut downloaded: u64 = 0;
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .map_err(|e| DownloaderError::ProcessError(format!("Stream read error: {e}")))?
+        {
+            use tokio::io::AsyncWriteExt;
+            file.write_all(&chunk)
+                .await
+                .map_err(DownloaderError::IoError)?;
+
+            downloaded += chunk.len() as u64;
+
+            let mut guard = downloads.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.downloaded_bytes = downloaded;
+                if let Some(total) = total_size {
+                    if total > 0 {
+                        state.progress = (downloaded as f32) / (total as f32);
+                    }
+                }
+                state.updated_at = chrono::Utc::now();
+            }
+        }
+
+        use tokio::io::AsyncWriteExt;
+        file.flush().await.map_err(DownloaderError::IoError)?;
+
+        {
+            let mut guard = downloads.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.status = DownloadStatus::Completed;
+                state.progress = 1.0;
+                state.output_path = Some(out_path.to_string_lossy().to_string());
+                state.completed_at = Some(chrono::Utc::now());
+                state.updated_at = chrono::Utc::now();
+            }
+        }
+
+        info!(download_id = %id, path = ?out_path, "Native HTTP stream download complete");
+        Ok(())
     }
 
     /// Pause a download by sending SIGSTOP to the process
