@@ -45,15 +45,15 @@ ui/
 │   ├── tokens.css      # Design variables (--glass-*, --neu-*, --blur-*, --radius-*)
 │   ├── base.css        # CSS reset + app-shell grid layout
 │   ├── components.css  # .glass, .glass-weak, .glass-strong, .neu, .neu-inset, .neu-glass, .card, .track-row
-│   └── responsive.css  # <640px mobile, 640-1023px tablet, >=1024px desktop
+│   └── responsive.css  # Mobile/tablet/desktop breakpoints + safe-area insets (notches/bars)
 ├── js/
-│   ├── bridge.js       # Listens to Tauri events, updates player bar
-│   └── player.js       # Progress bar, seeking, keyboard shortcuts
+│   ├── bridge.js       # Dynamic data bridge (get_tracks, scan, play, downloads, HTMX swap routing)
+│   └── player.js       # Progress bar, seeking, MediaSession API, hardware keys, keyboard shortcuts
 ├── partials/           # HTMX fragments served by the Rust backend
 │   ├── nav.html, home.html, library.html, albums.html
 │   ├── artists.html, playlists.html, player-full.html
 │   ├── sync.html, settings.html
-└── icons/              # auralis.svg, plus.svg
+└── icons/              # auralis.svg
 ```
 
 **Design language**: Glassmorphism (`.glass`, `.glass-weak`, `.glass-strong` with `backdrop-filter: blur()`) + Neumorphism (`.neu`, `.neu-inset`, `.neu-glass` with dual box-shadows).

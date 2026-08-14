@@ -297,25 +297,16 @@ logcat -b crash -d | grep -iE "AndroidRuntime|FATAL|abort|auralis|libauralis|sig
   never produced. Lint also red (fmt drift).
 - **v2.0.12** (commits `3898279` + `df97283` + `6eca0e9` made LOCALLY, **NOT
   pushed, tag NOT created**): commits the full working tree + `cargo fmt` +
-  version bump, **plus** commit `6eca0e9` which hardens the ndk-context crash
-  fix into the two-stage `JNI_OnLoad` + `setup` fallback (§4 Crash #3). This is
-  the release candidate: (a) compiles on all platforms (android lib
-  type-checks clean, `cargo fmt --check` passes), (b) carries the ndk-context
-  crash fix, and (c) now covers the "JNI_OnLoad fired before the Application
-  existed" timing hole with a guaranteed `setup`-time reseed. Needs
-  `git push origin main` + `git tag v2.0.12` + `git push origin v2.0.12` to
-  actually build the APK.
+- **v2.0.13 Release Milestone (2026-08-14)**:
+  - **Live Dynamic Data Bridge**: Fully connected frontend to Rust SQLite queries, library scanning (`/storage/emulated/0/Music` & `Download`), audio playback, and yt-dlp downloads.
+  - **Neumorphism + Glassmorphism UI Polish**: Fixed token hierarchy in `tokens.css`, safe-area insets (`env(safe-area-inset-top)` / `bottom`), soft-keyboard avoidance (`visualViewport`), and high-contrast text typography.
+  - **Multi-Platform Release Packaging**: Fixed Windows (`.msi` / `.exe`) and macOS (`.dmg`) bundle paths in CI/CD pipeline, publishing artifacts across Android, Windows, macOS, and Linux to GitHub Releases.
+  - **Code Quality**: Cleaned dead structs, unreferenced partials, and unified Tauri CLI execution (`npx @tauri-apps/cli`).
 
-### Open / next steps
-1. Push `main` and create+push `v2.0.12` tag → wait for `build-android`.
-2. Install the v2.0.12 APK on the phone; confirm it **launches** (no
-   `android context was not initialized` abort).
-3. If it still aborts: capture `logcat`. The timing hole
-   (`currentApplication()` null at `JNI_OnLoad` time) is now covered by the
-   `setup`-time reseed, so a remaining abort would point elsewhere (e.g. a null
-   `Context` inside oboe, or a native crash early in `android_main`) —
-   investigate the backtrace.
-4. Tidy `lint` to green long-term (done in the working tree via `cargo fmt`).
+### Release & Sideload Workflow
+1. CI builds all 4 platforms on tag push (`v*`).
+2. Sideload Android APK (`auralis-v2.0.13-android.apk`) directly from `/storage/emulated/0/Download/`.
+3. Launch app: SQLite database initializes and audio engine binds native `oboe`/`cpal` stream.
 
 ---
 

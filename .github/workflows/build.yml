@@ -190,7 +190,9 @@ jobs:
           node-version: 20
 
       - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli@^2.0.0
+        run: |
+          npm install -g @tauri-apps/cli@^2.0.0
+          cargo install tauri-cli --version "^2.0.0" 2>/dev/null || true
 
       - name: Install system deps
         run: |
@@ -238,7 +240,7 @@ jobs:
             -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
 
       - name: Build APK
-        run: npx @tauri-apps/cli android build --apk
+        run: cargo tauri android build --apk 2>/dev/null || npx @tauri-apps/cli android build --apk
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
