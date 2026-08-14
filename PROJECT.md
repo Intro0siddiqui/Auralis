@@ -12,7 +12,7 @@ client** (Android-first). The backend is 100% Rust; the frontend is thin JS/HTML
 glue rendered by Tauri's webview. There is no separate Node/JS build step for the
 UI — partials are served directly via Rust template rendering.
 
-App identifier: `com.auralis.app`.
+App identifier: `com.auralis.v2`.
 
 ### High-level architecture
 - **Rust backend** (the same binary powers the server and the mobile app):

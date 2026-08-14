@@ -22,8 +22,6 @@ pub struct TracksPage {
     pub limit: usize,
 }
 
-
-
 /// Create a track repository from the database state
 fn track_repo(db: &Database) -> Arc<dyn TrackRepository> {
     Arc::new(
