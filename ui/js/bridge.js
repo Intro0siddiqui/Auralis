@@ -464,6 +464,11 @@ class Bridge {
             const url = urlInput.value.trim();
             const format = formatSelect ? formatSelect.value : 'mp3';
 
+            if (!url.startsWith('https://')) {
+                this.showToast('Only secure HTTPS URLs are supported', 'error');
+                return;
+            }
+
             this.showToast('Starting audio download...', 'info');
             try {
                 const result = await this.invoke('download_audio', { request: { url, format } });

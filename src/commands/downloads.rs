@@ -36,6 +36,10 @@ pub async fn download_audio(
 ) -> Result<DownloadProgress, String> {
     info!(url = %request.url, "Download audio requested");
 
+    if !request.url.starts_with("https://") {
+        return Err("Only secure HTTPS URLs are supported".to_string());
+    }
+
     let format = request.format.unwrap_or(AudioFormat::Mp3);
 
     let id = downloader
@@ -86,6 +90,10 @@ pub async fn download_playlist(
     downloader: State<'_, Downloader>,
 ) -> Result<Vec<DownloadProgress>, String> {
     info!(url = %request.url, "Playlist download requested");
+
+    if !request.url.starts_with("https://") {
+        return Err("Only secure HTTPS URLs are supported".to_string());
+    }
 
     let format = request.format.unwrap_or(AudioFormat::Mp3);
     let max_items = request.max_items.unwrap_or(50) as usize;

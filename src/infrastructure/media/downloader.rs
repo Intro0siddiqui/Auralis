@@ -189,9 +189,15 @@ impl Downloader {
     pub async fn download(&self, url: &str, format: AudioFormat) -> Result<Uuid, DownloaderError> {
         info!(url = %url, format = ?format, "Starting download");
 
+        if !url.starts_with("https://") {
+            return Err(DownloaderError::ProcessError(
+                "Only secure HTTPS URLs are supported".to_string(),
+            ));
+        }
+
         let is_ytdlp = self.is_ytdlp_available().await;
         let is_youtube = url.contains("youtube.com") || url.contains("youtu.be");
-        let is_http_audio = url.starts_with("http://") || url.starts_with("https://");
+        let is_https_audio = url.starts_with("https://");
         let is_other_platform = url.contains("soundcloud.com")
             || url.contains("bandcamp.com")
             || url.contains("instagram.com");
@@ -248,7 +254,7 @@ impl Downloader {
                     downloads.clone(),
                 )
                 .await
-            } else if is_other_platform || (is_ytdlp && !is_http_audio) {
+            } else if is_other_platform || (is_ytdlp && !is_https_audio) {
                 Self::run_download(
                     id,
                     &url_str,
@@ -259,7 +265,7 @@ impl Downloader {
                     processes.clone(),
                 )
                 .await
-            } else if is_http_audio {
+            } else if is_https_audio {
                 Self::run_http_stream_download(
                     id,
                     &url_str,
