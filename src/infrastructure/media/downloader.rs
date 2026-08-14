@@ -7,6 +7,7 @@ use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
 use nix::sys::signal::{kill, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
+use rusty_ytdl::{Video, VideoOptions, VideoQuality, VideoSearchOptions};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -187,17 +188,19 @@ impl Downloader {
         info!(url = %url, format = ?format, "Starting download");
 
         let is_ytdlp = self.is_ytdlp_available().await;
+        let is_youtube = url.contains("youtube.com") || url.contains("youtu.be");
         let is_http_audio = url.starts_with("http://") || url.starts_with("https://");
-        let is_video_platform = url.contains("youtube.com")
-            || url.contains("youtu.be")
-            || url.contains("soundcloud.com")
-            || url.contains("bandcamp.com");
+        let is_other_platform = url.contains("soundcloud.com")
+            || url.contains("bandcamp.com")
+            || url.contains("instagram.com");
 
-        if is_video_platform && !is_ytdlp {
+        if is_other_platform && !is_ytdlp {
             return Err(DownloaderError::YtDlpNotFound);
         }
 
-        let title = if is_video_platform {
+        let title = if is_youtube {
+            "YouTube Audio Track".to_string()
+        } else if is_other_platform {
             format!("Download from {}", Self::detect_platform(url))
         } else {
             url.split('/')
@@ -234,7 +237,16 @@ impl Downloader {
         let url_str = url.to_string();
 
         tokio::spawn(async move {
-            let res = if is_video_platform || (is_ytdlp && !is_http_audio) {
+            let res = if is_youtube {
+                Self::run_rusty_ytdl_download(
+                    id,
+                    &url_str,
+                    format,
+                    output_dir.clone(),
+                    downloads.clone(),
+                )
+                .await
+            } else if is_other_platform || (is_ytdlp && !is_http_audio) {
                 Self::run_download(
                     id,
                     &url_str,
@@ -270,6 +282,100 @@ impl Downloader {
         });
 
         Ok(id)
+    }
+
+    /// Run native YouTube audio download via rusty_ytdl (pure Rust, zero external binaries)
+    async fn run_rusty_ytdl_download(
+        id: Uuid,
+        url: &str,
+        format: AudioFormat,
+        output_dir: PathBuf,
+        downloads: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
+    ) -> Result<(), DownloaderError> {
+        info!(download_id = %id, url = %url, "Executing native YouTube audio download via rusty_ytdl");
+
+        let video_options = VideoOptions {
+            quality: VideoQuality::Highest,
+            filter: VideoSearchOptions::Audio,
+            ..Default::default()
+        };
+
+        let video = Video::new_with_options(url, video_options)
+            .map_err(|e| DownloaderError::ProcessError(format!("Failed to parse YouTube video: {e}")))?;
+
+        // Fetch video details to populate real song metadata
+        if let Ok(info) = video.get_info().await {
+            let mut guard = downloads.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.title = info.video_details.title;
+            }
+        }
+
+        let ext = format.extension();
+        let filename = format!("track_{}.{}", &id.to_string()[..8], ext);
+        let out_path = output_dir.join(&filename);
+
+        std::fs::create_dir_all(&output_dir)?;
+        let mut file = tokio::fs::File::create(&out_path)
+            .await
+            .map_err(DownloaderError::IoError)?;
+
+        let stream = video
+            .stream()
+            .await
+            .map_err(|e| DownloaderError::ProcessError(format!("Failed to open YouTube audio stream: {e}")))?;
+
+        let total_size = stream.content_length() as u64;
+
+        {
+            let mut guard = downloads.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.status = DownloadStatus::Downloading;
+                state.total_bytes = if total_size > 0 { Some(total_size) } else { None };
+                state.filename = Some(filename.clone());
+                state.updated_at = chrono::Utc::now();
+            }
+        }
+
+        let mut downloaded: u64 = 0;
+        while let Some(chunk) = stream
+            .chunk()
+            .await
+            .map_err(|e| DownloaderError::ProcessError(format!("YouTube stream read error: {e}")))?
+        {
+            use tokio::io::AsyncWriteExt;
+            file.write_all(&chunk)
+                .await
+                .map_err(DownloaderError::IoError)?;
+
+            downloaded += chunk.len() as u64;
+
+            let mut guard = downloads.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.downloaded_bytes = downloaded;
+                if total_size > 0 {
+                    state.progress = (downloaded as f32) / (total_size as f32);
+                }
+                state.updated_at = chrono::Utc::now();
+            }
+        }
+
+        use tokio::io::AsyncWriteExt;
+        file.flush().await.map_err(DownloaderError::IoError)?;
+
+        {
+            let mut guard = downloads.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.status = DownloadStatus::Completed;
+                state.progress = 1.0;
+                state.output_path = Some(out_path.to_string_lossy().to_string());
+                state.completed_at = Some(chrono::Utc::now());
+                state.updated_at = chrono::Utc::now();
+            }
+        }
+
+        info!(download_id = %id, path = ?out_path, "Native YouTube audio download complete");
+        Ok(())
     }
 
     /// Run native pure-Rust HTTP stream download for direct media audio links
