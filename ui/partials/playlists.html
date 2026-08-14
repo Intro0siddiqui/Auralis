@@ -1,53 +1,13 @@
-<div id="playlists-view" class="view">
+<section class="page-playlists">
     <div class="section-header">
         <h2 class="section-title">Playlists</h2>
-        <button class="btn btn-primary">
+        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.promptCreatePlaylist()">
             <i data-lucide="plus"></i>
             New Playlist
         </button>
     </div>
 
-    <div class="pill-tabs">
-        <button class="pill-tab active">My Playlists</button>
-        <button class="pill-tab">Smart Playlists</button>
+    <div id="playlists-grid" class="grid grid-auto" style="margin-top: var(--space-4);">
+        <!-- Dynamically populated by loadPlaylistsView() in bridge.js -->
     </div>
-
-    <div class="grid grid-auto" style="margin-top: var(--space-4);">
-        <div class="card">
-            <div class="card-artwork">
-                <div class="artwork-placeholder">♪</div>
-            </div>
-            <div class="card-body">
-                <div class="card-title">Late Night Drive</div>
-                <div class="card-subtitle">24 tracks</div>
-            </div>
-        </div>
-        <div class="card">
-            <div class="card-artwork">
-                <div class="artwork-placeholder">♪</div>
-            </div>
-            <div class="card-body">
-                <div class="card-title">Chill Vibes</div>
-                <div class="card-subtitle">42 tracks</div>
-            </div>
-        </div>
-        <div class="card">
-            <div class="card-artwork">
-                <div class="artwork-placeholder">♪</div>
-            </div>
-            <div class="card-body">
-                <div class="card-title">Focus Flow</div>
-                <div class="card-subtitle">18 tracks</div>
-            </div>
-        </div>
-        <div class="card">
-            <div class="card-artwork">
-                <div class="artwork-placeholder">♪</div>
-            </div>
-            <div class="card-body">
-                <div class="card-title">Throwback Hits</div>
-                <div class="card-subtitle">63 tracks</div>
-            </div>
-        </div>
-    </div>
-</div>
+</section>

@@ -1,65 +1,9 @@
 <section class="page-albums">
     <header class="section-header">
         <h2 class="section-title">Albums</h2>
-        <div class="pill-tabs">
-            <button class="pill-tab active">
-                <i data-lucide="layout-grid"></i>
-                Grid
-            </button>
-            <button class="pill-tab">
-                <i data-lucide="list"></i>
-                List
-            </button>
-        </div>
     </header>
 
-    <div class="grid grid-auto">
-        <div class="card album-card">
-            <div class="card-artwork">S</div>
-            <div class="card-body">
-                <div class="card-title">Synthwave City</div>
-                <div class="card-subtitle">Midnight Drive</div>
-            </div>
-        </div>
-
-        <div class="card album-card">
-            <div class="card-artwork">G</div>
-            <div class="card-body">
-                <div class="card-title">Glass Horizons</div>
-                <div class="card-subtitle">Aurora Waves</div>
-            </div>
-        </div>
-
-        <div class="card album-card">
-            <div class="card-artwork">S</div>
-            <div class="card-body">
-                <div class="card-title">Soft Static</div>
-                <div class="card-subtitle">Echo Chamber</div>
-            </div>
-        </div>
-
-        <div class="card album-card">
-            <div class="card-artwork">G</div>
-            <div class="card-body">
-                <div class="card-title">Gravity Well</div>
-                <div class="card-subtitle">Lunar Fade</div>
-            </div>
-        </div>
-
-        <div class="card album-card">
-            <div class="card-artwork">E</div>
-            <div class="card-body">
-                <div class="card-title">Ember Tapes</div>
-                <div class="card-subtitle">Cinder Bloom</div>
-            </div>
-        </div>
-
-        <div class="card album-card">
-            <div class="card-artwork">N</div>
-            <div class="card-body">
-                <div class="card-title">Night Circuits</div>
-                <div class="card-subtitle">Vector Line</div>
-            </div>
-        </div>
+    <div id="albums-grid" class="grid grid-auto">
+        <!-- Dynamically populated by loadAlbumsView() in bridge.js -->
     </div>
 </section>

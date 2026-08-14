@@ -84,7 +84,7 @@ pub fn ytdlp_executable() -> PathBuf {
 /// Downloader errors
 #[derive(Debug, thiserror::Error)]
 pub enum DownloaderError {
-    #[error("yt-dlp not found")]
+    #[error("yt-dlp was not found on this device. Please install yt-dlp to download streaming media.")]
     YtDlpNotFound,
 
     #[error("Process error: {0}")]
@@ -440,9 +440,13 @@ impl Downloader {
 
         debug!(command = ?cmd, "Executing yt-dlp");
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| DownloaderError::ProcessError(e.to_string()))?;
+        let child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                DownloaderError::YtDlpNotFound
+            } else {
+                DownloaderError::ProcessError(e.to_string())
+            }
+        })?;
 
         {
             let processes = processes.read().await;
