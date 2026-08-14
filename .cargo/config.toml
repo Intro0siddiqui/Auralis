@@ -14,3 +14,6 @@ rustflags = ["-C", "link-arg=-lc++_shared"]
 
 [target.x86_64-linux-android]
 rustflags = ["-C", "link-arg=-lc++_shared"]
+
+[env]
+PKG_CONFIG_PATH = "/usr/lib/pkgconfig:/usr/share/pkgconfig"
