@@ -1,6 +1,33 @@
+# Rust Build Artifacts
 /target/
-.env
+dist/
 *.log
+
+# Environment & Secrets
+.env
+.env.*
+*.jks
+*.keystore
+
+# Databases (Local development & tests)
+*.db
+*.sqlite
+*.db-shm
+*.db-wal
+
+# Operating System & IDE Files
 .DS_Store
-/gen/schemas/
+Thumbs.db
+.directory
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node / Packaging
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Tauri Generated Outputs (Android build cache)
 /gen/android/

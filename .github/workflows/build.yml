@@ -72,18 +72,6 @@ jobs:
         run: npm install -g @tauri-apps/cli@^2.0.0
         shell: bash
 
-      - name: Install bundled sidecars (yt-dlp, ffmpeg)
-        # `tauri.conf.json` declares these as `externalBin`; Tauri resolves them
-        # next to the executable on every platform. They must be present at
-        # build time or `tauri build` fails.
-        run: |
-          mkdir -p src-tauri/bin
-          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o src-tauri/bin/yt-dlp
-          chmod +x src-tauri/bin/yt-dlp
-          brew install ffmpeg
-          cp "$(which ffmpeg)" src-tauri/bin/ffmpeg
-          chmod +x src-tauri/bin/ffmpeg
-
       - name: Build (compile gate)
         run: cargo build --release
 
@@ -114,17 +102,6 @@ jobs:
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2.0.0
         shell: bash
-
-      - name: Install bundled sidecars (yt-dlp, ffmpeg)
-        shell: bash
-        run: |
-          mkdir -p src-tauri/bin
-          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -o src-tauri/bin/yt-dlp.exe
-          curl -L https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -o ffmpeg.zip
-          unzip -o ffmpeg.zip
-          # The extracted dir is ffmpeg-<ver>-essentials or ffmpeg-<ver>-essentials_build
-          # (newer 9.x releases append `_build`), so widen the glob to `essentials*`.
-          cp ffmpeg-*-essentials*/bin/ffmpeg.exe src-tauri/bin/ffmpeg.exe
 
       - name: Build (compile gate)
         run: cargo build --release

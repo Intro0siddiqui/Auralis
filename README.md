@@ -168,18 +168,13 @@ See [AGENTS.md](AGENTS.md) for detailed implementation guidelines and the roadma
 
 ---
 
-## Media Downloading Dependencies (yt-dlp / ffmpeg)
+## Media Downloading (Pure-Rust Engine)
 
-Downloads are handled by spawning `yt-dlp` as a subprocess (with `ffmpeg` used by
-yt-dlp for post-processing). These binaries are **required** at runtime:
+Auralis v2 features a **pure-Rust asynchronous media downloader** with zero mandatory external binaries:
 
-- **Bundled sidecar (recommended):** `tauri.conf.json` lists `bin/yt-dlp` and
-  `bin/ffmpeg` under `bundle.externalBin`. Place the matching binaries in
-  `src-tauri/bin/` (Tauri appends `.exe` automatically on Windows) so they are
-  shipped next to the executable. The Rust code resolves them via
-  `std::env::current_exe()`'s directory and falls back to `PATH`.
-- **System `PATH`:** if no sidecar is bundled, the bare `yt-dlp` / `ffmpeg`
-  names are used and must exist on the `PATH`.
+- **Native YouTube Audio (`rusty_ytdl`)**: Connects directly to YouTube's streaming protocol asynchronously in Rust, extracts high-bitrate audio, and streams it straight to storage. Runs natively on Android, Windows, macOS, and Linux without Python.
+- **Native Direct Audio Streaming (`reqwest`)**: Downloads direct HTTPS audio files (`.mp3`, `.flac`, `.m4a`, `.wav`, `.aac`, podcast streams) natively with live byte progress tracking.
+- **Optional CLI Fallback (`yt-dlp`)**: If `yt-dlp` is installed on your system `PATH`, desktop platforms can also extract audio from third-party sites like SoundCloud and Bandcamp.
 
 ---
 

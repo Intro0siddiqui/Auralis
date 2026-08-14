@@ -14,7 +14,7 @@ echo "    Working directory: $ROOT"
 # --- Sanity checks ---------------------------------------------------------
 [ -f Cargo.toml ] || { echo "ERROR: Cargo.toml not found"; exit 1; }
 [ -d ui ]          || { echo "ERROR: ui/ directory not found"; exit 1; }
-[ -d templates ]   || { echo "ERROR: templates/ directory not found"; exit 1; }
+[ -d src/templates ] || { echo "ERROR: src/templates/ directory not found"; exit 1; }
 [ -f tauri.conf.json ] || { echo "ERROR: tauri.conf.json not found"; exit 1; }
 
 # --- Determine build profile ----------------------------------------------
@@ -45,9 +45,11 @@ mkdir -p "$DIST_DIR"
 # Copy UI assets
 cp -r "$ROOT/ui" "$DIST_DIR/ui"
 
-# Copy templates
-mkdir -p "$DIST_DIR/templates"
-cp -r "$ROOT/templates/"* "$DIST_DIR/templates/"
+# Copy templates if present
+if [ -d "$ROOT/src/templates" ]; then
+    mkdir -p "$DIST_DIR/templates"
+    cp -r "$ROOT/src/templates/"* "$DIST_DIR/templates/"
+fi
 
 # Copy the binary
 BIN_NAME="auralis"
