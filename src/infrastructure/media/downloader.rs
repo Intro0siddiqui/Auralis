@@ -85,7 +85,9 @@ pub fn ytdlp_executable() -> PathBuf {
 /// Downloader errors
 #[derive(Debug, thiserror::Error)]
 pub enum DownloaderError {
-    #[error("yt-dlp was not found on this device. Please install yt-dlp to download streaming media.")]
+    #[error(
+        "yt-dlp was not found on this device. Please install yt-dlp to download streaming media."
+    )]
     YtDlpNotFound,
 
     #[error("Process error: {0}")]
@@ -300,8 +302,9 @@ impl Downloader {
             ..Default::default()
         };
 
-        let video = Video::new_with_options(url, video_options)
-            .map_err(|e| DownloaderError::ProcessError(format!("Failed to parse YouTube video: {e}")))?;
+        let video = Video::new_with_options(url, video_options).map_err(|e| {
+            DownloaderError::ProcessError(format!("Failed to parse YouTube video: {e}"))
+        })?;
 
         // Fetch video details to populate real song metadata
         if let Ok(info) = video.get_info().await {
@@ -320,10 +323,9 @@ impl Downloader {
             .await
             .map_err(DownloaderError::IoError)?;
 
-        let stream = video
-            .stream()
-            .await
-            .map_err(|e| DownloaderError::ProcessError(format!("Failed to open YouTube audio stream: {e}")))?;
+        let stream = video.stream().await.map_err(|e| {
+            DownloaderError::ProcessError(format!("Failed to open YouTube audio stream: {e}"))
+        })?;
 
         let total_size = stream.content_length() as u64;
 
@@ -331,7 +333,11 @@ impl Downloader {
             let mut guard = downloads.write().await;
             if let Some(state) = guard.get_mut(&id) {
                 state.status = DownloadStatus::Downloading;
-                state.total_bytes = if total_size > 0 { Some(total_size) } else { None };
+                state.total_bytes = if total_size > 0 {
+                    Some(total_size)
+                } else {
+                    None
+                };
                 state.output_path = Some(out_path.to_string_lossy().to_string());
                 state.updated_at = chrono::Utc::now();
             }
@@ -391,7 +397,9 @@ impl Downloader {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .map_err(|e| DownloaderError::ProcessError(format!("Failed to build HTTP client: {e}")))?;
+            .map_err(|e| {
+                DownloaderError::ProcessError(format!("Failed to build HTTP client: {e}"))
+            })?;
 
         let mut res = client
             .get(url)

@@ -25,8 +25,14 @@ const EMBEDDED_PARTIALS: &[(&str, &str)] = &[
     ("home", include_str!("../../ui/partials/home.html")),
     ("library", include_str!("../../ui/partials/library.html")),
     ("nav", include_str!("../../ui/partials/nav.html")),
-    ("player-full", include_str!("../../ui/partials/player-full.html")),
-    ("playlists", include_str!("../../ui/partials/playlists.html")),
+    (
+        "player-full",
+        include_str!("../../ui/partials/player-full.html"),
+    ),
+    (
+        "playlists",
+        include_str!("../../ui/partials/playlists.html"),
+    ),
     ("search", include_str!("../../ui/partials/search.html")),
     ("settings", include_str!("../../ui/partials/settings.html")),
     ("sync", include_str!("../../ui/partials/sync.html")),
