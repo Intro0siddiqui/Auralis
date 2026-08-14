@@ -68,7 +68,7 @@ button, a, input, select, [data-tauri-drag-region] button {
     top: 0;
     left: 0;
     width: var(--sidebar-width);
-    height: calc(100vh - var(--player-bar-height));
+    height: calc(100vh - var(--player-bar-height) - env(safe-area-inset-bottom, 0px));
     z-index: var(--z-sidebar);
     display: flex;
     flex-direction: column;
@@ -81,7 +81,11 @@ button, a, input, select, [data-tauri-drag-region] button {
     top: 0;
     left: var(--sidebar-width);
     width: calc(100vw - var(--sidebar-width));
-    height: calc(100vh - var(--player-bar-height));
+    height: calc(100vh - var(--player-bar-height) - env(safe-area-inset-bottom, 0px));
+    padding-top: max(var(--space-5), calc(var(--space-4) + env(safe-area-inset-top, 0px)));
+    padding-right: max(var(--space-5), calc(var(--space-4) + env(safe-area-inset-right, 0px)));
+    padding-bottom: max(var(--space-6), calc(var(--space-4) + env(safe-area-inset-bottom, 0px)));
+    padding-left: max(var(--space-5), calc(var(--space-4) + env(safe-area-inset-left, 0px)));
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
@@ -95,7 +99,8 @@ button, a, input, select, [data-tauri-drag-region] button {
     top: 0;
     right: 0;
     width: var(--queue-panel-width);
-    height: calc(100vh - var(--player-bar-height));
+    height: calc(100vh - var(--player-bar-height) - env(safe-area-inset-bottom, 0px));
+    padding-top: max(var(--space-4), env(safe-area-inset-top, 0px));
     transform: translateX(100%);
     transition: transform var(--transition-base);
     z-index: var(--z-sidebar);
@@ -112,11 +117,14 @@ button, a, input, select, [data-tauri-drag-region] button {
     bottom: 0;
     left: 0;
     width: 100vw;
-    height: var(--player-bar-height);
+    height: calc(var(--player-bar-height) + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-left: max(var(--space-4), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--space-4), env(safe-area-inset-right, 0px));
     z-index: var(--z-player-bar);
     display: flex;
     align-items: center;
-    padding: 0 var(--space-4);
+    padding-top: var(--space-2);
     gap: var(--space-6);
 }
 
@@ -124,7 +132,7 @@ button, a, input, select, [data-tauri-drag-region] button {
 #mobile-nav {
     display: none;
     position: fixed;
-    bottom: var(--player-bar-height);
+    bottom: calc(var(--player-bar-height) + env(safe-area-inset-bottom, 0px));
     left: 0;
     width: 100vw;
     height: var(--mobile-nav-height);

@@ -151,16 +151,18 @@ class Bridge {
     }
 
     async loadHomeView() {
-        const page = await this.invoke('get_tracks', { filter: { limit: 10 } });
-        const shelf = document.querySelector('.page-home .shelf') || document.querySelector('#content .shelf');
-        
+        const page = await this.invoke('get_tracks', { filter: { limit: 12 } });
+        const shelf = document.getElementById('recently-added-shelf') || document.querySelector('.page-home .shelf') || document.querySelector('#content .shelf');
+        const trackList = document.getElementById('continue-listening-tracks') || document.querySelector('.page-home .track-list');
+        const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home');
+
         if (page && page.tracks && page.tracks.length > 0) {
             this.tracks = page.tracks;
             if (shelf) {
                 shelf.innerHTML = page.tracks.slice(0, 6).map(track => `
-                    <div class="card album-card" onclick="window.Auralis.bridge.playTrack('${track.id}')" style="cursor: pointer;">
+                    <div class="card album-card neu-glass" onclick="window.Auralis.bridge.playTrack('${track.id}')" style="cursor: pointer;">
                         <div class="card-artwork">
-                            ${track.album_art_path ? `<img src="${track.album_art_path}" alt="${track.title}">` : `<i data-lucide="disc-3"></i>`}
+                            ${track.album_art_path ? `<img src="${track.album_art_path}" alt="${this.escapeHtml(track.title)}">` : `<i data-lucide="disc-3"></i>`}
                         </div>
                         <div class="card-body">
                             <div class="card-title">${this.escapeHtml(track.title)}</div>
@@ -168,6 +170,33 @@ class Bridge {
                         </div>
                     </div>
                 `).join('');
+            }
+            if (trackList) {
+                this.renderTrackRows(trackList, page.tracks.slice(0, 6));
+            }
+            if (window.lucide) window.lucide.createIcons();
+        } else {
+            if (container) {
+                container.innerHTML = `
+                    <div class="empty-state glass neu" style="padding: var(--space-8); border-radius: var(--radius-lg); text-align: center; margin-top: var(--space-4);">
+                        <div class="empty-state-icon" style="color: var(--accent); margin-bottom: var(--space-4);">
+                            <i data-lucide="music" style="width: 48px; height: 48px;"></i>
+                        </div>
+                        <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">Your library is empty</h2>
+                        <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Scan your device storage for local audio files or download audio streams to start playing.</p>
+                        <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
+                            <button class="btn btn-primary neu" onclick="window.Auralis.bridge.scanLibrary()">
+                                <i data-lucide="folder-search"></i>
+                                Scan Device Storage
+                            </button>
+                            <button class="btn btn-secondary neu" hx-get="/partials/download" hx-target="#content" hx-swap="innerHTML transition:true">
+                                <i data-lucide="download"></i>
+                                Download Audio
+                            </button>
+                        </div>
+                    </div>
+                `;
+                if (window.lucide) window.lucide.createIcons();
             }
         }
     }
