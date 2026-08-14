@@ -302,13 +302,26 @@ impl Downloader {
     ) -> Result<(), DownloaderError> {
         info!(download_id = %id, url = %url, "Executing native YouTube audio download via rusty_ytdl");
 
+        // Clean tracking parameters and normalize youtu.be URLs
+        let clean_url = if let Some(idx) = url.find("youtu.be/") {
+            let id_part = &url[idx + 9..];
+            let video_id = id_part.split('?').next().unwrap_or(id_part);
+            format!("https://www.youtube.com/watch?v={video_id}")
+        } else if let Some(idx) = url.find("youtube.com/watch?v=") {
+            let rest = &url[idx + 20..];
+            let video_id = rest.split('&').next().unwrap_or(rest);
+            format!("https://www.youtube.com/watch?v={video_id}")
+        } else {
+            url.to_string()
+        };
+
         let video_options = VideoOptions {
             quality: VideoQuality::Highest,
             filter: VideoSearchOptions::Audio,
             ..Default::default()
         };
 
-        let video = Video::new_with_options(url, video_options).map_err(|e| {
+        let video = Video::new_with_options(&clean_url, video_options).map_err(|e| {
             DownloaderError::ProcessError(format!("Failed to parse YouTube video: {e}"))
         })?;
 
@@ -320,7 +333,15 @@ impl Downloader {
             }
         }
 
-        let ext = format.extension();
+        // Native YouTube audio streams are AAC; container must be m4a unless transcoded
+        let ext = if matches!(
+            format,
+            AudioFormat::Mp3 | AudioFormat::M4a | AudioFormat::Aac
+        ) {
+            "m4a"
+        } else {
+            format.extension()
+        };
         let filename = format!("track_{}.{}", &id.to_string()[..8], ext);
         let out_path = output_dir.join(&filename);
 

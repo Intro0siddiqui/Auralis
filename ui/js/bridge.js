@@ -42,6 +42,21 @@ class Bridge {
                     this.showToast(`Library scan complete: ${event.payload.tracks_added} new tracks`, 'info');
                     this.refreshCurrentView();
                 });
+
+                await listen('download:progress', (event) => {
+                    this.updateDownloadProgressUI(event.payload);
+                });
+
+                await listen('download:completed', (event) => {
+                    const p = event.payload;
+                    if (p.status === 'completed') {
+                        this.showToast(`Download complete: ${p.title}`, 'success');
+                        this.scanLibrary();
+                    } else if (p.status === 'failed') {
+                        this.showToast(`Download failed: ${p.error_message || 'Stream error'}`, 'error');
+                    }
+                    this.updateDownloadProgressUI(p);
+                });
             }
         } catch (e) {
             console.warn('Tauri bridge not available:', e);

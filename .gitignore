@@ -31,3 +31,6 @@ yarn-error.log*
 
 # Tauri Generated Outputs (Android build cache)
 /gen/android/
+
+# Scratch & Temporary Testing Files
+scratch/

@@ -9,8 +9,7 @@ use crate::infrastructure::database::Database;
 use crate::infrastructure::filesystem::scanner::DirectoryScanner;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::Emitter;
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 
 /// Tracks query result wrapper
@@ -142,8 +141,43 @@ pub async fn scan_library_paths(
     let scan_paths: Vec<std::path::PathBuf> = match paths {
         Some(p) => p.into_iter().map(std::path::PathBuf::from).collect(),
         None => {
-            let music_dir = dirs::audio_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-            vec![music_dir]
+            let mut default_paths = Vec::new();
+            if let Some(music) = dirs::audio_dir() {
+                if music.exists() {
+                    default_paths.push(music);
+                }
+            }
+            if let Some(download) = dirs::download_dir() {
+                if download.exists() {
+                    default_paths.push(download);
+                }
+            }
+            // Android-specific standard storage paths
+            for android_path in [
+                "/storage/emulated/0/Music",
+                "/storage/emulated/0/Download",
+                "/storage/emulated/0/Audio",
+                "/sdcard/Music",
+                "/sdcard/Download",
+            ] {
+                let p = std::path::PathBuf::from(android_path);
+                if p.exists() {
+                    default_paths.push(p);
+                }
+            }
+
+            // Also include internal app downloads directory
+            if let Ok(app_dir) = app.path().app_data_dir() {
+                let dl_dir = app_dir.join("downloads");
+                if dl_dir.exists() {
+                    default_paths.push(dl_dir);
+                }
+            }
+
+            if default_paths.is_empty() {
+                default_paths.push(std::path::PathBuf::from("."));
+            }
+            default_paths
         }
     };
 

@@ -45,33 +45,44 @@ impl DirectoryScanner {
         )
     }
 
-    /// Scan a directory for music files
+    /// Scan a directory for music files recursively
     pub async fn scan(&self, path: &Path) -> Result<Vec<PathBuf>, ScannerError> {
         info!(path = %path.display(), "Scanning directory");
 
+        if !path.exists() {
+            warn!(path = %path.display(), "Directory does not exist");
+            return Ok(Vec::new());
+        }
+
         let mut files = Vec::new();
+        let mut dirs_to_visit = vec![path.to_path_buf()];
 
-        for pattern in &self.include_patterns {
-            // Build a glob pattern with a single, consistent separator. A naive
-            // `path.join(pattern)` mixes `\` (from the base path on Windows)
-            // with `/` (from the `**/*.ext` suffix), which confuses the `glob`
-            // parser and yields zero matches. Normalizing every separator to
-            // `/` is safe on all platforms: `glob` treats `/` as the pattern
-            // separator everywhere and matches path components by name.
-            let base = path.to_string_lossy().replace('\\', "/");
-            let full_pattern = format!("{}/{}", base.trim_end_matches('/'), pattern);
-            debug!(pattern = %full_pattern, "Scanning with pattern");
+        while let Some(current_dir) = dirs_to_visit.pop() {
+            if let Ok(entries) = std::fs::read_dir(&current_dir) {
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    let file_name = entry.file_name().to_string_lossy().to_string();
 
-            match glob::glob(&full_pattern) {
-                Ok(entries) => {
-                    for entry in entries.filter_map(|e| e.ok()) {
-                        if entry.is_file() && !self.is_excluded(&entry) {
-                            files.push(entry);
+                    // Skip hidden files/folders (starting with dot)
+                    if file_name.starts_with('.') {
+                        continue;
+                    }
+
+                    if entry_path.is_dir() {
+                        dirs_to_visit.push(entry_path);
+                    } else if entry_path.is_file() {
+                        if let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) {
+                            let ext_lower = ext.to_lowercase();
+                            if matches!(
+                                ext_lower.as_str(),
+                                "mp3" | "flac" | "wav" | "aac" | "ogg" | "m4a"
+                            ) {
+                                if !self.is_excluded(&entry_path) {
+                                    files.push(entry_path);
+                                }
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    warn!(pattern = %pattern, error = %e, "Invalid glob pattern");
                 }
             }
         }

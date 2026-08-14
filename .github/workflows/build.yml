@@ -253,7 +253,11 @@ jobs:
           path: auralis-*-android.apk
 
   test:
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -263,7 +267,8 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Install system deps
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -271,7 +276,9 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libasound2-dev
+            libasound2-dev \
+            libssl-dev \
+            pkg-config
 
       - name: Run tests
         run: cargo test --all-features
