@@ -166,8 +166,12 @@ pub async fn scan_library_paths(
                 }
             }
 
-            // Also include internal app downloads directory
+            // Also include internal app music and downloads directory
             if let Ok(app_dir) = app.path().app_data_dir() {
+                let music_dir = app_dir.join("music");
+                if music_dir.exists() {
+                    default_paths.push(music_dir);
+                }
                 let dl_dir = app_dir.join("downloads");
                 if dl_dir.exists() {
                     default_paths.push(dl_dir);

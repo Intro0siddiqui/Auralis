@@ -145,7 +145,62 @@ class Bridge {
                 this.refreshCurrentView();
             }
         } catch (err) {
-            this.showToast(`Scan failed: ${err}`, 'error');
+            this.showToast(`Scan finished: ${err}`, 'info');
+        }
+    }
+
+    triggerFolderScan() {
+        this.scanLibrary();
+        const folderInput = document.getElementById('folder-scan-input');
+        if (folderInput) {
+            folderInput.click();
+        }
+    }
+
+    async handleFolderScan(input) {
+        if (!input || !input.files || input.files.length === 0) return;
+        const allFiles = Array.from(input.files);
+        const audioExtensions = ['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg'];
+        const audioFiles = allFiles.filter(file => {
+            const name = file.name.toLowerCase();
+            return file.type.startsWith('audio/') || audioExtensions.some(ext => name.endsWith(ext));
+        });
+
+        if (audioFiles.length === 0) {
+            this.showToast('No audio files found in selected folder.', 'info');
+            return;
+        }
+
+        this.showToast(`Found ${audioFiles.length} audio file(s). Scanning & importing...`, 'info');
+
+        let importedCount = 0;
+        for (const file of audioFiles) {
+            try {
+                const base64Data = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        const result = String(reader.result || '');
+                        const commaIdx = result.indexOf(',');
+                        resolve(commaIdx !== -1 ? result.substring(commaIdx + 1) : result);
+                    };
+                    reader.onerror = (e) => reject(e);
+                    reader.readAsDataURL(file);
+                });
+
+                const result = await this.invoke('import_audio_file', {
+                    name: file.name,
+                    data_base64: base64Data
+                });
+                if (result) importedCount++;
+            } catch (err) {
+                console.error(`Failed to scan file ${file.name}:`, err);
+            }
+        }
+
+        input.value = '';
+        if (importedCount > 0) {
+            this.showToast(`Scan complete: ${importedCount} track(s) added to library!`, 'success');
+            this.loadLibraryView();
         }
     }
 
