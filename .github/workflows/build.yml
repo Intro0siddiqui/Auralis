@@ -268,6 +268,18 @@ jobs:
             "$APK_PATH"
           "$APKSIGNER" verify --verbose "auralis-${{ github.ref_name }}-android.apk"
 
+      - name: Verify Android APK Native Binary & Scanner Assets
+        run: |
+          APK_TARGET=$(find . -maxdepth 1 -name "auralis-*-android.apk" | head -1)
+          if [ -z "$APK_TARGET" ]; then
+            APK_TARGET=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
+          fi
+          echo "Inspecting compiled Android APK: $APK_TARGET"
+          unzip -l "$APK_TARGET" | grep "libauralis.so" || { echo "libauralis.so missing in APK!"; exit 1; }
+          unzip -l "$APK_TARGET" | grep "libc++_shared.so" || { echo "libc++_shared.so missing in APK!"; exit 1; }
+          unzip -l "$APK_TARGET" | grep "index.html" || { echo "Frontend assets missing in APK!"; exit 1; }
+          echo "Android APK structure, native audio engine, and scanner assets verified successfully!"
+
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
