@@ -471,6 +471,24 @@ class Bridge {
         }
     }
 
+    async connectDirectPeer() {
+        const input = document.getElementById('direct-peer-address');
+        if (!input || !input.value.trim()) {
+            this.showToast('Please enter an IP:Port or Multiaddr', 'warning');
+            return;
+        }
+        const address = input.value.trim();
+        this.showToast(`Connecting to ${address}...`, 'info');
+        try {
+            const res = await this.invoke('connect_peer_address', { address });
+            this.showToast(res || 'Direct connection established!', 'success');
+            input.value = '';
+            this.loadSyncView();
+        } catch (err) {
+            this.showToast(`Direct connection failed: ${err}`, 'error');
+        }
+    }
+
     async syncNow() {
         this.showToast('Initiating peer synchronization...', 'info');
         try {

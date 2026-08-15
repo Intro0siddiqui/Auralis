@@ -94,3 +94,15 @@ pub async fn sync_with_device(
 pub async fn get_sync_status(service: State<'_, SyncService>) -> Result<SyncStatus, String> {
     Ok(service.get_sync_status().await)
 }
+
+/// Connect directly to a peer via IP:Port or Multiaddr (bypasses AP isolation / mobile multicast blocks)
+#[tauri::command]
+pub async fn connect_peer_address(
+    service: State<'_, SyncService>,
+    address: String,
+) -> Result<String, String> {
+    service.connect_address(&address).await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to connect to peer address");
+        format!("Failed to connect: {e}")
+    })
+}

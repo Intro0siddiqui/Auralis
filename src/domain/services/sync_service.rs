@@ -301,6 +301,32 @@ impl SyncService {
         }
     }
 
+    /// Connect directly to a peer via Multiaddr or IP:Port (fallback when mDNS is unavailable)
+    pub async fn connect_address(&self, address: &str) -> Result<String, SyncError> {
+        let addr = address.trim();
+        if addr.is_empty() {
+            return Err(SyncError::NetworkError(
+                "Address cannot be empty".to_string(),
+            ));
+        }
+
+        let multiaddr_str = if addr.starts_with('/') {
+            addr.to_string()
+        } else if let Some((ip, port)) = addr.split_once(':') {
+            format!("/ip4/{ip}/tcp/{port}")
+        } else {
+            format!("/ip4/{addr}/tcp/4001")
+        };
+
+        self.sync_engine
+            .connect(&multiaddr_str)
+            .await
+            .map_err(|e| SyncError::NetworkError(e.to_string()))?;
+
+        info!(multiaddr = %multiaddr_str, "Connected direct P2P address");
+        Ok(format!("Direct connection established to {multiaddr_str}"))
+    }
+
     /// Record a change for sync
     pub async fn record_change(
         &self,

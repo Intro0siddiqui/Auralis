@@ -7,7 +7,7 @@
         </button>
     </div>
 
-    <div class="card pairing-card neu-glass" style="padding: var(--space-5); margin-bottom: var(--space-6);">
+    <div class="card pairing-card neu-glass" style="padding: var(--space-5); margin-bottom: var(--space-4);">
         <div class="pairing-layout" style="display: flex; gap: var(--space-4); align-items: center; flex-wrap: wrap;">
             <div class="card-artwork pairing-qr" id="sync-qr-container" style="width: 100px; height: 100px; display: flex; align-items: center; justify-content: center;">
                 <i data-lucide="radio" style="width: 48px; height: 48px; color: var(--accent);"></i>
@@ -21,6 +21,15 @@
                     Discovery active · LAN broadcast
                 </div>
             </div>
+        </div>
+    </div>
+
+    <div class="card neu-glass" style="padding: var(--space-4); margin-bottom: var(--space-6);">
+        <h4 style="font-size: var(--text-sm); font-weight: var(--font-semibold); margin-bottom: var(--space-2); color: var(--text-1);">Direct IP / Multiaddr Connect</h4>
+        <p style="font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-3);">Connect directly to a peer if local mDNS discovery is blocked by router AP isolation.</p>
+        <div style="display: flex; gap: var(--space-2);">
+            <input type="text" id="direct-peer-address" class="input neu-inset" placeholder="e.g. 192.168.1.50:4001 or /ip4/..." style="flex: 1;">
+            <button class="btn btn-secondary neu" onclick="window.Auralis.bridge.connectDirectPeer()">Connect</button>
         </div>
     </div>
 

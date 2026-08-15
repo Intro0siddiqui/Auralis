@@ -165,6 +165,7 @@ impl AuralisApp {
                 commands::sync::unpair_device,
                 commands::sync::sync_with_device,
                 commands::sync::get_sync_status,
+                commands::sync::connect_peer_address,
                 // Settings commands
                 commands::settings::get_settings,
                 commands::settings::update_settings,
