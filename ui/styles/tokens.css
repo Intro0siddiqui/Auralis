@@ -5,28 +5,28 @@
 
 :root {
   /* ========================================
-     Background Colors
+     Background Colors (Deep Metallic Obsidian)
      ======================================== */
-  --bg-0: #070b10;
-  --bg-1: #0b1118;
-  --bg-2: #111a24;
-  --bg-3: #182330;
+  --bg-0: #020406;
+  --bg-1: #06090e;
+  --bg-2: #0b1017;
+  --bg-3: #121924;
 
   /* ========================================
-     Glass Effects
+     Glass Effects & Specular Metal Sheen
      ======================================== */
-  --glass-weak: rgba(255, 255, 255, 0.05);
-  --glass-base: rgba(255, 255, 255, 0.08);
-  --glass-strong: rgba(255, 255, 255, 0.12);
-  --glass-border: rgba(255, 255, 255, 0.14);
-  --glass-border-strong: rgba(255, 255, 255, 0.22);
+  --glass-weak: rgba(255, 255, 255, 0.03);
+  --glass-base: rgba(11, 16, 23, 0.72);
+  --glass-strong: rgba(18, 25, 36, 0.88);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-border-strong: rgba(255, 255, 255, 0.18);
 
   /* ========================================
      Text Colors
      ======================================== */
-  --text-1: #f5f8fa;
-  --text-2: rgba(245, 248, 250, 0.72);
-  --text-3: rgba(245, 248, 250, 0.48);
+  --text-1: #f8fafc;
+  --text-2: rgba(241, 245, 249, 0.75);
+  --text-3: rgba(241, 245, 249, 0.48);
 
   /* ========================================
      Accent Colors
@@ -54,30 +54,34 @@
   --blur-lg: 28px;
 
   /* ========================================
-     Neumorphic Shadows
+     Specular Metallic Neumorphic Shadows
      ======================================== */
   --neu-out:
-    8px 8px 18px rgba(0, 0, 0, 0.42),
-    -6px -6px 14px rgba(255, 255, 255, 0.045);
+    inset 1px 1px 0px rgba(255, 255, 255, 0.1),
+    inset -1px -1px 0px rgba(0, 0, 0, 0.85),
+    8px 10px 24px rgba(0, 0, 0, 0.85),
+    -4px -4px 14px rgba(255, 255, 255, 0.02);
 
   --neu-out-sm:
-    4px 4px 10px rgba(0, 0, 0, 0.38),
-    -3px -3px 8px rgba(255, 255, 255, 0.04);
+    inset 1px 1px 0px rgba(255, 255, 255, 0.08),
+    inset -1px -1px 0px rgba(0, 0, 0, 0.8),
+    4px 5px 12px rgba(0, 0, 0, 0.75);
 
   --neu-in:
-    inset 4px 4px 10px rgba(0, 0, 0, 0.42),
-    inset -4px -4px 10px rgba(255, 255, 255, 0.04);
+    inset 3px 3px 8px rgba(0, 0, 0, 0.95),
+    inset -2px -2px 6px rgba(255, 255, 255, 0.04),
+    0 1px 0 rgba(255, 255, 255, 0.07);
 
   --neu-in-sm:
-    inset 2px 2px 6px rgba(0, 0, 0, 0.38),
-    inset -2px -2px 6px rgba(255, 255, 255, 0.035);
+    inset 2px 2px 5px rgba(0, 0, 0, 0.9),
+    inset -1px -1px 3px rgba(255, 255, 255, 0.035);
 
   /* ========================================
      Glass Shadows
      ======================================== */
   --glass-shadow:
-    0 10px 30px rgba(0, 0, 0, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    0 12px 36px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
 
   /* ========================================
      Interaction
@@ -117,10 +121,9 @@
   --space-2xl: 32px;
 
   /* ========================================
-  /* ========================================
      ALIASES & MISSING TOKENS (:root)
      ======================================== */
-  --bg-gradient: radial-gradient(circle at 50% -20%, #152232 0%, #0b1118 60%, #070b10 100%);
+  --bg-gradient: radial-gradient(ellipse at 50% -15%, #131d2b 0%, #06090e 60%, #010204 100%);
 
   /* Blur aliases */
   --blur-heavy: var(--blur-lg);
@@ -176,8 +179,8 @@
   --like: var(--danger);
 
   /* Shadows */
-  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.35);
-  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.85);
 
   /* Z-index layering */
   --z-sidebar: 100;
@@ -191,14 +194,14 @@
 
   /* Neumorphic Dark Theme Defaults */
   --neu-bg: var(--bg-2);
-  --neu-color-light: rgba(255, 255, 255, 0.075);
-  --neu-color-dark: rgba(0, 0, 0, 0.55);
-  --neu-inset-bg: var(--bg-1);
-  --neu-shadow-light: 6px;
-  --neu-shadow-dark: 6px;
-  --neu-shadow-light-hover: 8px;
-  --neu-shadow-dark-hover: 8px;
-  --neu-glow: 0 0 20px rgba(110, 231, 255, 0.35);
+  --neu-color-light: rgba(255, 255, 255, 0.09);
+  --neu-color-dark: rgba(0, 0, 0, 0.9);
+  --neu-inset-bg: var(--bg-0);
+  --neu-shadow-light: 1px 1px 0px;
+  --neu-shadow-dark: 6px 8px 20px;
+  --neu-shadow-light-hover: 1px 1px 0px;
+  --neu-shadow-dark-hover: 8px 12px 28px;
+  --neu-glow: 0 0 24px rgba(110, 231, 255, 0.28), 0 0 2px rgba(110, 231, 255, 0.6);
 }
 
 [data-theme="light"],
