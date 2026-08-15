@@ -18,8 +18,8 @@ App identifier: `com.auralis.v2`.
 - **Rust backend** (the same binary powers the server and the mobile app):
   - HTTP API server (axum-based, served over LAN/Wi-Fi).
   - Local media library scanning, database (SQLite), sync engine (libp2p),
-    yt-dlp downloader bridge, and an audio player (rodio → cpal → oboe on
-    Android).
+  a pure-Rust `rusty_ytdl` downloader (with optional `yt-dlp` fallback), and an
+  audio player (rodio → cpal → oboe on Android).
 - **Frontend**: vanilla JS + HTML partials under `ui/`. Partials are rendered
   server-side via `render_template` / `render_partial` (Askama was removed).
   Search sources YouTube via the unpkg CDN (`https://unpkg.com`) allowed in the
@@ -55,12 +55,17 @@ App identifier: `com.auralis.v2`.
 - **`logcat` IS readable** from Termux. Capture crashes with:
   `logcat -d | grep -iE "AndroidRuntime|FATAL|signal|abort|auralis|libauralis"`
   or `logcat -b crash -d`.
-- **No local Android NDK and no GTK/WebKit dev libs** are present, so
-  `cargo build` / `cargo check` for the host or Android target cannot fully
-  link Tauri here. The only reliable build path is **GitHub Actions CI**.
-  However, `cargo check --target aarch64-linux-android --lib` DOES work for
-  type-checking (it fetches the android std + deps; it does not need NDK
-  system libs to type-check, only to link).
+- **No local Android NDK and no `webkit2gtk-4.1` dev libs** are present, so a
+  full `cargo build` (link step) for the host or Android target cannot link
+  Tauri here. The only reliable path to a binary/APK is **GitHub Actions CI**.
+  **Type-checking works locally for both targets**, however:
+  - `cargo check --lib` (host) ✅
+  - `cargo check --target aarch64-linux-android --lib` ✅ (fetches android std +
+    deps; needs no NDK system libs to type-check, only to link).
+- **`gh` CLI is authenticated** as `Intro0siddiqui` (scopes: `repo`,
+  `workflow`, `delete_repo`). You can push, tag, and inspect CI, but the
+  workflow has **no `workflow_dispatch`** — a release/APK build is triggered
+  **only by pushing a `v*` tag**.
 - The `aarch64-linux-android` rust target is installed locally
   (`rustup target list --installed`).
 - User installed `rg` (ripgrep) and `fd` for faster searching — prefer them
@@ -79,22 +84,33 @@ So **a tag push = one CI run that builds everything including the signed
 Android APK**. A plain `main` push does NOT build the APK.
 
 ### What the workflow does (per tag run)
-Jobs: `lint`, `build-linux`, `build-macos (aarch64 + x86_64)`, `build-windows`,
-`test`, `build-android`. All run **in parallel** — `lint` failing does NOT block
-`build-android`.
+Jobs: `lint`, `build-linux`, `build-macos`, `build-windows`, `test`,
+`build-android`, and a final `release` job (which `needs` all of the above and
+runs only on tags). Build jobs run **in parallel** — `lint` failing does NOT
+block `build-android`. The `release` job downloads every `release-*` artifact
+and creates a GitHub Release with the `.dmg` / `.msi` / `.exe` / `.apk` /
+`.tar.gz` assets.
 
 `build-android` specifics:
 1. Checks out the tag.
-2. `npm ci` + `npm run build` (frontend, if any).
-3. `cargo tauri android init` (regenerates the `gen/android` Kotlin shell).
-4. **Copies `libc++_shared.so` into `gen/android/.../jniLibs/<abi>` for all 4
-   ABIs** (arm64-v8a, armeabi-v7a, x86, x86_64) so the C++ runtime is bundled.
-5. `cargo tauri android build` (release).
-6. Signs the APK with `apksigner` (keystore + creds from repo secrets).
-7. Uploads the signed APK as a release artifact.
+2. Sets up Rust (aarch64-linux-android), JDK 17, Android SDK + NDK 25.
+3. `cargo tauri android init` (regenerates the `gen/android` Kotlin shell,
+   guarded with `|| true`).
+4. **Injects Android permissions** into `AndroidManifest.xml` at build time
+   (`READ_MEDIA_AUDIO`, `READ/WRITE_EXTERNAL_STORAGE`, `MANAGE_EXTERNAL_STORAGE`,
+   foreground-service media) and `requestLegacyExternalStorage`.
+5. **Copies `libc++_shared.so` into `gen/android/.../jniLibs/arm64-v8a`** (the
+   single ABI built).
+6. `cargo tauri android build --apk --target aarch64` (release).
+7. **Auto-generates a keystore** (`keytool`, alias `auralis`, password
+   `password`) and signs the APK with `apksigner` (v1–v3).
+8. **Verifies** the APK contains `libauralis_lib.so`, `libc++_shared.so`, and
+   `index.html`, then uploads it as the `release-android` artifact.
 
 ### Signing
-Keystore and alias/creds come from GitHub Secrets. Do not commit the keystore.
+The release keystore is **auto-generated inside CI** (not stored in GitHub
+Secrets) with a fixed dev password — fine for sideloading, but treat it as an
+untrusted debug key. Do not commit a keystore to the repo.
 
 ### Releasing (the actual procedure)
 1. Make code changes **and commit the ENTIRE coherent working tree** (see
@@ -218,10 +234,10 @@ working tree.
 must contain the *entire* coherent tree). When in doubt, `git add -A` and
 commit all intended changes together, then bump version and tag.
 
-Fix applied in v2.0.12 commits (local, unpushed as of this writing):
-- `3898279 build: commit pending service refactor, partials, and sync_engine
-  plumbing` — stages the whole tree + `cargo fmt`.
-- `df97283 chore: bump version to 2.0.12` — version bump in the 3 files.
+Fix applied in v2.0.12: the whole tree was committed together (service
+refactor, partials, sync_engine plumbing) and the version was bumped in the
+three files in the same commit. (The exact historical SHAs are not reproduced
+here — the rule below is what matters.)
 
 ---
 
@@ -242,11 +258,11 @@ Fix applied in v2.0.12 commits (local, unpushed as of this writing):
 
 | File | Role |
 |------|------|
-| `.github/workflows/build.yml` | Tag-only release pipeline; bundles `libc++_shared.so`; signs APK. |
+| `.github/workflows/build.yml` | Tag-only release pipeline; injects Android perms, bundles `libc++_shared.so`, signs APK, creates GitHub Release. |
 | `.cargo/config.toml` | `-C link-arg=-lc++_shared` for the 4 android targets (fixes `DT_NEEDED`). |
 | `Cargo.toml` | android-only deps `jni`/`ndk-context`; `crate-type = ["staticlib","cdylib","rlib"]`; `[profile.release] panic = "abort"`. |
 | `Cargo.lock` | `auralis` version entry must match `Cargo.toml` + `tauri.conf.json`. |
-| `tauri.conf.json` | app `version`, `identifier = com.auralis.app`, CSP (`https://unpkg.com`, `https:`). |
+| `tauri.conf.json` | app `version` (`2.0.31`), `identifier = com.auralis.v2`, CSP (allows `unpkg.com`, `ytimg.com`, IPC). |
 | `src/lib.rs` | `setup` init chain (android-context seed → db → network → sync → audio → settings → downloader); `#[cfg_attr(mobile, tauri::mobile_entry_point)]`; android `android_jni` module: `JNI_OnLoad` VM capture + null-safe `ndk_context` seed, with a `setup`-time `try_seed` fallback. |
 | `src/infrastructure/media/player.rs` | `AudioPlayer::new()` → `OutputStream::try_default()` — the cpal/oboe path that needs `ndk_context`. |
 | `src/commands/sync.rs` | `build_sync_service(db, sync_engine)` (2-arg). |
@@ -288,25 +304,43 @@ logcat -b crash -d | grep -iE "AndroidRuntime|FATAL|abort|auralis|libauralis|sig
 
 ---
 
-## 9. Current Status (2026-08-12)
+## 9. Current Status (2026-08-15, v2.0.31)
 
-- **v2.0.10** (tag pushed): shipped the `-lc++_shared` `DT_NEEDED` fix. Crashed
-  with `android context was not initialized`.
-- **v2.0.11** (tag pushed): added `JNI_OnLoad` ndk-context init. **BROKEN
-  BUILD** — partial commit (uncommitted tree) → `E0061` in every job. APK was
-  never produced. Lint also red (fmt drift).
-- **v2.0.12** (commits `3898279` + `df97283` + `6eca0e9` made LOCALLY, **NOT
-  pushed, tag NOT created**): commits the full working tree + `cargo fmt` +
-- **v2.0.13 Release Milestone (2026-08-14)**:
-  - **Live Dynamic Data Bridge**: Fully connected frontend to Rust SQLite queries, library scanning (`/storage/emulated/0/Music` & `Download`), audio playback, and yt-dlp downloads.
-  - **Neumorphism + Glassmorphism UI Polish**: Fixed token hierarchy in `tokens.css`, safe-area insets (`env(safe-area-inset-top)` / `bottom`), soft-keyboard avoidance (`visualViewport`), and high-contrast text typography.
-  - **Multi-Platform Release Packaging**: Fixed Windows (`.msi` / `.exe`) and macOS (`.dmg`) bundle paths in CI/CD pipeline, publishing artifacts across Android, Windows, macOS, and Linux to GitHub Releases.
-  - **Code Quality**: Cleaned dead structs, unreferenced partials, and unified Tauri CLI execution (`npx @tauri-apps/cli`).
+The app is feature-complete on the core set and ships signed APKs via CI tag
+builds. The Android launch crashes documented in §4 are all resolved. Recent
+milestones from `git log`:
+
+- **v2.0.22 / v2.0.23** — Android 15/16 System Media Picker audio import +
+  auto-scan; 100% 2026 platform compliance (foreground media playback, direct
+  P2P connect).
+- **v2.0.27** — 16KB Android page alignment, hardware base64 audio import,
+  SQLite favorite persistence, full player controls.
+- **v2.0.29** — SAF directory-tree scan & internal music-path indexing for
+  Android 16.
+- **v2.0.30 / v2.0.31** — CI Android APK binary-verification step; custom
+  metallic obsidian logo, Android mipmaps, and neumorphic Settings UI.
+
+### What works today
+- Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,
+  rodio/cpal/oboe playback, **real libp2p P2P sync** (request-response,
+  best-effort), pure-Rust `rusty_ytdl` downloads with optional `yt-dlp` fallback,
+  playlists (incl. smart-criteria model), settings, and the Soft-Glass/Neu UI.
+
+### Known gaps (non-blocking)
+- Real binary/APK builds only happen in CI — this host cannot link Tauri
+  (no `webkit2gtk-4.1`) or the Android target (no NDK). `cargo check` works for
+  both targets and is the local verification loop.
+- Smart playlists: criteria model exists; built-in presets not pre-defined.
+- No `workflow_dispatch` on CI — releases are tag-push only.
 
 ### Release & Sideload Workflow
-1. CI builds all 4 platforms on tag push (`v*`).
-2. Sideload Android APK (`auralis-v2.0.13-android.apk`) directly from `/storage/emulated/0/Download/`.
-3. Launch app: SQLite database initializes and audio engine binds native `oboe`/`cpal` stream.
+1. Push a `v*` tag → CI builds Linux/macOS/Windows + a signed **`aarch64`**
+   Android APK and creates a GitHub Release with all artifacts.
+2. Download `auralis-vX.Y.Z-android.apk` from the GitHub Release.
+3. Sideload it directly from `/storage/emulated/0/Download/` (tap to install —
+   `pm`/`am` are unusable from Termux).
+4. Launch: SQLite DB initializes and the audio engine binds the native
+   `oboe`/`cpal` stream.
 
 ---
 
@@ -314,11 +348,16 @@ logcat -b crash -d | grep -iE "AndroidRuntime|FATAL|abort|auralis|libauralis|sig
 
 - The device is the build host's *sibling*; `pm`/`am` are useless from Termux —
   sideload via Download folder.
-- Partial commits break tag builds (§5). Always commit the whole tree.
-- `cargo fmt` drift makes `lint` red without breaking the APK.
+- **Partial commits break tag builds** (§5). Always commit the whole tree and
+  verify `git status` is clean before tagging.
+- `cargo fmt` drift makes `lint` red without breaking the APK. Run `cargo fmt`
+  before committing.
 - `panic = "abort"` turns any `ndk_context` panic into a hard `abort` with the
   message in `logcat` "Abort message:" — that's how we found crash #3.
 - The C++ symbol fix needs `DT_NEEDED`, not just a co-bundled `.so` (loader
-  won't bind an unreferenced lib).
+  won't bind an unreferenced lib). `.cargo/config.toml` adds `-lc++_shared` for
+  the android targets; CI also copies `libc++_shared.so` into `jniLibs`.
 - `JValue::l()` in jni 0.21 returns something `.unwrap_or(JObject::null())`
   handles — keep that guard in case `currentApplication()` is null.
+- `gh` is authenticated but **cannot** trigger CI manually (no
+  `workflow_dispatch`); push a `v*` tag to build + sign the APK.

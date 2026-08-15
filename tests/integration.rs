@@ -245,7 +245,7 @@ async fn auto_scan_discovers_mp3_and_ingests_into_database() {
 
     // 5. Ingest tracks via scan_library_paths
     let summary = scanner
-        .scan_library_paths(&[test_dir.clone()], repo.clone())
+        .scan_library_paths(std::slice::from_ref(&test_dir), repo.clone())
         .await
         .expect("library ingestion must succeed");
 

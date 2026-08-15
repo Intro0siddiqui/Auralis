@@ -1,301 +1,67 @@
-//! Directory Scanner
+//! Directory Scanner and Platform Dispatcher
 //!
-//! Scans directories for music files.
+//! Provides the unified directory scanner interface, error definitions,
+//! case-insensitive format detection, and platform scanner re-exports.
 
-use crate::domain::models::{AudioFormat, ScanSummary, TrackFilter};
-use crate::domain::repositories::TrackRepository;
-use crate::infrastructure::filesystem::metadata::MetadataExtractor;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+pub use crate::infrastructure::filesystem::android::AndroidScanner;
+pub use crate::infrastructure::filesystem::desktop::DesktopScanner;
 
-/// Scans directories for music files
-pub struct DirectoryScanner {
-    #[allow(dead_code)]
-    include_patterns: Vec<String>,
-    exclude_patterns: Vec<String>,
+use crate::domain::models::AudioFormat;
+use std::path::Path;
+
+/// Supported audio extensions (case-insensitive)
+pub const SUPPORTED_AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "m4a", "aac", "ogg"];
+
+/// Check if an extension is a supported audio format (case-insensitive)
+pub fn is_supported_audio_extension(ext: &str) -> bool {
+    let ext_lower = ext.trim_start_matches('.').to_lowercase();
+    matches!(
+        ext_lower.as_str(),
+        "mp3" | "flac" | "wav" | "m4a" | "aac" | "ogg" | "oga" | "mp4"
+    )
 }
 
-impl DirectoryScanner {
-    /// Create a new directory scanner
-    pub fn new(include_patterns: Vec<String>, exclude_patterns: Vec<String>) -> Self {
-        Self {
-            include_patterns,
-            exclude_patterns,
-        }
-    }
+/// Check if a path corresponds to a supported audio file (case-insensitive)
+pub fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(is_supported_audio_extension)
+        .unwrap_or(false)
+}
 
-    /// Create a scanner with default audio file patterns
-    pub fn default_audio() -> Self {
-        Self::new(
-            vec![
-                "**/*.mp3".to_string(),
-                "**/*.flac".to_string(),
-                "**/*.wav".to_string(),
-                "**/*.aac".to_string(),
-                "**/*.ogg".to_string(),
-                "**/*.m4a".to_string(),
-            ],
-            // NOTE: The `".*"` / `".*/"` exclude patterns only filter Unix-style
-            // dotfiles (files/dirs whose name begins with `.`). Windows marks
-            // hidden files via filesystem attributes instead, so this pattern
-            // will NOT exclude them. This is a deliberate Unix-centric
-            // assumption; filtering Windows hidden files would require checking
-            // file attributes via the `windows` crate.
-            vec![".*".to_string(), ".*/".to_string()],
-        )
-    }
+/// Detect audio format from file extension (case-insensitive)
+pub fn detect_format(path: &Path) -> Option<AudioFormat> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(AudioFormat::from_extension)
+}
 
-    /// Scan a directory for music files recursively
-    pub async fn scan(&self, path: &Path) -> Result<Vec<PathBuf>, ScannerError> {
-        info!(path = %path.display(), "Scanning directory");
+/// Unified DirectoryScanner alias for local filesystem scanning
+pub type DirectoryScanner = DesktopScanner;
 
-        if !path.exists() {
-            warn!(path = %path.display(), "Directory does not exist");
-            return Ok(Vec::new());
-        }
-
-        let mut files = Vec::new();
-        let mut dirs_to_visit = vec![path.to_path_buf()];
-
-        while let Some(current_dir) = dirs_to_visit.pop() {
-            if let Ok(entries) = std::fs::read_dir(&current_dir) {
-                for entry in entries.flatten() {
-                    let entry_path = entry.path();
-                    let file_name = entry.file_name().to_string_lossy().to_string();
-
-                    // Skip hidden files/folders (starting with dot)
-                    if file_name.starts_with('.') {
-                        continue;
-                    }
-
-                    if entry_path.is_dir() {
-                        dirs_to_visit.push(entry_path);
-                    } else if entry_path.is_file() {
-                        if let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) {
-                            let ext_lower = ext.to_lowercase();
-                            if matches!(
-                                ext_lower.as_str(),
-                                "mp3" | "flac" | "wav" | "aac" | "ogg" | "m4a"
-                            ) {
-                                if !self.is_excluded(&entry_path) {
-                                    files.push(entry_path);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        info!(path = %path.display(), found = files.len(), "Scan completed");
-        Ok(files)
-    }
-
-    /// Scan multiple directories
-    pub async fn scan_paths(&self, paths: &[PathBuf]) -> Vec<PathBuf> {
-        let mut all_files = Vec::new();
-
-        for path in paths {
-            match self.scan(path).await {
-                Ok(files) => all_files.extend(files),
-                Err(e) => {
-                    error!(path = %path.display(), error = %e, "Failed to scan path");
-                }
-            }
-        }
-
-        all_files
-    }
-
-    /// Scan library paths and insert tracks into the repository.
-    ///
-    /// After scanning, removes any database tracks whose file paths fall
-    /// within the scanned directories but no longer exist on disk.
-    pub async fn scan_library_paths(
-        &self,
-        paths: &[PathBuf],
-        track_repo: Arc<dyn TrackRepository>,
-    ) -> Result<ScanSummary, ScannerError> {
-        info!(path_count = paths.len(), "Starting library scan");
-
-        let mut summary = ScanSummary {
-            tracks_added: 0,
-            tracks_updated: 0,
-            tracks_removed: 0,
-            errors: Vec::new(),
-        };
-
-        // Collect the set of files found on disk for later comparison.
-        let mut found_files: std::collections::HashSet<std::path::PathBuf> =
-            std::collections::HashSet::new();
-
-        for path in paths {
-            info!(path = %path.display(), "Scanning path");
-
-            if !path.exists() {
-                warn!(path = %path.display(), "Path does not exist, skipping");
-                summary
-                    .errors
-                    .push(format!("Path does not exist: {}", path.display()));
-                continue;
-            }
-
-            let audio_files = self.scan(path).await?;
-            info!(path = %path.display(), count = audio_files.len(), "Found audio files");
-
-            for file_path in &audio_files {
-                found_files.insert(file_path.clone());
-            }
-
-            for file_path in audio_files {
-                debug!(path = %file_path.display(), "Processing file");
-
-                match self.process_file(&file_path, &track_repo).await {
-                    Ok(ScanResult::Added) => summary.tracks_added += 1,
-                    Ok(ScanResult::Updated) => summary.tracks_updated += 1,
-                    Ok(ScanResult::Skipped) => {}
-                    Err(e) => {
-                        error!(path = %file_path.display(), error = %e, "Failed to process file");
-                        summary
-                            .errors
-                            .push(format!("{}: {}", file_path.display(), e));
-                    }
-                }
-            }
-        }
-
-        // Detect and remove tracks no longer present in the scanned directories.
-        let scan_prefixes: Vec<std::path::PathBuf> = paths.to_vec();
-        let all_tracks = track_repo
-            .find_all(TrackFilter::default())
-            .await
-            .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
-
-        let mut ids_to_remove: Vec<uuid::Uuid> = Vec::new();
-        for track in &all_tracks {
-            let track_path = std::path::PathBuf::from(&track.file_path);
-            // Only consider tracks that live inside one of the scanned directories.
-            let in_scan_scope = scan_prefixes.iter().any(|p| track_path.starts_with(p));
-            if in_scan_scope && !found_files.contains(&track_path) {
-                ids_to_remove.push(track.id);
-            }
-        }
-
-        if !ids_to_remove.is_empty() {
-            let count = ids_to_remove.len() as u32;
-            summary.tracks_removed = count;
-            if let Err(e) = track_repo.delete_many(ids_to_remove).await {
-                error!(count = count, error = %e, "Failed to remove stale tracks");
-                summary
-                    .errors
-                    .push(format!("Failed to remove {count} stale tracks: {e}"));
-                summary.tracks_removed = 0;
-            } else {
-                info!(count = count, "Removed stale tracks");
-            }
-        }
-
-        info!(
-            added = summary.tracks_added,
-            updated = summary.tracks_updated,
-            removed = summary.tracks_removed,
-            errors = summary.errors.len(),
-            "Library scan completed"
-        );
-
-        Ok(summary)
-    }
-
-    /// Process a single file: extract metadata and insert/update in repository
-    async fn process_file(
-        &self,
-        path: &Path,
-        track_repo: &Arc<dyn TrackRepository>,
-    ) -> Result<ScanResult, ScannerError> {
-        let path_str = path.to_string_lossy().to_string();
-
-        // Check if track already exists
-        let existing = track_repo
-            .find_by_path(&path_str)
-            .await
-            .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
-
-        // Extract metadata
-        let track = MetadataExtractor::extract(path).map_err(|e| {
-            ScannerError::MetadataError(format!("Failed to extract metadata from {path_str}: {e}"))
-        })?;
-
-        if let Some(existing_track) = existing {
-            // Update existing track with new metadata but preserve play stats
-            let mut updated_track = track;
-            updated_track.id = existing_track.id;
-            updated_track.date_added = existing_track.date_added;
-            updated_track.last_played = existing_track.last_played;
-            updated_track.play_count = existing_track.play_count;
-
-            track_repo
-                .update(&updated_track)
-                .await
-                .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
-
-            debug!(path = %path_str, id = %updated_track.id, "Track updated");
-            Ok(ScanResult::Updated)
-        } else {
-            track_repo
-                .insert(&track)
-                .await
-                .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
-
-            debug!(path = %path_str, id = %track.id, "Track added");
-            Ok(ScanResult::Added)
-        }
-    }
-
-    /// Check if a path should be excluded
-    ///
-    /// NOTE: This is Unix-centric — it only matches names beginning with `.`
-    /// (dotfiles). Windows hidden files are marked via filesystem attributes
-    /// and are not excluded by these patterns. See `default_audio`.
-    fn is_excluded(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
-
-        for pattern in &self.exclude_patterns {
-            if pattern.ends_with('/') {
-                // Directory pattern
-                let dir_pattern = &pattern[..pattern.len() - 1];
-                if let Some(parent) = path.parent() {
-                    if parent.to_string_lossy().contains(dir_pattern) {
-                        return true;
-                    }
-                }
-            } else if path_str.contains(pattern) {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Detect audio format from file extension
-    pub fn detect_format(path: &Path) -> Option<AudioFormat> {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(AudioFormat::from_extension)
-    }
-
-    /// Get file size
-    pub fn get_file_size(path: &Path) -> Result<u64, ScannerError> {
-        std::fs::metadata(path)
-            .map(|m| m.len())
-            .map_err(|e| ScannerError::IoError(e.to_string()))
-    }
+/// Real-time progress update emitted during library scanning
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScanProgress {
+    /// Currently scanning path or current file being processed
+    pub current_file: String,
+    /// Total number of audio files discovered across all paths
+    pub total_files: usize,
+    /// Number of audio files processed so far
+    pub processed_files: usize,
+    /// Current percentage (0.0 - 100.0)
+    pub percentage: f32,
+    /// Count of tracks successfully added
+    pub tracks_added: u32,
+    /// Count of tracks successfully updated
+    pub tracks_updated: u32,
+    /// Count of errors encountered so far
+    pub error_count: usize,
 }
 
 /// Result of scanning a single file
 #[derive(Debug)]
 #[allow(dead_code)]
-enum ScanResult {
+pub(crate) enum ScanResult {
     Added,
     Updated,
     Skipped,
@@ -315,4 +81,267 @@ pub enum ScannerError {
 
     #[error("Repository error: {0}")]
     RepositoryError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{Track, TrackFilter};
+    use crate::domain::repositories::TrackRepository;
+    use async_trait::async_trait;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_case_insensitive_format_detection() {
+        let test_cases = vec![
+            ("song.mp3", Some(AudioFormat::Mp3)),
+            ("song.MP3", Some(AudioFormat::Mp3)),
+            ("song.Mp3", Some(AudioFormat::Mp3)),
+            ("track.flac", Some(AudioFormat::Flac)),
+            ("track.FLAC", Some(AudioFormat::Flac)),
+            ("audio.wav", Some(AudioFormat::Wav)),
+            ("audio.WAV", Some(AudioFormat::Wav)),
+            ("media.m4a", Some(AudioFormat::M4a)),
+            ("media.M4A", Some(AudioFormat::M4a)),
+            ("sound.aac", Some(AudioFormat::Aac)),
+            ("sound.AAC", Some(AudioFormat::Aac)),
+            ("music.ogg", Some(AudioFormat::Ogg)),
+            ("music.OGG", Some(AudioFormat::Ogg)),
+            ("readme.txt", None),
+            ("image.png", None),
+            ("file_without_ext", None),
+        ];
+
+        for (filename, expected) in test_cases {
+            let path = PathBuf::from(filename);
+            assert_eq!(
+                detect_format(&path),
+                expected,
+                "Failed format detection for {}",
+                filename
+            );
+            assert_eq!(
+                is_audio_file(&path),
+                expected.is_some(),
+                "Failed audio file check for {}",
+                filename
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_supported_audio_extension() {
+        assert!(is_supported_audio_extension("mp3"));
+        assert!(is_supported_audio_extension("MP3"));
+        assert!(is_supported_audio_extension(".FLAC"));
+        assert!(is_supported_audio_extension("Wav"));
+        assert!(is_supported_audio_extension("M4A"));
+        assert!(is_supported_audio_extension("aac"));
+        assert!(is_supported_audio_extension("ogg"));
+        assert!(!is_supported_audio_extension("txt"));
+        assert!(!is_supported_audio_extension("exe"));
+    }
+
+    struct MockTrackRepo {
+        tracks: Mutex<Vec<Track>>,
+    }
+
+    impl MockTrackRepo {
+        fn new() -> Self {
+            Self {
+                tracks: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TrackRepository for MockTrackRepo {
+        async fn find_all(
+            &self,
+            _filter: TrackFilter,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.tracks.lock().unwrap().clone())
+        }
+
+        async fn find_by_id(
+            &self,
+            id: uuid::Uuid,
+        ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.id == id)
+                .cloned())
+        }
+
+        async fn find_by_path(
+            &self,
+            path: &str,
+        ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.file_path == path)
+                .cloned())
+        }
+
+        async fn find_by_artist(
+            &self,
+            artist: &str,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| t.artist.as_deref() == Some(artist))
+                .cloned()
+                .collect())
+        }
+
+        async fn find_by_album(
+            &self,
+            album: &str,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| t.album.as_deref() == Some(album))
+                .cloned()
+                .collect())
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.tracks.lock().unwrap().clone())
+        }
+
+        async fn insert(
+            &self,
+            track: &Track,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.tracks.lock().unwrap().push(track.clone());
+            Ok(())
+        }
+
+        async fn update(
+            &self,
+            track: &Track,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let mut list = self.tracks.lock().unwrap();
+            if let Some(pos) = list.iter().position(|t| t.id == track.id) {
+                list[pos] = track.clone();
+            }
+            Ok(())
+        }
+
+        async fn delete(
+            &self,
+            id: uuid::Uuid,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.tracks.lock().unwrap().retain(|t| t.id != id);
+            Ok(())
+        }
+
+        async fn delete_many(
+            &self,
+            ids: Vec<uuid::Uuid>,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let id_set: HashSet<uuid::Uuid> = ids.into_iter().collect();
+            self.tracks
+                .lock()
+                .unwrap()
+                .retain(|t| !id_set.contains(&t.id));
+            Ok(())
+        }
+
+        async fn count(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.tracks.lock().unwrap().len() as u64)
+        }
+
+        async fn total_duration(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+            let total = self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|t| t.duration_secs as u64)
+                .sum();
+            Ok(total)
+        }
+
+        async fn recent(
+            &self,
+            limit: u32,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            let list = self.tracks.lock().unwrap();
+            Ok(list.iter().take(limit as usize).cloned().collect())
+        }
+
+        async fn most_played(
+            &self,
+            limit: u32,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            let list = self.tracks.lock().unwrap();
+            Ok(list.iter().take(limit as usize).cloned().collect())
+        }
+
+        async fn set_favorite(
+            &self,
+            _id: &str,
+            _is_favorite: bool,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scan_resilience_with_corrupt_files_and_progress() {
+        let temp_dir = std::env::temp_dir().join(format!("auralis_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let corrupt_file = temp_dir.join("corrupt_audio.MP3");
+        std::fs::write(&corrupt_file, b"NOT_A_VALID_MP3_STREAM_HEADER").unwrap();
+
+        let text_file = temp_dir.join("notes.TXT");
+        std::fs::write(&text_file, b"ignore me").unwrap();
+
+        let scanner = DirectoryScanner::default_audio();
+        let repo = Arc::new(MockTrackRepo::new());
+
+        let progress_events = Arc::new(Mutex::new(Vec::<ScanProgress>::new()));
+        let progress_clone = progress_events.clone();
+
+        let summary = scanner
+            .scan_library_paths_with_progress(
+                std::slice::from_ref(&temp_dir),
+                repo,
+                Some(move |p| {
+                    progress_clone.lock().unwrap().push(p);
+                }),
+            )
+            .await
+            .expect("Scan should complete without aborting");
+
+        assert_eq!(summary.errors.len(), 1);
+        assert!(summary.errors[0].contains("corrupt_audio.MP3"));
+        assert_eq!(summary.tracks_added, 0);
+
+        let events = progress_events.lock().unwrap().clone();
+        assert!(!events.is_empty(), "Expected progress events");
+        assert_eq!(events.last().unwrap().total_files, 1);
+        assert_eq!(events.last().unwrap().error_count, 1);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

@@ -212,7 +212,7 @@ impl Downloader {
             format!("Download from {}", Self::detect_platform(url))
         } else {
             url.split('/')
-                .last()
+                .next_back()
                 .filter(|s| !s.is_empty())
                 .unwrap_or("audio_track")
                 .to_string()

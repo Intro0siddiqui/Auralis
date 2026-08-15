@@ -4,63 +4,82 @@ class Bridge {
         this.tauriAvailable = false;
         this.tracks = [];
         this.activeView = 'home';
+        this.initialized = false;
+        this.currentSettings = null;
         this.init();
     }
 
     async init() {
+        if (this.initialized) return;
+        this.initialized = true;
+
         this.initTheme();
+
         try {
-            if (window.__TAURI_INTERNALS__) {
-                const { listen } = window.__TAURI_INTERNALS__.tauri;
+            const tauriListen = (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.tauri && window.__TAURI_INTERNALS__.tauri.listen)
+                || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.event && window.__TAURI_INTERNALS__.event.listen)
+                || (window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen)
+                || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.listen);
+
+            if (tauriListen) {
                 this.tauriAvailable = true;
 
-                await listen('playback:state_changed', (event) => {
+                await tauriListen('playback:state_changed', (event) => {
                     this.emit('playback:state', event.payload);
                 });
 
-                await listen('playback:track_changed', (event) => {
+                await tauriListen('playback:track_changed', (event) => {
                     this.emit('playback:track', event.payload);
                     this.updatePlayerBar(event.payload);
                 });
 
-                await listen('playback:queue_updated', (event) => {
+                await tauriListen('playback:queue_updated', (event) => {
                     this.emit('playback:queue', event.payload);
                 });
 
-                await listen('download:progress', (event) => {
+                await tauriListen('download:progress', (event) => {
                     this.emit('download:progress', event.payload);
                     this.updateDownloadProgressUI(event.payload);
                 });
 
-                await listen('download:completed', (event) => {
+                await tauriListen('download:completed', (event) => {
                     this.emit('download:completed', event.payload);
-                    this.showToast('Download complete! Refreshing library...', 'success');
-                    this.scanLibrary();
-                });
-
-                await listen('library:scan_complete', (event) => {
-                    this.emit('library:scan', event.payload);
-                    this.showToast(`Library scan complete: ${event.payload.tracks_added} new tracks`, 'info');
-                    this.refreshCurrentView();
-                });
-
-                await listen('download:progress', (event) => {
-                    this.updateDownloadProgressUI(event.payload);
-                });
-
-                await listen('download:completed', (event) => {
                     const p = event.payload;
-                    if (p.status === 'completed') {
-                        this.showToast(`Download complete: ${p.title}`, 'success');
+                    if (!p || p.status === 'completed') {
+                        this.showToast(`Download complete: ${(p && p.title) || 'Audio track'}`, 'success');
                         this.scanLibrary();
-                    } else if (p.status === 'failed') {
+                    } else if (p && p.status === 'failed') {
                         this.showToast(`Download failed: ${p.error_message || 'Stream error'}`, 'error');
                     }
-                    this.updateDownloadProgressUI(p);
+                    if (p) {
+                        this.updateDownloadProgressUI(p);
+                    }
+                });
+
+                // Listen for scan progress events during background or folder scan
+                await tauriListen('library:scan_progress', (event) => {
+                    this.emit('library:scan_progress', event.payload);
+                    this.updateScanProgressUI(event.payload);
+                });
+
+                // Listen for individual tracks imported in real-time
+                await tauriListen('library:track_imported', (event) => {
+                    this.emit('library:track_imported', event.payload);
+                    this.handleTrackImported(event.payload);
+                });
+
+                // Listen for scan completion
+                await tauriListen('library:scan_complete', (event) => {
+                    this.emit('library:scan', event.payload);
+                    this.hideScanProgressUI();
+                    const added = (event.payload && event.payload.tracks_added) || 0;
+                    const updated = (event.payload && event.payload.tracks_updated) || 0;
+                    this.showToast(`Library scan complete: ${added} added, ${updated} updated`, 'success');
+                    this.refreshCurrentView();
                 });
             }
         } catch (e) {
-            console.warn('Tauri bridge not available:', e);
+            console.warn('Tauri bridge event listener setup:', e);
         }
 
         this.initKeyboardHandler();
@@ -137,30 +156,62 @@ class Bridge {
 
     async scanLibrary(paths = null) {
         this.showToast('Scanning storage for audio files...', 'info');
+        this.updateScanProgressUI({
+            title: 'Scanning Storage',
+            subtitle: 'Searching device directories...',
+            current: 0,
+            percentage: 0
+        });
 
         try {
             const summary = await this.invoke('scan_library_paths', { paths: paths || null });
+            this.hideScanProgressUI();
             if (summary) {
-                this.showToast(`Scan complete: ${summary.tracks_added} new, ${summary.tracks_total} total`, 'success');
+                const added = summary.tracks_added ?? 0;
+                const updated = summary.tracks_updated ?? 0;
+                this.showToast(`Scan complete: ${added} added, ${updated} updated`, 'success');
+                await this.loadLibraryView();
                 this.refreshCurrentView();
             }
         } catch (err) {
+            this.hideScanProgressUI();
             this.showToast(`Scan finished: ${err}`, 'info');
         }
     }
 
-    triggerFolderScan() {
-        this.scanLibrary();
+    async triggerFolderScan() {
+        // 1. Attempt native desktop folder picker (Windows, macOS, Linux)
+        try {
+            this.showToast('Select a music folder to scan...', 'info');
+            const summary = await this.invoke('pick_folder_and_scan');
+            if (summary !== undefined && summary !== null) {
+                const added = summary.tracks_added ?? 0;
+                const updated = summary.tracks_updated ?? 0;
+                this.showToast(`Scan complete: ${added} added, ${updated} updated`, 'success');
+                await this.loadLibraryView();
+                this.refreshCurrentView();
+                return;
+            } else if (summary === null && this.tauriAvailable) {
+                // User cancelled native dialog
+                return;
+            }
+        } catch (err) {
+            console.log('Native dialog fallback to SAF / HTML5 folder picker:', err);
+        }
+
+        // 2. Fallback to SAF / HTML5 Directory Picker on Android or Web
         const folderInput = document.getElementById('folder-scan-input');
         if (folderInput) {
             folderInput.click();
+        } else {
+            this.showToast('Folder scanner input not found.', 'warning');
         }
     }
 
     async handleFolderScan(input) {
         if (!input || !input.files || input.files.length === 0) return;
         const allFiles = Array.from(input.files);
-        const audioExtensions = ['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg'];
+        const audioExtensions = ['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.wma'];
         const audioFiles = allFiles.filter(file => {
             const name = file.name.toLowerCase();
             return file.type.startsWith('audio/') || audioExtensions.some(ext => name.endsWith(ext));
@@ -168,13 +219,31 @@ class Bridge {
 
         if (audioFiles.length === 0) {
             this.showToast('No audio files found in selected folder.', 'info');
+            input.value = '';
             return;
         }
 
         this.showToast(`Found ${audioFiles.length} audio file(s). Scanning & importing...`, 'info');
+        this.updateScanProgressUI({
+            title: 'Importing Folder Audio',
+            subtitle: `0 / ${audioFiles.length} files processed`,
+            current: 0,
+            total: audioFiles.length,
+            percentage: 0
+        });
 
         let importedCount = 0;
-        for (const file of audioFiles) {
+        for (let i = 0; i < audioFiles.length; i++) {
+            const file = audioFiles[i];
+            const pct = Math.round(((i + 1) / audioFiles.length) * 100);
+            this.updateScanProgressUI({
+                title: `Importing (${i + 1}/${audioFiles.length})`,
+                subtitle: file.name,
+                current: i + 1,
+                total: audioFiles.length,
+                percentage: pct
+            });
+
             try {
                 const base64Data = await new Promise((resolve, reject) => {
                     const reader = new FileReader();
@@ -191,26 +260,51 @@ class Bridge {
                     name: file.name,
                     data_base64: base64Data
                 });
-                if (result) importedCount++;
+                if (result) {
+                    importedCount++;
+                    this.handleTrackImported(result);
+                }
             } catch (err) {
                 console.error(`Failed to scan file ${file.name}:`, err);
             }
         }
 
         input.value = '';
+        this.hideScanProgressUI();
+
         if (importedCount > 0) {
             this.showToast(`Scan complete: ${importedCount} track(s) added to library!`, 'success');
-            this.loadLibraryView();
+        } else {
+            this.showToast('No new audio tracks could be imported.', 'warning');
         }
+        await this.loadLibraryView();
+        this.refreshCurrentView();
     }
 
     async handleAudioImport(input) {
         if (!input || !input.files || input.files.length === 0) return;
         const files = Array.from(input.files);
         this.showToast(`Importing ${files.length} audio file(s)...`, 'info');
+        this.updateScanProgressUI({
+            title: 'Importing Audio Files',
+            subtitle: `0 / ${files.length} files imported`,
+            current: 0,
+            total: files.length,
+            percentage: 0
+        });
 
         let successCount = 0;
-        for (const file of files) {
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const pct = Math.round(((i + 1) / files.length) * 100);
+            this.updateScanProgressUI({
+                title: `Importing (${i + 1}/${files.length})`,
+                subtitle: file.name,
+                current: i + 1,
+                total: files.length,
+                percentage: pct
+            });
+
             try {
                 const base64Data = await new Promise((resolve, reject) => {
                     const reader = new FileReader();
@@ -227,18 +321,126 @@ class Bridge {
                     name: file.name,
                     data_base64: base64Data
                 });
-                if (result) successCount++;
+                if (result) {
+                    successCount++;
+                    this.handleTrackImported(result);
+                }
             } catch (err) {
                 console.error(`Failed to import ${file.name}:`, err);
             }
         }
 
         input.value = '';
+        this.hideScanProgressUI();
+
         if (successCount > 0) {
             this.showToast(`Successfully imported ${successCount} track(s)!`, 'success');
-            this.loadLibraryView();
         } else {
             this.showToast('Import failed. Please verify the audio files.', 'error');
+        }
+        await this.loadLibraryView();
+        this.refreshCurrentView();
+    }
+
+    handleTrackImported(track) {
+        if (!track || !track.id) return;
+        const existingIdx = this.tracks.findIndex(t => t.id === track.id);
+        if (existingIdx >= 0) {
+            this.tracks[existingIdx] = track;
+        } else {
+            this.tracks.unshift(track);
+        }
+        if (this.activeView === 'library') {
+            this.renderLibraryTracks();
+        }
+    }
+
+    updateScanProgressUI(payload) {
+        if (!payload) return;
+        const current = payload.current ?? payload.scanned ?? payload.processed ?? payload.count ?? 0;
+        const total = payload.total ?? payload.total_files ?? null;
+        const file = payload.file ?? payload.path ?? payload.filename ?? payload.current_file ?? payload.title ?? '';
+        const percentage = payload.percentage !== undefined && payload.percentage !== null
+            ? payload.percentage
+            : (total && total > 0 ? Math.round((current / total) * 100) : (payload.progress ? Math.round(payload.progress * 100) : null));
+
+        const banner = document.getElementById('library-scan-progress');
+        const titleEl = document.getElementById('library-scan-title');
+        const subEl = document.getElementById('library-scan-subtitle');
+        const counterEl = document.getElementById('library-scan-counter');
+        const barEl = document.getElementById('library-scan-bar');
+
+        if (banner) {
+            banner.style.display = 'flex';
+            if (titleEl) {
+                titleEl.textContent = payload.title || (total ? `Scanning storage (${current}/${total})` : `Scanning storage (${current} files)`);
+            }
+            if (subEl) {
+                const fileName = file ? file.split(/[\\/]/).pop() : (payload.subtitle || 'Processing audio files...');
+                subEl.textContent = fileName;
+            }
+            if (counterEl) {
+                counterEl.textContent = total ? `${current} / ${total}` : `${current} files`;
+            }
+            if (barEl) {
+                if (percentage !== null) {
+                    barEl.style.width = `${Math.min(100, Math.max(0, percentage))}%`;
+                } else {
+                    barEl.style.width = '100%';
+                }
+            }
+        }
+
+        this.updateScanToast(payload, current, total, percentage, file);
+    }
+
+    updateScanToast(payload, current, total, percentage, file) {
+        const container = document.getElementById('toast-container') || document.body;
+        let toast = document.getElementById('scan-progress-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'scan-progress-toast';
+            toast.className = 'toast toast-info glass';
+            toast.style.cssText = `
+                position: fixed; top: calc(20px + env(safe-area-inset-top, 0px)); right: 20px; z-index: 1000;
+                padding: 12px 20px; border-radius: 12px; background: rgba(11, 17, 24, 0.94);
+                color: var(--text-1); border: 1px solid var(--glass-border); box-shadow: var(--shadow-lg);
+                font-size: var(--text-sm); font-weight: 500; min-width: 240px; display: flex; flex-direction: column; gap: 6px;
+                transition: opacity 300ms ease;
+            `;
+            container.appendChild(toast);
+        }
+
+        const fileName = file ? file.split(/[\\/]/).pop() : (payload.subtitle || 'Scanning...');
+        const countText = total ? `${current} / ${total}` : `${current} files`;
+        const pctText = percentage !== null ? ` (${percentage}%)` : '';
+
+        toast.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-weight: 600;">Scanning audio...</span>
+                <span style="color: var(--accent); font-size: var(--text-xs); font-weight: 600;">${countText}${pctText}</span>
+            </div>
+            <div style="font-size: var(--text-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px;">
+                ${this.escapeHtml(fileName)}
+            </div>
+            <div class="progress-track neu-inset" style="width: 100%; height: 4px; margin-top: 2px;">
+                <div class="progress-fill" style="width: ${percentage !== null ? percentage : 100}%; background: var(--accent); height: 100%; transition: width 0.2s ease;"></div>
+            </div>
+        `;
+        toast.style.opacity = '1';
+    }
+
+    hideScanProgressUI() {
+        const banner = document.getElementById('library-scan-progress');
+        if (banner) {
+            banner.style.display = 'none';
+        }
+        const toast = document.getElementById('scan-progress-toast');
+        if (toast) {
+            toast.style.opacity = '0';
+            setTimeout(() => {
+                if (toast && toast.parentElement) toast.remove();
+            }, 300);
         }
     }
 
@@ -250,27 +452,86 @@ class Bridge {
             const page = await this.invoke('get_tracks');
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
-                this.renderTrackRows(trackList, page.tracks);
             } else {
-                trackList.innerHTML = `
-                    <div class="empty-state glass neu" style="padding: var(--space-8); border-radius: var(--radius-lg); text-align: center;">
-                        <div class="empty-state-icon" style="color: var(--accent); margin-bottom: var(--space-4);">
-                            <i data-lucide="music" style="width: 48px; height: 48px;"></i>
-                        </div>
-                        <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">No tracks found in library</h2>
-                        <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Scan your device storage or download music to start listening.</p>
-                        <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
-                            <button class="btn btn-primary neu" onclick="window.Auralis.bridge.scanLibrary()">
-                                <i data-lucide="folder-search"></i>
-                                Scan Music Directory
-                            </button>
-                        </div>
-                    </div>
-                `;
-                if (window.lucide) window.lucide.createIcons();
+                this.tracks = [];
             }
+            this.bindLibraryFilterControls();
+            this.renderLibraryTracks();
         } catch (err) {
             console.error('Error loading library:', err);
+            this.bindLibraryFilterControls();
+            this.renderLibraryTracks();
+        }
+    }
+
+    bindLibraryFilterControls() {
+        const sortSelect = document.querySelector('.page-library select[name="sort_by"]');
+        const downloadedCheckbox = document.querySelector('.page-library input[name="downloaded_only"]');
+
+        if (sortSelect && !sortSelect.dataset.bound) {
+            sortSelect.dataset.bound = 'true';
+            sortSelect.addEventListener('change', () => {
+                this.renderLibraryTracks();
+            });
+        }
+
+        if (downloadedCheckbox && !downloadedCheckbox.dataset.bound) {
+            downloadedCheckbox.dataset.bound = 'true';
+            downloadedCheckbox.addEventListener('change', () => {
+                this.renderLibraryTracks();
+            });
+        }
+    }
+
+    renderLibraryTracks() {
+        const trackList = document.querySelector('.page-library .track-list');
+        if (!trackList) return;
+
+        const sortSelect = document.querySelector('.page-library select[name="sort_by"]');
+        const downloadedCheckbox = document.querySelector('.page-library input[name="downloaded_only"]');
+
+        let filtered = [...this.tracks];
+
+        if (downloadedCheckbox && downloadedCheckbox.checked) {
+            filtered = filtered.filter(t => t.is_downloaded || (t.file_path && !t.file_path.startsWith('http')));
+        }
+
+        const sortBy = sortSelect ? sortSelect.value : 'date_added';
+        if (sortBy === 'title') {
+            filtered.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+        } else if (sortBy === 'artist') {
+            filtered.sort((a, b) => (a.artist || '').localeCompare(b.artist || ''));
+        } else if (sortBy === 'album') {
+            filtered.sort((a, b) => (a.album || '').localeCompare(b.album || ''));
+        } else if (sortBy === 'date_added') {
+            if (filtered.some(t => t.created_at || t.date_added)) {
+                filtered.sort((a, b) => new Date(b.created_at || b.date_added || 0) - new Date(a.created_at || a.date_added || 0));
+            }
+        }
+
+        if (filtered.length > 0) {
+            this.renderTrackRows(trackList, filtered);
+        } else {
+            trackList.innerHTML = `
+                <div class="empty-state glass neu" style="padding: var(--space-8); border-radius: var(--radius-lg); text-align: center;">
+                    <div class="empty-state-icon" style="color: var(--accent); margin-bottom: var(--space-4);">
+                        <i data-lucide="music" style="width: 48px; height: 48px;"></i>
+                    </div>
+                    <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">No tracks found in library</h2>
+                    <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Scan your device storage or download music to start listening.</p>
+                    <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
+                        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
+                            <i data-lucide="folder-search"></i>
+                            Scan Music Directory
+                        </button>
+                        <button class="btn btn-secondary neu" onclick="document.getElementById('audio-import-input')?.click()">
+                            <i data-lucide="file-plus-2"></i>
+                            Import Audio Files
+                        </button>
+                    </div>
+                </div>
+            `;
+            if (window.lucide) window.lucide.createIcons();
         }
     }
 
@@ -310,7 +571,7 @@ class Bridge {
                             <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">Your library is empty</h2>
                             <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Scan your device storage for local audio files or download audio streams to start playing.</p>
                             <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
-                                <button class="btn btn-primary neu" onclick="window.Auralis.bridge.scanLibrary()">
+                                <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
                                     <i data-lucide="folder-search"></i>
                                     Scan Device Storage
                                 </button>
@@ -876,7 +1137,6 @@ class Bridge {
             buttonEl.style.color = nextFav ? 'var(--like)' : '';
         }
 
-        // If this track is currently playing in PlayerController, update player controller state too
         if (window.Auralis && window.Auralis.player && window.Auralis.player.currentTrack && window.Auralis.player.currentTrack.id === trackId) {
             window.Auralis.player.isLiked = nextFav;
             window.Auralis.player.currentTrack.is_favorite = nextFav;

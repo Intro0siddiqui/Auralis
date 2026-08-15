@@ -187,8 +187,15 @@ pub async fn scan_library_paths(
 
     let repo = track_repo(&db);
 
+    let app_handle = app.clone();
     let summary = scanner
-        .scan_library_paths(&scan_paths, repo)
+        .scan_library_paths_with_progress(
+            &scan_paths,
+            repo,
+            Some(move |progress| {
+                let _ = app_handle.emit("library:scan_progress", &progress);
+            }),
+        )
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Scan failed");
@@ -278,4 +285,35 @@ pub async fn set_track_favorite(
 
     tracing::info!(id = %id, favorite = favorite, "Track favorite status updated");
     Ok(())
+}
+
+/// Open native OS folder picker dialog (Windows Explorer / macOS Finder / Linux) and scan selected directory.
+#[tauri::command]
+pub async fn pick_folder_and_scan(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+) -> Result<Option<ScanSummary>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |folder_path| {
+        let _ = tx.send(folder_path);
+    });
+
+    let folder_path = rx
+        .await
+        .map_err(|e| format!("Folder picker channel closed: {e}"))?;
+
+    match folder_path {
+        Some(path) => {
+            let path_buf = path
+                .into_path()
+                .map_err(|e| format!("Invalid folder path: {e}"))?;
+            let path_str = path_buf.to_string_lossy().to_string();
+            tracing::info!(path = %path_str, "User selected custom folder to scan");
+            let summary = scan_library_paths(app, db, Some(vec![path_str])).await?;
+            Ok(Some(summary))
+        }
+        None => Ok(None),
+    }
 }

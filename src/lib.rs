@@ -72,6 +72,7 @@ impl AuralisApp {
 
         tauri::Builder::default()
             .plugin(tauri_plugin_shell::init())
+            .plugin(tauri_plugin_dialog::init())
             .setup(|app| {
                 info!("Running Tauri setup phase");
 
@@ -123,6 +124,7 @@ impl AuralisApp {
                 commands::library::update_track_metadata,
                 commands::library::delete_tracks,
                 commands::library::scan_library_paths,
+                commands::library::pick_folder_and_scan,
                 commands::library::import_audio_file,
                 commands::library::set_track_favorite,
                 // Playback commands

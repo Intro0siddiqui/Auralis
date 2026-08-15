@@ -2,7 +2,7 @@
 
 A lightweight, offline-first music player with integrated media downloading and P2P synchronization — rewritten from scratch in **Rust + Tauri + HTMX** to replace the original Kotlin/Compose Multiplatform application.
 
-> **Status: Active Development.** Core architecture is in place and most features are implemented (database, audio playback, downloads, playlists, settings, P2P networking). Sync transfers are still simulated.
+> **Status: Active Development.** Core architecture is in place and most features are implemented (database, audio playback, downloads, playlists, settings, P2P networking). Sync transfers use real libp2p request-response.
 
 ---
 
@@ -15,7 +15,7 @@ A lightweight, offline-first music player with integrated media downloading and 
 | **Desktop runtime** | JVM (100MB+) | **Tauri (system WebView, < 50MB)** |
 | **Mobile runtime** | Android (ExoPlayer) | **Tauri Android v2** |
 | **Database** | SQLDelight (SQLite) | **SQLite via `rusqlite`** |
-| **Media engine** | `yt-dlp` external | **`yt-dlp` sidecar orchestrated by Rust** |
+| **Media engine** | `yt-dlp` external | **`rusty_ytdl` (pure-Rust) with optional `yt-dlp` fallback** |
 
 The rewrite trades the JVM's startup cost and Compose's runtime overhead for a tiny, single-binary distribution that targets both desktop and mobile from one codebase.
 
@@ -27,11 +27,11 @@ The rewrite trades the JVM's startup cost and Compose's runtime overhead for a t
 | :--- | :--- | :--- |
 | **Music Library** | Implemented | SQLite-backed; scanner extracts metadata via lofty |
 | **Audio Playback** | Implemented | rodio with queue, shuffle, repeat, seek |
-| **Media Downloading** | Implemented | yt-dlp subprocess with progress tracking |
+| **Media Downloading** | Implemented | `rusty_ytdl` native stream + optional `yt-dlp` fallback, with progress tracking |
 | **Playlist Management** | Implemented | Full CRUD with SQLite persistence |
 | **P2P Networking** | Implemented | libp2p with mDNS, gossipsub, request-response |
 | **Settings** | Implemented | SQLite-backed load/save |
-| **P2P Sync Transfers** | Simulated | DB persistence works; actual transfer uses simulated progress |
+| **P2P Sync Transfers** | Implemented | Real libp2p request-response transfer (best-effort) |
 | **Smart Playlists** | Partial | Criteria model exists; built-in "Recently Added" / "Most Playlists" not pre-defined |
 
 ---
@@ -63,6 +63,8 @@ auralis-v2/
 │   │   ├── artists.html
 │   │   ├── playlists.html
 │   │   ├── player-full.html
+│   │   ├── download.html
+│   │   ├── search.html
 │   │   ├── sync.html
 │   │   └── settings.html
 │   └── icons/
@@ -77,7 +79,7 @@ auralis-v2/
 │   ├── infrastructure/     # External integrations
 │   │   ├── database/       # SQLite + rusqlite
 │   │   ├── filesystem/     # Track scanner + metadata
-│   │   ├── media/          # AudioPlayer (rodio/cpal/oboe) + Downloader (yt-dlp)
+│   │   ├── media/          # AudioPlayer (rodio/cpal/oboe) + Downloader (rusty_ytdl / optional yt-dlp)
 │   │   └── network.rs      # libp2p: mDNS, gossipsub, request-response
 │   ├── commands/           # Tauri command handlers
 │   │   ├── library.rs
@@ -108,7 +110,7 @@ The architecture is **Domain-Driven**: the `domain` layer is pure Rust types and
 - **Rust** 1.75 or newer
 - **Node.js** (only for the dev server / hot-reload)
 - **Tauri v2 prerequisites** — see <https://v2.tauri.app/start/prerequisites/>
-- **yt-dlp** on the system PATH (or bundled as a sidecar)
+- **yt-dlp** (optional) on the system PATH for non-YouTube sites (SoundCloud, Bandcamp). YouTube audio uses the built-in pure-Rust `rusty_ytdl` engine and needs no external binary.
 
 ### Commands
 

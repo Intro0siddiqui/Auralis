@@ -10,7 +10,7 @@
                 <i data-lucide="file-plus-2"></i>
                 Import Audio
             </button>
-            <input type="file" id="audio-import-input" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg" style="display: none;" onchange="window.Auralis.bridge.handleAudioImport(this)">
+            <input type="file" id="audio-import-input" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus,.wma" style="display: none;" onchange="window.Auralis.bridge.handleAudioImport(this)">
             <input type="file" id="folder-scan-input" webkitdirectory directory multiple style="display: none;" onchange="window.Auralis.bridge.handleFolderScan(this)">
         </div>
     </header>
@@ -26,6 +26,23 @@
             <input type="checkbox" name="downloaded_only" />
             Downloaded only
         </label>
+    </div>
+
+    <!-- Live Scan & Import Progress Indicator -->
+    <div id="library-scan-progress" class="neu-glass" style="display: none; margin-bottom: var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); align-items: center; justify-content: space-between; gap: var(--space-3);">
+        <div style="display: flex; align-items: center; gap: var(--space-3); flex: 1; min-width: 0;">
+            <i data-lucide="loader-2" style="width: 20px; height: 20px; color: var(--accent); flex-shrink: 0;"></i>
+            <div style="flex: 1; min-width: 0;">
+                <div id="library-scan-title" style="font-weight: var(--font-semibold); font-size: var(--text-sm); color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Scanning library...</div>
+                <div id="library-scan-subtitle" style="font-size: var(--text-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Processing audio files</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: var(--space-3);">
+            <span id="library-scan-counter" style="font-size: var(--text-xs); color: var(--accent); font-weight: var(--font-medium); white-space: nowrap;"></span>
+            <div class="progress-track neu-inset" style="width: 100px; height: 6px; flex-shrink: 0;">
+                <div id="library-scan-bar" class="progress-fill" style="width: 0%; background: var(--accent); height: 100%; transition: width 0.2s ease;"></div>
+            </div>
+        </div>
     </div>
 
     <div class="track-list">

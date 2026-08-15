@@ -275,7 +275,7 @@ jobs:
             APK_TARGET=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
           fi
           echo "Inspecting compiled Android APK: $APK_TARGET"
-          unzip -l "$APK_TARGET" | grep "libauralis.so" || { echo "libauralis.so missing in APK!"; exit 1; }
+          unzip -l "$APK_TARGET" | grep -E "libauralis_lib\.so|libauralis\.so" || { echo "libauralis native library missing in APK!"; exit 1; }
           unzip -l "$APK_TARGET" | grep "libc++_shared.so" || { echo "libc++_shared.so missing in APK!"; exit 1; }
           unzip -l "$APK_TARGET" | grep "index.html" || { echo "Frontend assets missing in APK!"; exit 1; }
           echo "Android APK structure, native audio engine, and scanner assets verified successfully!"

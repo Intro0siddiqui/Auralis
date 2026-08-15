@@ -6,9 +6,9 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 ## 1. Project Overview
 
-Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and yt-dlp as a sidecar for downloads.
+Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a pure-Rust `rusty_ytdl` downloader (with an optional `yt-dlp` CLI fallback) for media downloads.
 
-**Current State: Active Development** — Core architecture is in place and most features are implemented. Remaining work is primarily around real P2P data transfer (currently simulated) and polish.
+**Current State: Active Development** — Core architecture is in place and most features are implemented. Remaining work is primarily around polish and a few partial features (built-in smart-playlist presets).
 
 ---
 
@@ -25,7 +25,7 @@ src/
 ├── infrastructure/   # Concrete implementations of domain traits
 │   ├── database/     # SQLite via rusqlite + migration schema
 │   ├── filesystem/   # File scanner + metadata extraction (lofty)
-│   ├── media/        # AudioPlayer (rodio) + Downloader (yt-dlp)
+│   ├── media/        # AudioPlayer (rodio) + Downloader (rusty_ytdl / optional yt-dlp)
 │   └── network.rs    # libp2p: mDNS, gossipsub, request-response, Noise transport
 ├── commands/         # Tauri command handlers — bridge frontend ↔ services
 ├── templates/        # Partial server — reads ui/partials/ and caches them
@@ -52,7 +52,7 @@ ui/
 ├── partials/           # HTMX fragments served by the Rust backend
 │   ├── nav.html, home.html, library.html, albums.html
 │   ├── artists.html, playlists.html, player-full.html
-│   ├── sync.html, settings.html
+│   ├── download.html, search.html, sync.html, settings.html
 └── icons/              # auralis.svg
 ```
 
@@ -93,8 +93,8 @@ ui/
 
 | Task | Status |
 |------|--------|
-| Download pipeline (`infrastructure/media/downloader.rs`) | ✅ yt-dlp subprocess with progress tracking |
-| Download commands (`commands/downloads.rs`) | ✅ Real yt-dlp invocation |
+| Download pipeline (`infrastructure/media/downloader.rs`) | ✅ `rusty_ytdl` native stream + optional `yt-dlp` fallback, progress tracking |
+| Download commands (`commands/downloads.rs`) | ✅ Real native download + optional yt-dlp invocation |
 
 ### Phase 4: Playlists — ✅ COMPLETE
 
@@ -114,64 +114,52 @@ ui/
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Real P2P data transfer | ⚠️ Simulated | `sync_with_device()` uses `tokio::time::sleep` to simulate progress |
-| Library service scanner | ⚠️ Stubbed | `library_service.rs:scan_path()` returns empty — use `infrastructure/filesystem/scanner.rs` instead |
+| Real P2P data transfer | ✅ Implemented | `sync_with_device()` performs a real libp2p request-response transfer (best-effort) |
+| Library scanner | ✅ Implemented | `infrastructure/filesystem/scanner.rs` (glob + lofty); Android 16 SAF / system media-picker import added |
 | Settings commands | ✅ Implemented | SQLite-backed load/save |
 | Smart playlists | ⚠️ Partial | Criteria model exists; built-in "Recently Added" / "Most Played" not pre-defined |
-| Android assets | ⚠️ Missing | No PNG mipmaps; only `32x32.png` and `icon.ico` exist |
+| Android assets | ✅ Done | PNG mipmaps present under `icons/android/mipmap-*`; custom obsidian logo applied (v2.0.31) |
 
 ---
 
 ## 4. Optimization Tasks
 
-### 4.1 Dependency Cleanup (`Cargo.toml`)
+### 4.1 Dependency Cleanup (`Cargo.toml`) — ✅ DONE
 
+The recommended feature set is already in `Cargo.toml`:
 ```toml
-# Current
-tokio = { version = "1", features = ["full"] }
-rodio = { version = "0.17", features = ["symphonia-aac"] }
-image = "0.25"
-
-# Recommended
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "time"] }
-rodio = { version = "0.17", default-features = false, features = ["symphonia-mp3", "symphonia-flac", "symphonia-wav", "symphonia-aac"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "time"] }
+rodio = { version = "0.17", default-features = false, features = ["symphonia-aac", "symphonia-mp3", "symphonia-flac", "symphonia-wav"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }
 ```
 
-**Verify**: `cargo check` still compiles. Binary size reduced.
+`cargo check` compiles and the binary is optimized via `[profile.release]` (`lto = "fat"`, `opt-level = "z"`, `strip = true`).
 
-### 4.2 tauri.conf.json Cleanup
+### 4.2 tauri.conf.json Cleanup — ✅ DONE
 
-- Remove `"targets": "all"` from `bundle` section.
-- Change identifier from `com.auralis.app` to `com.auralis.v2`.
+- `bundle.targets` is `["deb", "app", "dmg", "msi", "nsis"]` (no `"all"`).
+- `identifier` is `com.auralis.v2` (was `com.auralis.app`).
+- `version` is `2.0.31` and must stay in sync with `Cargo.toml` + `Cargo.lock`.
 
-### 4.3 Android CI Optimization (`.github/workflows/build.yml`)
+### 4.3 Android CI Optimization (`.github/workflows/build.yml`) — ⚠️ PARTIAL
 
-- Reduce Android targets to `aarch64-linux-android` and `x86_64-linux-android` only.
-- Remove the redundant `cargo tauri android init` step.
-- Update the `apk` build command to specify targets: `cargo tauri android build --apk --target aarch64,x86_64`.
+- The APK is built for **`aarch64` only** (`cargo tauri android build --apk --target aarch64`); `x86_64-linux-android` was not added.
+- `cargo tauri android init` is still run (guarded with `|| true`) before the build — not removed, but harmless.
+- `libc++_shared.so` is bundled for the `arm64-v8a` ABI via `.cargo/config.toml` (`-lc++_shared`) and copied into `jniLibs` during CI.
+- Android permissions (`READ_MEDIA_AUDIO`, `READ/WRITE_EXTERNAL_STORAGE`, `MANAGE_EXTERNAL_STORAGE`, foreground-service media) are injected into `AndroidManifest.xml` at build time.
 
-**Verify**: CI builds complete faster. APKs are produced for the correct architectures.
+**Verify**: CI produces a single `aarch64` APK. Add `x86_64` only if emulator testing is needed.
 
-### 4.4 Linker Optimization
+### 4.4 Linker Optimization — ⚠️ PARTIAL
 
-Enable `lld` or `mold` for faster linking:
+`[profile.release]` already sets `codegen-units = 1`, `opt-level = "z"`, `lto = "fat"`, `strip = true`, `panic = "abort"`.
 
-```toml
-# Build profile
-[profile.release]
-codegen-units = 1
-opt-level = "z"
-lto = true
-strip = true
-```
-
-Add to `.cargo/config.toml`:
-
+`lld`/`mold` is **not** wired in `.cargo/config.toml` (the host `aarch64-unknown-linux-gnu` target only adds `-lc`). To speed up local host linking, add:
 ```toml
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 ```
+(Note: host `cargo build` cannot link on this machine regardless — `webkit2gtk-4.1` is missing. Only CI builds the host binary.)
 
 ---
 
@@ -183,13 +171,14 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 bash scripts/test.sh
 # or
 cargo test --all-features
+cargo test --test integration -- --nocapture   # end-to-end scan / ingestion
 ```
 
 ### Test Gaps
 
-The current test suite is minimal. Add tests for:
+`tests/integration.rs` exists and is run in CI (`build-linux`/`build-macos`/`build-windows`/`test` jobs). Unit tests exist for some domain models (`PairingInfo::generate`, `SyncChange::new`, `PairedDevice::mark_synced`). Extend coverage to:
 
-1. **Domain models** — `PairingInfo::generate`, `SyncChange::new`, `PairedDevice::mark_synced` have unit tests; extend to all models.
+1. **Domain models** — extend unit tests to all models.
 2. **Database layer** — Test repository CRUD operations with a temp SQLite DB.
 3. **Command handlers** — Add integration tests using `#[tauri::test]` macro.
 4. **File scanner** — Test scanning with a temp directory containing fixture files.
@@ -199,7 +188,7 @@ The current test suite is minimal. Add tests for:
 - Use `tempfile` for filesystem-based tests.
 - Use `:memory:` SQLite for repository tests.
 - Place unit tests in each `src/` module with `#[cfg(test)] mod tests`.
-- Place integration tests in `tests/` directory (to be created).
+- Place integration tests in `tests/integration.rs`.
 
 ---
 
@@ -214,17 +203,17 @@ The current test suite is minimal. Add tests for:
 
 ## 7. CI/CD Pipeline
 
-The CI workflow (`.github/workflows/build.yml`) runs on every push/PR to `main` and on tags `v*`:
+The CI workflow (`.github/workflows/build.yml`) runs on every push/PR to `main` and on tags `v*` (no `workflow_dispatch` — releases are triggered only by tag pushes):
 
 | Job | Purpose |
 |-----|---------|
 | `build-linux` | Compiles release binary, packages tar.gz |
-| `build-macos` | Compiles for x86_64 + aarch64 |
-| `build-windows` | Compiles MSVC target, packages zip |
-| `build-android` | Builds signed APK (auto-generates keystore) |
-| `test` | Runs `cargo test --all-features` |
-| `lint` | Runs `cargo fmt --check` + `cargo clippy` |
-| `release` | Creates GitHub Release with all artifacts (tags only) |
+| `build-macos` | Compiles + bundles `.dmg` (x86_64 + aarch64) |
+| `build-windows` | Compiles MSVC target, bundles `.msi` / `.exe` |
+| `build-android` | Builds signed `aarch64` APK (auto-generates keystore, injects Android permissions, bundles `libc++_shared.so`) |
+| `test` | Runs `cargo test --all-features` (+ `cargo test --test integration` on the OS matrix) |
+| `lint` | Runs `cargo fmt --check` + `cargo clippy --all-targets --all-features` |
+| `release` | Creates GitHub Release from all `release-*` artifacts (tags only; `needs` the build/test/lint jobs) |
 
 **Key CI files to modify for optimization**:
 - `.github/workflows/build.yml` — Android job
@@ -254,5 +243,6 @@ The CI workflow (`.github/workflows/build.yml`) runs on every push/PR to `main` 
 | **Track model** | `src/domain/models/track.rs` |
 | **Sync model** | `src/domain/models/sync.rs` |
 | **Network implementation** | `src/infrastructure/network.rs` |
-| **Android CI** | `.github/workflows/build.yml` |
-| **Build config** | `Cargo.toml`, `tauri.conf.json` |
+| **Android CI / Release** | `.github/workflows/build.yml` (tag-gated; builds Linux/macOS/Windows/Android + GitHub Release) |
+| **Integration tests** | `tests/integration.rs` |
+| **Build config** | `Cargo.toml`, `Cargo.lock`, `tauri.conf.json`, `.cargo/config.toml` |
