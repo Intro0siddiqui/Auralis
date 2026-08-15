@@ -51,6 +51,66 @@ fn track_repo(db: &Database) -> Arc<dyn TrackRepository> {
     )
 }
 
+pub const SMART_FAVORITES_ID: &str = "smart_favorites";
+pub const SMART_RECENT_ID: &str = "smart_recent";
+pub const SMART_MOST_PLAYED_ID: &str = "smart_most_played";
+
+pub const SMART_FAVORITES_UUID: Uuid = Uuid::from_u128(1);
+pub const SMART_RECENT_UUID: Uuid = Uuid::from_u128(2);
+pub const SMART_MOST_PLAYED_UUID: Uuid = Uuid::from_u128(3);
+
+/// Build virtual built-in smart playlists populated with real tracks.
+async fn build_smart_playlists(tracks_repo: &Arc<dyn TrackRepository>) -> Vec<Playlist> {
+    let mut smart = Vec::with_capacity(3);
+
+    // 1. Favorites
+    let fav_filter = TrackFilter {
+        is_favorite: Some(true),
+        sort_by: Some(TrackSortField::DateAdded),
+        sort_desc: true,
+        ..Default::default()
+    };
+    let fav_tracks = tracks_repo.find_all(fav_filter).await.unwrap_or_default();
+    let mut fav_pl = Playlist::new("Favorites".to_string());
+    fav_pl.id = SMART_FAVORITES_UUID;
+    fav_pl.description = Some("Your favorite liked tracks".to_string());
+    fav_pl.is_smart = true;
+    fav_pl.track_ids = fav_tracks.into_iter().map(|t| t.id).collect();
+    smart.push(fav_pl);
+
+    // 2. Recently Added
+    let recent_tracks = tracks_repo.recent(100).await.unwrap_or_default();
+    let mut recent_pl = Playlist::new("Recently Added".to_string());
+    recent_pl.id = SMART_RECENT_UUID;
+    recent_pl.description = Some("Recently added tracks in your library".to_string());
+    recent_pl.is_smart = true;
+    recent_pl.smart_criteria = Some(SmartPlaylistCriteria {
+        sort_by: SmartSortField::DateAdded,
+        sort_desc: true,
+        limit: 100,
+        ..Default::default()
+    });
+    recent_pl.track_ids = recent_tracks.into_iter().map(|t| t.id).collect();
+    smart.push(recent_pl);
+
+    // 3. Most Played
+    let most_played_tracks = tracks_repo.most_played(100).await.unwrap_or_default();
+    let mut most_played_pl = Playlist::new("Most Played".to_string());
+    most_played_pl.id = SMART_MOST_PLAYED_UUID;
+    most_played_pl.description = Some("Your most frequently played tracks".to_string());
+    most_played_pl.is_smart = true;
+    most_played_pl.smart_criteria = Some(SmartPlaylistCriteria {
+        sort_by: SmartSortField::PlayCount,
+        sort_desc: true,
+        limit: 100,
+        ..Default::default()
+    });
+    most_played_pl.track_ids = most_played_tracks.into_iter().map(|t| t.id).collect();
+    smart.push(most_played_pl);
+
+    smart
+}
+
 /// Load tracks for the given playlist, preserving playlist order.
 async fn tracks_for_playlist(repo: &Arc<dyn TrackRepository>, track_ids: &[Uuid]) -> Vec<Track> {
     let mut tracks = Vec::with_capacity(track_ids.len());
@@ -66,35 +126,112 @@ async fn tracks_for_playlist(repo: &Arc<dyn TrackRepository>, track_ids: &[Uuid]
     tracks
 }
 
-/// Get all playlists.
+/// Get all playlists (including built-in Smart Playlists).
 #[tauri::command]
 pub async fn get_playlists(db: State<'_, Database>) -> Result<Vec<Playlist>, String> {
-    let repo = playlist_repo(&db);
+    let pl_repo = playlist_repo(&db);
+    let tr_repo = track_repo(&db);
 
-    let playlists = repo.find_all().await.map_err(|e| {
+    let user_playlists = pl_repo.find_all().await.map_err(|e| {
         tracing::error!(error = %e, "Failed to fetch playlists");
         format!("Failed to fetch playlists: {e}")
     })?;
 
-    Ok(playlists)
+    let mut all_playlists = build_smart_playlists(&tr_repo).await;
+    for pl in user_playlists {
+        if pl.id != SMART_FAVORITES_UUID
+            && pl.id != SMART_RECENT_UUID
+            && pl.id != SMART_MOST_PLAYED_UUID
+        {
+            all_playlists.push(pl);
+        }
+    }
+
+    Ok(all_playlists)
 }
 
-/// Get a single playlist with its tracks.
+/// Get a single playlist with its tracks (dynamically resolved for smart playlists).
 #[tauri::command]
 pub async fn get_playlist(
     db: State<'_, Database>,
-    id: Uuid,
+    id: String,
 ) -> Result<Option<(Playlist, Vec<Track>)>, String> {
-    let repo = playlist_repo(&db);
+    let tr_repo = track_repo(&db);
 
-    let playlist = repo.find_by_id(id).await.map_err(|e| {
+    if id == SMART_FAVORITES_ID || id == SMART_FAVORITES_UUID.to_string() {
+        let fav_filter = TrackFilter {
+            is_favorite: Some(true),
+            sort_by: Some(TrackSortField::DateAdded),
+            sort_desc: true,
+            ..Default::default()
+        };
+        let tracks = tr_repo.find_all(fav_filter).await.map_err(|e| {
+            tracing::error!(error = %e, "Failed to fetch favorites tracks");
+            format!("Failed to fetch favorites tracks: {e}")
+        })?;
+
+        let mut playlist = Playlist::new("Favorites".to_string());
+        playlist.id = SMART_FAVORITES_UUID;
+        playlist.description = Some("Your favorite liked tracks".to_string());
+        playlist.is_smart = true;
+        playlist.track_ids = tracks.iter().map(|t| t.id).collect();
+        return Ok(Some((playlist, tracks)));
+    }
+
+    if id == SMART_RECENT_ID || id == SMART_RECENT_UUID.to_string() {
+        let tracks = tr_repo.recent(100).await.map_err(|e| {
+            tracing::error!(error = %e, "Failed to fetch recent tracks");
+            format!("Failed to fetch recent tracks: {e}")
+        })?;
+
+        let mut playlist = Playlist::new("Recently Added".to_string());
+        playlist.id = SMART_RECENT_UUID;
+        playlist.description = Some("Recently added tracks in your library".to_string());
+        playlist.is_smart = true;
+        playlist.smart_criteria = Some(SmartPlaylistCriteria {
+            sort_by: SmartSortField::DateAdded,
+            sort_desc: true,
+            limit: 100,
+            ..Default::default()
+        });
+        playlist.track_ids = tracks.iter().map(|t| t.id).collect();
+        return Ok(Some((playlist, tracks)));
+    }
+
+    if id == SMART_MOST_PLAYED_ID || id == SMART_MOST_PLAYED_UUID.to_string() {
+        let tracks = tr_repo.most_played(100).await.map_err(|e| {
+            tracing::error!(error = %e, "Failed to fetch most played tracks");
+            format!("Failed to fetch most played tracks: {e}")
+        })?;
+
+        let mut playlist = Playlist::new("Most Played".to_string());
+        playlist.id = SMART_MOST_PLAYED_UUID;
+        playlist.description = Some("Your most frequently played tracks".to_string());
+        playlist.is_smart = true;
+        playlist.smart_criteria = Some(SmartPlaylistCriteria {
+            sort_by: SmartSortField::PlayCount,
+            sort_desc: true,
+            limit: 100,
+            ..Default::default()
+        });
+        playlist.track_ids = tracks.iter().map(|t| t.id).collect();
+        return Ok(Some((playlist, tracks)));
+    }
+
+    let parsed_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return Ok(None),
+    };
+
+    let pl_repo = playlist_repo(&db);
+    let playlist = pl_repo.find_by_id(parsed_id).await.map_err(|e| {
         tracing::error!(error = %e, "Failed to fetch playlist");
         format!("Failed to fetch playlist: {e}")
     })?;
 
     match playlist {
         Some(playlist) => {
-            let tracks = tracks_for_playlist(&track_repo(&db), &playlist.track_ids).await;
+            let tracks = tracks_for_playlist(&tr_repo, &playlist.track_ids).await;
             Ok(Some((playlist, tracks)))
         }
         None => Ok(None),
@@ -324,4 +461,77 @@ pub async fn create_smart_playlist(
 
     tracing::info!(id = %playlist.id, name = %playlist.name, "Smart playlist created");
     Ok(playlist)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::AudioFormat;
+    use crate::infrastructure::database::repositories::SqliteTrackRepository;
+
+    #[tokio::test]
+    async fn test_smart_playlists_builder() {
+        let db_path = std::env::temp_dir().join(format!("test_playlists_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let tr_repo: Arc<dyn TrackRepository> =
+            Arc::new(SqliteTrackRepository::new(db_arc.clone()));
+
+        // Insert tracks
+        let mut track1 = Track::new(
+            "Song 1".to_string(),
+            "/music/1.mp3".to_string(),
+            120,
+            AudioFormat::Mp3,
+        );
+        track1.is_favorite = true;
+        track1.play_count = 15;
+        tr_repo.insert(&track1).await.unwrap();
+
+        let mut track2 = Track::new(
+            "Song 2".to_string(),
+            "/music/2.mp3".to_string(),
+            180,
+            AudioFormat::Mp3,
+        );
+        track2.is_favorite = false;
+        track2.play_count = 50;
+        tr_repo.insert(&track2).await.unwrap();
+
+        let mut track3 = Track::new(
+            "Song 3".to_string(),
+            "/music/3.mp3".to_string(),
+            200,
+            AudioFormat::Mp3,
+        );
+        track3.is_favorite = true;
+        track3.play_count = 0;
+        tr_repo.insert(&track3).await.unwrap();
+
+        let smart = build_smart_playlists(&tr_repo).await;
+        assert_eq!(smart.len(), 3);
+
+        // Favorites should contain track1 and track3
+        let favorites = smart.iter().find(|p| p.name == "Favorites").unwrap();
+        assert_eq!(favorites.id, SMART_FAVORITES_UUID);
+        assert!(favorites.is_smart);
+        assert_eq!(favorites.track_ids.len(), 2);
+        assert!(favorites.track_ids.contains(&track1.id));
+        assert!(favorites.track_ids.contains(&track3.id));
+
+        // Recently added should contain all 3
+        let recent = smart.iter().find(|p| p.name == "Recently Added").unwrap();
+        assert_eq!(recent.id, SMART_RECENT_UUID);
+        assert_eq!(recent.track_ids.len(), 3);
+
+        // Most played should contain track2 (50) and track1 (15), but not track3 (0)
+        let most_played = smart.iter().find(|p| p.name == "Most Played").unwrap();
+        assert_eq!(most_played.id, SMART_MOST_PLAYED_UUID);
+        assert_eq!(most_played.track_ids.len(), 2);
+        assert_eq!(most_played.track_ids[0], track2.id);
+        assert_eq!(most_played.track_ids[1], track1.id);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 }

@@ -293,27 +293,36 @@ pub async fn pick_folder_and_scan(
     app: tauri::AppHandle,
     db: State<'_, Database>,
 ) -> Result<Option<ScanSummary>, String> {
-    use tauri_plugin_dialog::DialogExt;
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_dialog::DialogExt;
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_folder(move |folder_path| {
-        let _ = tx.send(folder_path);
-    });
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.dialog().file().pick_folder(move |folder_path| {
+            let _ = tx.send(folder_path);
+        });
 
-    let folder_path = rx
-        .await
-        .map_err(|e| format!("Folder picker channel closed: {e}"))?;
+        let folder_path = rx
+            .await
+            .map_err(|e| format!("Folder picker channel closed: {e}"))?;
 
-    match folder_path {
-        Some(path) => {
-            let path_buf = path
-                .into_path()
-                .map_err(|e| format!("Invalid folder path: {e}"))?;
-            let path_str = path_buf.to_string_lossy().to_string();
-            tracing::info!(path = %path_str, "User selected custom folder to scan");
-            let summary = scan_library_paths(app, db, Some(vec![path_str])).await?;
-            Ok(Some(summary))
+        match folder_path {
+            Some(path) => {
+                let path_buf = path
+                    .into_path()
+                    .map_err(|e| format!("Invalid folder path: {e}"))?;
+                let path_str = path_buf.to_string_lossy().to_string();
+                tracing::info!(path = %path_str, "User selected custom folder to scan");
+                let summary = scan_library_paths(app, db, Some(vec![path_str])).await?;
+                Ok(Some(summary))
+            }
+            None => Ok(None),
         }
-        None => Ok(None),
+    }
+
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, db);
+        Err("Native folder dialog is only available on desktop platforms. Please use Android SAF picker.".to_string())
     }
 }

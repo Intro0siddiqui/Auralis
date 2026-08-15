@@ -50,6 +50,11 @@ impl SqliteTrackRepository {
             play_count: row.get(18)?,
             is_downloaded: row.get::<_, i32>(19)? != 0,
             source_url: row.get(20)?,
+            is_favorite: row
+                .get::<_, Option<i32>>(21)
+                .unwrap_or_default()
+                .unwrap_or(0)
+                != 0,
         })
     }
 }
@@ -88,6 +93,11 @@ impl TrackRepository for SqliteTrackRepository {
 
         if filter.downloaded_only {
             sql.push_str(" AND is_downloaded = 1");
+        }
+
+        if let Some(fav) = filter.is_favorite {
+            sql.push_str(" AND is_favorite = ?");
+            params_vec.push(Box::new(if fav { 1 } else { 0 }));
         }
 
         let order_field = match filter.sort_by.unwrap_or(TrackSortField::DateAdded) {
@@ -229,8 +239,8 @@ impl TrackRepository for SqliteTrackRepository {
                 id, title, artist, album, album_artist, genre, year,
                 track_number, disc_number, duration_secs, file_path,
                 file_size, format, bitrate, sample_rate, album_art_path,
-                date_added, last_played, play_count, is_downloaded, source_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                date_added, last_played, play_count, is_downloaded, source_url, is_favorite
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             params![
                 track.id.to_string(),
                 track.title,
@@ -253,6 +263,7 @@ impl TrackRepository for SqliteTrackRepository {
                 track.play_count,
                 track.is_downloaded as i32,
                 track.source_url,
+                track.is_favorite as i32,
             ],
         )?;
         Ok(())
@@ -268,7 +279,8 @@ impl TrackRepository for SqliteTrackRepository {
                 title = ?, artist = ?, album = ?, album_artist = ?, genre = ?, year = ?,
                 track_number = ?, disc_number = ?, duration_secs = ?, file_path = ?,
                 file_size = ?, format = ?, bitrate = ?, sample_rate = ?, album_art_path = ?,
-                date_added = ?, last_played = ?, play_count = ?, is_downloaded = ?, source_url = ?
+                date_added = ?, last_played = ?, play_count = ?, is_downloaded = ?, source_url = ?,
+                is_favorite = ?
             WHERE id = ?"#,
             params![
                 track.title,
@@ -291,6 +303,7 @@ impl TrackRepository for SqliteTrackRepository {
                 track.play_count,
                 track.is_downloaded as i32,
                 track.source_url,
+                track.is_favorite as i32,
                 track.id.to_string(),
             ],
         )?;

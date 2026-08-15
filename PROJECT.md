@@ -311,8 +311,8 @@ builds. The Android launch crashes documented in §4 are all resolved. Recent
 milestones from `git log`:
 
 - **v2.0.22 / v2.0.23** — Android 15/16 System Media Picker audio import +
-  auto-scan; 100% 2026 platform compliance (foreground media playback, direct
-  P2P connect).
+  auto-scan; claimed "100% 2026 platform compliance" (foreground media playback,
+  direct P2P connect). **This claim is overstated — see §11.**
 - **v2.0.27** — 16KB Android page alignment, hardware base64 audio import,
   SQLite favorite persistence, full player controls.
 - **v2.0.29** — SAF directory-tree scan & internal music-path indexing for
@@ -341,6 +341,38 @@ milestones from `git log`:
    `pm`/`am` are unusable from Termux).
 4. Launch: SQLite DB initializes and the audio engine binds the native
    `oboe`/`cpal` stream.
+
+---
+
+## 11. 2026 Platform Compliance Audit (verified against official guidelines)
+
+Audited 2026-08-15 against Android and Tauri distribution guidelines. The
+"100% 2026 compliance" claim in the git history is **not** fully accurate.
+
+### Android (the strict 2026 target — developer.android.com)
+| Requirement | Status | Evidence / Notes |
+|---|---|---|
+| **16 KB page alignment** (Play-mandatory since 2025-11-01 for API 35+) | ✅ Met | `build.rs` sets `-Wl,-z,max-page-size=16384` + `common-page-size=16384`. Verify APK with `zipalign -c -P 16` in CI. |
+| **Target API level** (new/updated apps must target **API 36 by 2026-08-31**; ≥35 now) | ⚠️ Verify | Set by Tauri's `cargo tauri android init` template, not in repo. Tauri ≥2.5 templates use `targetSdk 36` + edge-to-edge (PR #13780); older templates default lower and trigger "built for an older Android" warnings (#10712). **Pin Tauri/CLI ≥2.5 or set `targetSdk=36` in `gen/android/app/build.gradle.kts`.** |
+| **Foreground service *type* for media playback** (Android 14+: must declare `android:foregroundServiceType="mediaPlayback"` on a `<service>`, plus the permission) | ❌ Not met | `build.yml` injects `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_MEDIA_PLAYBACK` **permissions**, but no `<service ... android:foregroundServiceType="mediaPlayback">` exists in the tree. Foreground/visible playback works (no FGS needed); **true background playback (screen off) is not implemented to spec.** Needs a service (e.g. `tauri-plugin-background-service` with `mediaPlayback` type) + the manifest `<service>` declaration. |
+| **Scoped storage / media access** | ✅ Met (with caveat) | `READ_MEDIA_AUDIO` + SAF/media-picker (`android.rs`) is the sanctioned path. **Caveat:** `MANAGE_EXTERNAL_STORAGE` is also injected (with `tools:ignore`) — it is a *restricted* Play permission; prefer dropping it and relying on SAF/MediaStore to avoid Play rejection. |
+| **Edge-to-edge** (Android 15/16) | ✅ Likely | UI uses safe-area insets (`tokens.css`); satisfied if on Tauri ≥2.5 template. |
+| **Background network (Android 15)** | ⚠️ Note | libp2p sync may hit background-network restrictions if it runs while the app is backgrounded. |
+
+### Desktop distribution (Tauri docs, 2026)
+| Platform | Requirement | Status | Notes |
+|---|---|---|---|
+| **macOS** | Developer ID signing + **notarization** (Gatekeeper blocks unsigned/notarized on macOS 15+) | ❌ Not done | `build-macos` runs `npx @tauri-apps/cli build` with no `APPLE_*` secrets / `signingIdentity`. Produces an unsigned `.dmg` → "damaged"/blocked on download. Add `APPLE_CERTIFICATE`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` + notarization. |
+| **Windows** | Authenticode code signing (SmartScreen) | ❌ Not done | `build-windows` produces unsigned `.msi`/`.exe` (no `WINDOWS_CERTIFICATE` / `signCommand`). Triggers SmartScreen "untrusted". Add Azure Key Vault / Trusted Signing via `bundle.windows.signCommand`. |
+| **Linux** | `.deb` packaging | ✅ Met | `deb` target with `libwebkit2gtk-4.1-0`/`libgtk-3-0` deps; no signature gating. |
+
+### Bottom line
+- **Android native correctness**: 16 KB alignment ✅, scoped storage ✅, but
+  **background media-playback foreground service is missing** and **targetSdk
+  must be verified ≥36**.
+- **Release distribution**: Android APK is signed (auto keystore — fine for
+  sideload, not Play upload-key), but **macOS/Windows artifacts are unsigned**
+  and will warn/block on end-user machines. These are CI/cert gaps, not code.
 
 ---
 

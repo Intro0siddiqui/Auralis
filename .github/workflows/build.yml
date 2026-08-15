@@ -204,11 +204,24 @@ jobs:
             if ! grep -q 'xmlns:tools' "$MANIFEST"; then
               sed -i 's|<manifest|<manifest xmlns:tools="http://schemas.android.com/tools"|' "$MANIFEST"
             fi
-            sed -i '/<manifest[^>]*>/a \    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />' "$MANIFEST"
+            sed -i '/<manifest[^>]*>/a \    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />' "$MANIFEST"
             sed -i 's|<application|<application android:requestLegacyExternalStorage="true"|' "$MANIFEST"
+            sed -i '/<\/application>/i \        <service android:name=".MediaPlaybackService" android:foregroundServiceType="mediaPlayback" android:exported="false"/>' "$MANIFEST"
             echo "Updated AndroidManifest.xml:"
             cat "$MANIFEST"
           fi
+
+      - name: Configure Android SDK versions
+        run: |
+          for f in $(find gen/android -name "build.gradle*" 2>/dev/null); do
+            if [ -f "$f" ]; then
+              echo "Setting compileSdk and targetSdk to 36 in $f"
+              sed -i -E 's/(compileSdk(Version)?(\.set\(|\s*=?\s*|\s*\(\s*))[0-9]+/\136/g' "$f"
+              sed -i -E 's/(targetSdk(Version)?(\.set\(|\s*=?\s*|\s*\(\s*))[0-9]+/\136/g' "$f"
+              echo "Updated $f:"
+              cat "$f"
+            fi
+          done
 
       - name: Bundle C++ runtime (libc++_shared.so)
         run: |

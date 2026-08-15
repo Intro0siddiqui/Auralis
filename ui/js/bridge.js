@@ -680,20 +680,48 @@ class Bridge {
 
     async loadPlaylistsView() {
         const grid = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
+        const detail = document.getElementById('playlist-detail');
+        if (detail) detail.style.display = 'none';
+        if (grid) grid.style.display = 'grid';
         if (!grid) return;
 
         try {
             const playlists = await this.invoke('get_playlists');
             if (playlists && playlists.length > 0) {
-                grid.innerHTML = playlists.map(pl => `
-                    <div class="card playlist-card neu-glass" style="cursor: pointer;">
-                        <div class="card-artwork"><i data-lucide="list-music"></i></div>
+                grid.innerHTML = playlists.map(pl => {
+                    const isSmart = Boolean(pl.is_smart);
+                    let iconName = 'list-music';
+                    let badgeHtml = '';
+                    if (isSmart) {
+                        const idStr = String(pl.id);
+                        if (idStr === 'smart_favorites' || pl.name === 'Favorites') {
+                            iconName = 'heart';
+                            badgeHtml = `<span class="badge" style="background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart</span>`;
+                        } else if (idStr === 'smart_recent' || pl.name === 'Recently Added') {
+                            iconName = 'clock';
+                            badgeHtml = `<span class="badge" style="background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart</span>`;
+                        } else if (idStr === 'smart_most_played' || pl.name === 'Most Played') {
+                            iconName = 'flame';
+                            badgeHtml = `<span class="badge" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart</span>`;
+                        } else {
+                            iconName = 'sparkles';
+                            badgeHtml = `<span class="badge" style="background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart</span>`;
+                        }
+                    }
+
+                    return `
+                    <div class="card playlist-card neu-glass" onclick="window.Auralis.bridge.openPlaylist('${pl.id}')" style="cursor: pointer;">
+                        <div class="card-artwork"><i data-lucide="${iconName}"></i></div>
                         <div class="card-body">
-                            <div class="card-title">${this.escapeHtml(pl.name)}</div>
+                            <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-1);">
+                                <div class="card-title" style="margin-bottom: 0;">${this.escapeHtml(pl.name)}</div>
+                                ${badgeHtml}
+                            </div>
                             <div class="card-subtitle">${pl.track_ids ? pl.track_ids.length : 0} tracks</div>
                         </div>
                     </div>
-                `).join('');
+                `;
+                }).join('');
                 if (window.lucide) window.lucide.createIcons();
             } else {
                 grid.innerHTML = `
@@ -712,6 +740,79 @@ class Bridge {
         } catch (err) {
             console.error('Error loading playlists:', err);
         }
+    }
+
+    async openPlaylist(playlistId) {
+        if (!playlistId) return;
+        try {
+            const result = await this.invoke('get_playlist', { id: playlistId });
+            if (!result) {
+                this.showToast('Playlist not found', 'warning');
+                return;
+            }
+            const [playlist, tracks] = result;
+            const detailEl = document.getElementById('playlist-detail');
+            const gridEl = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
+
+            if (detailEl && gridEl) {
+                gridEl.style.display = 'none';
+                detailEl.style.display = 'block';
+
+                const isSmart = Boolean(playlist.is_smart);
+                let badge = isSmart ? `<span class="badge" style="background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart Playlist</span>` : '';
+
+                detailEl.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-4);">
+                        <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.closePlaylistDetail()">
+                            <i data-lucide="arrow-left"></i>
+                            Back to Playlists
+                        </button>
+                        ${tracks && tracks.length > 0 ? `
+                            <button class="btn btn-primary btn-sm neu" onclick="window.Auralis.bridge.playTrack('${tracks[0].id}')">
+                                <i data-lucide="play"></i>
+                                Play All (${tracks.length})
+                            </button>
+                        ` : ''}
+                    </div>
+                    <div class="card neu-glass" style="margin-bottom: var(--space-4); padding: var(--space-4);">
+                        <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-1);">
+                            <h3 style="font-size: var(--text-xl); font-weight: var(--font-bold); color: var(--text-1); margin: 0;">${this.escapeHtml(playlist.name)}</h3>
+                            ${badge}
+                        </div>
+                        ${playlist.description ? `<p style="color: var(--text-3); font-size: var(--text-sm); margin: 0 0 var(--space-2) 0;">${this.escapeHtml(playlist.description)}</p>` : ''}
+                        <div style="color: var(--text-3); font-size: var(--text-xs);">${tracks ? tracks.length : 0} tracks</div>
+                    </div>
+                    <div class="track-list" id="playlist-track-list">
+                        <!-- Tracks -->
+                    </div>
+                `;
+
+                const trackListEl = document.getElementById('playlist-track-list');
+                if (tracks && tracks.length > 0) {
+                    this.renderTrackRows(trackListEl, tracks);
+                } else {
+                    trackListEl.innerHTML = `
+                        <div class="empty-state glass neu" style="padding: var(--space-6); text-align: center; border-radius: var(--radius-md);">
+                            <i data-lucide="music" style="width: 32px; height: 32px; color: var(--accent); margin-bottom: var(--space-2);"></i>
+                            <h4 style="color: var(--text-1); font-size: var(--text-base); margin-bottom: var(--space-1);">No tracks in playlist</h4>
+                            <p style="color: var(--text-3); font-size: var(--text-xs);">Add tracks to this playlist from your library.</p>
+                        </div>
+                    `;
+                }
+                if (window.lucide) window.lucide.createIcons();
+            }
+        } catch (err) {
+            console.error('Failed to open playlist:', err);
+            this.showToast(`Failed to open playlist: ${err}`, 'error');
+        }
+    }
+
+    closePlaylistDetail() {
+        const detailEl = document.getElementById('playlist-detail');
+        const gridEl = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
+        if (detailEl) detailEl.style.display = 'none';
+        if (gridEl) gridEl.style.display = 'grid';
+        if (window.lucide) window.lucide.createIcons();
     }
 
     async promptCreatePlaylist() {

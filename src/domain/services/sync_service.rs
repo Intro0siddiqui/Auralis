@@ -7,7 +7,7 @@ use crate::domain::models::{
     SyncStatus,
 };
 use crate::domain::repositories::{SettingsRepository, SyncRepository};
-use crate::infrastructure::network::{NetworkError, SyncEngine};
+use crate::infrastructure::network::SyncEngine;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -241,19 +241,17 @@ impl SyncService {
 
         // 3. Perform the actual request-response sync via libp2p
         let peer_id = device_id.to_string();
-        match self.sync_engine.request_sync(&peer_id).await {
-            Ok(()) => {
-                debug!(device_id = %device_id, "Sync transfer completed");
-            }
-            Err(NetworkError::PeerNotFound(_)) => {
-                warn!(device_id = %device_id, "Peer not discovered; skipping network transfer");
-            }
-            Err(e) => {
-                warn!(device_id = %device_id, error = %e, "Sync transfer failed, proceeding with local update");
-            }
+        if let Err(e) = self.sync_engine.request_sync(&peer_id).await {
+            warn!(device_id = %device_id, error = %e, "Sync transfer failed; keeping pending changes in queue");
+            let mut status = self.sync_status.write().await;
+            status.is_syncing = false;
+            status.error = Some(e.to_string());
+            return Err(SyncError::NetworkError(e.to_string()));
         }
 
-        // 4. Clear pending changes on the local side
+        debug!(device_id = %device_id, "Sync transfer completed");
+
+        // 4. Clear pending changes on the local side only after successful sync
         self.clear_pending_changes().await.ok();
 
         // Update device sync time

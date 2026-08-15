@@ -159,6 +159,10 @@ pub struct Track {
 
     /// Source URL for downloaded tracks (YouTube, Instagram, etc.)
     pub source_url: Option<String>,
+
+    /// Whether this track is marked as a favorite
+    #[serde(default)]
+    pub is_favorite: bool,
 }
 
 impl Track {
@@ -186,6 +190,7 @@ impl Track {
             play_count: 0,
             is_downloaded: false,
             source_url: None,
+            is_favorite: false,
         }
     }
 
@@ -231,6 +236,9 @@ pub struct TrackFilter {
 
     /// Only include downloaded tracks
     pub downloaded_only: bool,
+
+    /// Filter by favorite status
+    pub is_favorite: Option<bool>,
 
     /// Sort field
     pub sort_by: Option<TrackSortField>,

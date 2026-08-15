@@ -8,7 +8,7 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a pure-Rust `rusty_ytdl` downloader (with an optional `yt-dlp` CLI fallback) for media downloads.
 
-**Current State: Active Development** — Core architecture is in place and most features are implemented. Remaining work is primarily around polish and a few partial features (built-in smart-playlist presets).
+**Current State: Active Development** — Core architecture is in place and most features are implemented. Remaining work is primarily around polish and a few partial features (built-in smart-playlist presets). For the verified 2026 platform-compliance status (16 KB alignment ✅, but the Android background-media foreground-service *type* and macOS/Windows signing are current gaps), see `PROJECT.md` §11.
 
 ---
 

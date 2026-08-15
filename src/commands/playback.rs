@@ -372,6 +372,11 @@ async fn lookup_track(
                 play_count: row.get(18)?,
                 is_downloaded: row.get::<_, i32>(19)? != 0,
                 source_url: row.get(20)?,
+                is_favorite: row
+                    .get::<_, Option<i32>>(21)
+                    .unwrap_or_default()
+                    .unwrap_or(0)
+                    != 0,
             })
         })
         .map_err(|e| format!("Track lookup error: {e}"))?;
