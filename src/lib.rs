@@ -123,6 +123,7 @@ impl AuralisApp {
                 commands::library::update_track_metadata,
                 commands::library::delete_tracks,
                 commands::library::scan_library_paths,
+                commands::library::import_audio_file,
                 // Playback commands
                 commands::playback::play,
                 commands::playback::pause,

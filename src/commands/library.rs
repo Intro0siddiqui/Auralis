@@ -196,3 +196,53 @@ pub async fn scan_library_paths(
 
     Ok(summary)
 }
+
+/// Import an audio file directly from binary payload (bypasses Android 14/15/16 Scoped Storage restrictions)
+#[tauri::command]
+pub async fn import_audio_file(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    name: String,
+    data: Vec<u8>,
+) -> Result<Track, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {e}"))?;
+    let music_dir = app_dir.join("music");
+    std::fs::create_dir_all(&music_dir)
+        .map_err(|e| format!("Failed to create music directory: {e}"))?;
+
+    let file_path = music_dir.join(&name);
+    std::fs::write(&file_path, &data).map_err(|e| format!("Failed to write audio file: {e}"))?;
+
+    let repo = track_repo(&db);
+    let extractor = crate::infrastructure::filesystem::metadata::MetadataExtractor::new();
+    let mut track = match extractor.extract(&file_path).await {
+        Ok(t) => t,
+        Err(_) => {
+            // Fallback for minimal metadata when tags are missing
+            let ext = std::path::Path::new(&name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("mp3");
+            let format = crate::infrastructure::database::repositories::parse_format(ext);
+            Track::new(
+                file_path.to_string_lossy().to_string(),
+                name.clone(),
+                format,
+            )
+        }
+    };
+
+    if track.title.is_empty() {
+        track.title = name;
+    }
+
+    repo.save(&track)
+        .await
+        .map_err(|e| format!("Failed to save track to database: {e}"))?;
+
+    let _ = app.emit("library:track_imported", &track);
+    Ok(track)
+}

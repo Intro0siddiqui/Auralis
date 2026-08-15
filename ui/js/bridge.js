@@ -148,6 +148,35 @@ class Bridge {
         }
     }
 
+    async handleAudioImport(input) {
+        if (!input || !input.files || input.files.length === 0) return;
+        const files = Array.from(input.files);
+        this.showToast(`Importing ${files.length} audio file(s)...`, 'info');
+
+        let successCount = 0;
+        for (const file of files) {
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                const uint8Array = new Uint8Array(arrayBuffer);
+                const result = await this.invoke('import_audio_file', {
+                    name: file.name,
+                    data: Array.from(uint8Array)
+                });
+                if (result) successCount++;
+            } catch (err) {
+                console.error(`Failed to import ${file.name}:`, err);
+            }
+        }
+
+        input.value = '';
+        if (successCount > 0) {
+            this.showToast(`Successfully imported ${successCount} track(s)!`, 'success');
+            this.loadLibraryView();
+        } else {
+            this.showToast('Import failed. Please verify the audio files.', 'error');
+        }
+    }
+
     async loadLibraryView() {
         const trackList = document.querySelector('.page-library .track-list');
         if (!trackList) return;
