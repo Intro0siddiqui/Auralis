@@ -238,7 +238,7 @@ jobs:
             -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
 
       - name: Build APK
-        run: cargo tauri android build --apk --target aarch64-linux-android
+        run: cargo tauri android build --apk --target aarch64
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
