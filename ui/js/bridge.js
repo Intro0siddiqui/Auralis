@@ -8,6 +8,7 @@ class Bridge {
     }
 
     async init() {
+        this.initTheme();
         try {
             if (window.__TAURI_INTERNALS__) {
                 const { listen } = window.__TAURI_INTERNALS__.tauri;
@@ -581,6 +582,43 @@ class Bridge {
         }
     }
 
+    async initTheme() {
+        const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+        mediaQuery.addEventListener('change', () => {
+            const currentSetting = (this.currentSettings && this.currentSettings.appearance && this.currentSettings.appearance.theme) || 'system';
+            if (String(currentSetting).toLowerCase() === 'system') {
+                this.applyTheme('system');
+            }
+        });
+
+        try {
+            const settings = await this.invoke('get_settings');
+            if (settings) {
+                this.currentSettings = settings;
+                const theme = (settings.appearance && settings.appearance.theme) || 'system';
+                this.applyTheme(theme);
+            } else {
+                this.applyTheme('system');
+            }
+        } catch (e) {
+            this.applyTheme('system');
+        }
+    }
+
+    applyTheme(theme) {
+        const themeStr = String(theme || 'system').toLowerCase();
+        let activeTheme = themeStr;
+        if (themeStr === 'system') {
+            activeTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        document.documentElement.setAttribute('data-theme', activeTheme);
+        const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+        if (metaThemeColor) {
+            metaThemeColor.setAttribute('content', activeTheme === 'light' ? '#f0f4f8' : '#070b10');
+        }
+    }
+
     async loadSettingsView() {
         const settingsView = document.querySelector('.page-settings, #settings-view');
         if (!settingsView || settingsView.dataset.bound) return;
@@ -672,7 +710,7 @@ class Bridge {
                 themeSelect.addEventListener('change', async (e) => {
                     if (this.currentSettings && this.currentSettings.appearance) {
                         this.currentSettings.appearance.theme = e.target.value;
-                        document.documentElement.setAttribute('data-theme', e.target.value);
+                        this.applyTheme(e.target.value);
                         await saveSettings();
                     }
                 });

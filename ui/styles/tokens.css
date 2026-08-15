@@ -201,9 +201,56 @@
   --neu-glow: 0 0 20px rgba(110, 231, 255, 0.35);
 }
 
-/* ========================================
-   Light Theme
-   ======================================== */
+[data-theme="light"],
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg-0: #f0f4f8;
+    --bg-1: #ffffff;
+    --bg-2: #e8eef4;
+    --bg-3: #dde5ed;
+
+    --bg-gradient: linear-gradient(160deg, var(--bg-0) 0%, var(--bg-1) 50%, var(--bg-2) 100%);
+    --neu-color-light: rgba(255, 255, 255, 0.85);
+    --neu-color-dark: rgba(0, 0, 0, 0.08);
+    --neu-inset-bg: var(--bg-2);
+    --neu-bg: var(--bg-2);
+
+    --glass-weak: rgba(0, 0, 0, 0.03);
+    --glass-base: rgba(255, 255, 255, 0.7);
+    --glass-strong: rgba(255, 255, 255, 0.9);
+    --glass-border: rgba(0, 0, 0, 0.08);
+    --glass-border-strong: rgba(0, 0, 0, 0.12);
+
+    --text-1: #0f172a;
+    --text-2: rgba(15, 23, 42, 0.78);
+    --text-3: rgba(15, 23, 42, 0.58);
+    --text-4: rgba(15, 23, 42, 0.38);
+
+    --glass-shadow:
+      0 8px 32px rgba(0, 0, 0, 0.08),
+      inset 0 1px 0 rgba(255, 255, 255, 0.9);
+
+    --neu-out:
+      6px 6px 14px rgba(0, 0, 0, 0.08),
+      -4px -4px 10px rgba(255, 255, 255, 0.8);
+
+    --neu-out-sm:
+      3px 3px 8px rgba(0, 0, 0, 0.06),
+      -2px -2px 6px rgba(255, 255, 255, 0.7);
+
+    --neu-in:
+      inset 3px 3px 8px rgba(0, 0, 0, 0.06),
+      inset -3px -3px 8px rgba(255, 255, 255, 0.7);
+
+    --neu-in-sm:
+      inset 2px 2px 5px rgba(0, 0, 0, 0.05),
+      inset -2px -2px 5px rgba(255, 255, 255, 0.6);
+
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.12);
+    --accent-hover: #38bdf8;
+  }
+}
 [data-theme="light"] {
   --bg-0: #f0f4f8;
   --bg-1: #ffffff;
