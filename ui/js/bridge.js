@@ -135,14 +135,10 @@ class Bridge {
     }
 
     async scanLibrary(paths = null) {
-        this.showToast('Scanning music library...', 'info');
-        const isAndroid = /Android/i.test(navigator.userAgent);
-        const scanPaths = paths || (isAndroid 
-            ? ['/storage/emulated/0/Music', '/storage/emulated/0/Download']
-            : null);
+        this.showToast('Scanning storage for audio files...', 'info');
 
         try {
-            const summary = await this.invoke('scan_library_paths', { paths: scanPaths });
+            const summary = await this.invoke('scan_library_paths', { paths: paths || null });
             if (summary) {
                 this.showToast(`Scan complete: ${summary.tracks_added} new, ${summary.tracks_total} total`, 'success');
                 this.refreshCurrentView();

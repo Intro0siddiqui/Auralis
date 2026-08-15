@@ -196,6 +196,20 @@ jobs:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
+      - name: Inject Android Audio & Storage Permissions
+        run: |
+          MANIFEST="gen/android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            echo "Injecting storage and media permissions into AndroidManifest.xml"
+            if ! grep -q 'xmlns:tools' "$MANIFEST"; then
+              sed -i 's|<manifest|<manifest xmlns:tools="http://schemas.android.com/tools"|' "$MANIFEST"
+            fi
+            sed -i '/<manifest[^>]*>/a \    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />' "$MANIFEST"
+            sed -i 's|<application|<application android:requestLegacyExternalStorage="true"|' "$MANIFEST"
+            echo "Updated AndroidManifest.xml:"
+            cat "$MANIFEST"
+          fi
+
       - name: Bundle C++ runtime (libc++_shared.so)
         run: |
           NDK_SYSROOT="$ANDROID_HOME/ndk/25.2.9519653/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"

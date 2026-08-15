@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "mobile",
+  "description": "Mobile capability for Auralis Android application",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-internal-toggle-devtools",
+    "shell:allow-open",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-message",
+    "fs:allow-read-file",
+    "fs:allow-read-dir",
+    "fs:allow-write-file",
+    "fs:allow-exists",
+    "store:default",
+    "os:allow-platform",
+    "os:allow-version"
+  ]
+}
