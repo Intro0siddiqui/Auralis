@@ -694,8 +694,11 @@ class Bridge {
             this.currentSettings = settings;
 
             const volInput = settingsView.querySelector('input[name="volume"]');
+            const volBadge = settingsView.querySelector('#settings-volume-val');
             if (volInput && settings.audio) {
-                volInput.value = Math.round(settings.audio.volume * 100);
+                const volPct = Math.round(settings.audio.volume * 100);
+                volInput.value = volPct;
+                if (volBadge) volBadge.textContent = `${volPct}%`;
             }
 
             const downloadPathInput = settingsView.querySelector('input[name="download_path"]');
@@ -708,10 +711,11 @@ class Bridge {
                 formatSelect.value = String(settings.downloads.default_format).toLowerCase();
             }
 
-            const themeSelect = settingsView.querySelector('select[name="theme"]');
-            if (themeSelect && settings.appearance && settings.appearance.theme) {
-                themeSelect.value = String(settings.appearance.theme).toLowerCase();
-            }
+            const currentTheme = (settings.appearance && settings.appearance.theme) ? String(settings.appearance.theme).toLowerCase() : 'dark';
+            const themeOptions = settingsView.querySelectorAll('.theme-option[data-theme]');
+            themeOptions.forEach(opt => {
+                opt.classList.toggle('active', opt.dataset.theme === currentTheme);
+            });
 
             const syncToggle = settingsView.querySelector('[name="sync_enabled"], [data-name="sync_enabled"]');
             if (syncToggle && settings.sync) {
@@ -744,6 +748,9 @@ class Bridge {
             };
 
             if (volInput) {
+                volInput.addEventListener('input', (e) => {
+                    if (volBadge) volBadge.textContent = `${e.target.value}%`;
+                });
                 volInput.addEventListener('change', async (e) => {
                     if (this.currentSettings && this.currentSettings.audio) {
                         this.currentSettings.audio.volume = parseFloat(e.target.value) / 100;
@@ -770,15 +777,17 @@ class Bridge {
                 });
             }
 
-            if (themeSelect) {
-                themeSelect.addEventListener('change', async (e) => {
+            themeOptions.forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const selectedTheme = btn.dataset.theme;
+                    themeOptions.forEach(opt => opt.classList.toggle('active', opt === btn));
                     if (this.currentSettings && this.currentSettings.appearance) {
-                        this.currentSettings.appearance.theme = e.target.value;
-                        this.applyTheme(e.target.value);
+                        this.currentSettings.appearance.theme = selectedTheme;
+                        this.applyTheme(selectedTheme);
                         await saveSettings();
                     }
                 });
-            }
+            });
 
             if (syncToggle) {
                 syncToggle.addEventListener('click', async () => {
@@ -803,6 +812,8 @@ class Bridge {
                     }
                 });
             }
+
+            if (window.lucide) window.lucide.createIcons();
         } catch (err) {
             console.error('Settings load error:', err);
         }

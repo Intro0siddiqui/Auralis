@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "2.0.30"
+version = "2.0.31"
 edition = "2021"
 authors = ["Auralis Team"]
 description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
@@ -74,7 +74,8 @@ libp2p = { version = "0.54", features = ["tcp", "mdns", "noise", "yamux", "gossi
 
 # QR code generation
 qrcode = "0.14"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Image decoding for metadata/artwork & icons
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }
 base64 = "0.22"
 
 # Audio playback
