@@ -87,7 +87,8 @@ impl Database {
                     last_played TEXT,
                     play_count INTEGER NOT NULL DEFAULT 0,
                     is_downloaded INTEGER NOT NULL DEFAULT 0,
-                    source_url TEXT
+                    source_url TEXT,
+                    is_favorite INTEGER NOT NULL DEFAULT 0
                 );
 
                 -- Playlists table
@@ -153,6 +154,11 @@ impl Database {
             .map_err(|e| DatabaseError::MigrationError(e.to_string()))?;
 
         debug!("Database migrations completed");
+        // Ensure is_favorite column exists in case database was already created
+        let _ = connection.execute(
+            "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(())
     }
 

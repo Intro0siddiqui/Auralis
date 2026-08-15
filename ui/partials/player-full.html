@@ -4,7 +4,7 @@
     </button>
 
     <div class="player-full-art">
-        <div class="card-artwork">
+        <div class="card-artwork" id="player-full-art">
             <div class="artwork-placeholder">
                 <i data-lucide="disc-3"></i>
             </div>
@@ -12,40 +12,46 @@
     </div>
 
     <div class="player-full-info">
-        <h2 class="player-full-title">Track Title</h2>
-        <p class="player-full-artist">Artist Name</p>
+        <div style="display: flex; align-items: center; justify-content: center; gap: var(--space-2);">
+            <h2 class="player-full-title" id="player-full-title">Track Title</h2>
+            <button class="track-like" id="player-full-like" aria-label="Like" style="background: none; border: none; cursor: pointer;">
+                <i data-lucide="heart"></i>
+            </button>
+        </div>
+        <p class="player-full-artist" id="player-full-artist">Artist Name</p>
     </div>
 
-    <div class="progress-container player-full-progress">
-        <span class="time-current" id="full-time-current">1:24</span>
-        <div class="progress-track neu-inset">
-            <div class="progress-fill" style="width: 35%;"></div>
+    <div class="progress-container player-full-progress" id="player-full-progress-container">
+        <span class="time-current" id="full-time-current">0:00</span>
+        <div class="progress-track neu-inset" id="player-full-progress">
+            <div class="progress-fill" id="player-full-progress-fill" style="width: 0%;"></div>
+            <div class="progress-handle neu" id="player-full-progress-handle" style="left: 0%;"></div>
         </div>
-        <span class="time-total" id="full-time-total">4:02</span>
+        <span class="time-total" id="full-time-total">0:00</span>
     </div>
 
     <div class="player-full-controls">
-        <button class="neu player-full-btn" aria-label="Shuffle">
+        <button class="neu player-full-btn" id="player-full-shuffle" aria-label="Shuffle">
             <i data-lucide="shuffle"></i>
         </button>
-        <button class="neu player-full-btn" aria-label="Previous">
+        <button class="neu player-full-btn" id="player-full-prev" aria-label="Previous">
             <i data-lucide="skip-back"></i>
         </button>
-        <button class="neu play-btn player-full-play" aria-label="Play">
+        <button class="neu play-btn player-full-play" id="player-full-play" aria-label="Play">
             <i data-lucide="play"></i>
         </button>
-        <button class="neu player-full-btn" aria-label="Next">
+        <button class="neu player-full-btn" id="player-full-next" aria-label="Next">
             <i data-lucide="skip-forward"></i>
         </button>
-        <button class="neu player-full-btn" aria-label="Repeat">
+        <button class="neu player-full-btn" id="player-full-repeat" aria-label="Repeat">
             <i data-lucide="repeat"></i>
         </button>
     </div>
 
     <div class="player-full-volume">
-        <i data-lucide="volume-2"></i>
-        <div class="volume-slider neu-inset">
-            <div class="volume-fill" style="width: 70%;"></div>
+        <i data-lucide="volume-2" id="player-full-volume-icon"></i>
+        <div class="volume-slider neu-inset" id="player-full-volume">
+            <div class="volume-fill" id="player-full-volume-fill" style="width: 70%;"></div>
         </div>
     </div>
 </div>

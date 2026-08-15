@@ -77,4 +77,11 @@ pub trait TrackRepository: Send + Sync {
         &self,
         limit: u32,
     ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Set favorite status for a track
+    async fn set_favorite(
+        &self,
+        id: &str,
+        is_favorite: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }

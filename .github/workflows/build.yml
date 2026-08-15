@@ -213,7 +213,7 @@ jobs:
       - name: Bundle C++ runtime (libc++_shared.so)
         run: |
           NDK_SYSROOT="$ANDROID_HOME/ndk/25.2.9519653/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
-          for spec in "aarch64-linux-android:arm64-v8a" "arm-linux-androideabi:armeabi-v7a" "i686-linux-android:x86" "x86_64-linux-android:x86_64"; do
+          for spec in "aarch64-linux-android:arm64-v8a"; do
             lib="${spec%%:*}"
             abi="${spec##*:}"
             src="$NDK_SYSROOT/$lib/libc++_shared.so"
@@ -238,7 +238,7 @@ jobs:
             -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
 
       - name: Build APK
-        run: cargo tauri android build --apk
+        run: cargo tauri android build --apk --target aarch64-linux-android
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}

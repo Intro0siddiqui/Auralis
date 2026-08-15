@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "2.0.26"
+version = "2.0.27"
 edition = "2021"
 authors = ["Auralis Team"]
 description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
@@ -28,7 +28,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # Core async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "time"] }
 futures = "0.3"
 async-trait = "0.1"
 
@@ -74,7 +74,7 @@ libp2p = { version = "0.54", features = ["tcp", "mdns", "noise", "yamux", "gossi
 
 # QR code generation
 qrcode = "0.14"
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 
 # Audio playback
@@ -82,7 +82,7 @@ base64 = "0.22"
 # rodio's symphonia backend ("symphonia-aac"). OPUS files are not decodable by
 # this stack (symphonia 0.5 has no opus codec); they are rejected with a clear
 # error in the player (see player.rs:UnsupportedFormat).
-rodio = { version = "0.17", features = ["symphonia-aac"] }
+rodio = { version = "0.17", default-features = false, features = ["symphonia-aac", "symphonia-mp3", "symphonia-flac", "symphonia-wav"] }
 
 # Audio metadata
 lofty = "0.21"
@@ -103,9 +103,11 @@ ndk-context = "0.1"
 [profile.release]
 panic = "abort"
 codegen-units = 1
-lto = true
+lto = "fat"
 opt-level = "z"
 strip = true
+overflow-checks = false
+debug = false
 
 [profile.dev]
 incremental = true

@@ -378,6 +378,22 @@ impl TrackRepository for SqliteTrackRepository {
             .collect();
         Ok(tracks)
     }
+
+    async fn set_favorite(
+        &self,
+        id: &str,
+        is_favorite: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        conn.execute(
+            "UPDATE tracks SET is_favorite = ? WHERE id = ?",
+            params![is_favorite as i32, id],
+        )?;
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -876,4 +892,36 @@ pub fn parse_datetime(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_track_repository_crud() {
+        let db_path = std::env::temp_dir().join(format!("test_auralis_repo_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let repo = SqliteTrackRepository::new(db_arc);
+
+        let track = Track::new(
+            "Test Favorite Track".to_string(),
+            "/path/to/test.mp3".to_string(),
+            200,
+            AudioFormat::Mp3,
+        );
+        repo.insert(&track).await.unwrap();
+
+        let track_id_str = track.id.to_string();
+        repo.set_favorite(&track_id_str, true).await.unwrap();
+
+        let found = repo.find_by_id(track.id).await.unwrap().unwrap();
+        assert_eq!(found.title, "Test Favorite Track");
+
+        repo.set_favorite(&track_id_str, false).await.unwrap();
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 }

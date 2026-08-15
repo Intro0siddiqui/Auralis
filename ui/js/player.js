@@ -19,6 +19,7 @@ class PlayerController {
         this.bindProgress();
         this.bindVolume();
         this.bindKeyboard();
+        this.bindFullScreenPlayerListeners();
 
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.on('playback:state', (state) => {
@@ -30,12 +31,11 @@ class PlayerController {
                 this.currentTrack = track;
                 this.duration = track.duration_secs || 0;
                 this.progress = 0;
-                this.isLiked = false;
-                if (this.likeBtn) {
-                    this.likeBtn.classList.remove('liked');
-                }
+                this.isLiked = Boolean(track.is_favorite);
+                this.updateLikeUI();
                 this.updateProgressUI();
                 this.updatePlayButton();
+                this.updateFullScreenMetadata();
                 if (this.queuePanel && this.queuePanel.classList.contains('open')) {
                     this.renderQueuePanel();
                 }
@@ -158,6 +158,166 @@ class PlayerController {
         this.volumeSlider.addEventListener('touchend', () => { isDragging = false; });
     }
 
+    bindFullScreenPlayerListeners() {
+        const observer = new MutationObserver(() => {
+            this.wireFullScreenElements();
+        });
+
+        const overlayRoot = document.getElementById('overlay-root');
+        if (overlayRoot) {
+            observer.observe(overlayRoot, { childList: true, subtree: true });
+        }
+        document.body.addEventListener('htmx:afterSwap', () => {
+            this.wireFullScreenElements();
+        });
+        this.wireFullScreenElements();
+    }
+
+    wireFullScreenElements() {
+        const fullPlayer = document.getElementById('player-full');
+        if (!fullPlayer || fullPlayer.dataset.wired) return;
+        fullPlayer.dataset.wired = 'true';
+
+        this.updateFullScreenMetadata();
+        this.updatePlayButton();
+        this.updateProgressUI();
+        this.updateVolumeUI();
+        this.updateLikeUI();
+        this.updateShuffleRepeatUI();
+
+        // 1. Play / Pause
+        const fullPlay = document.getElementById('player-full-play');
+        if (fullPlay) {
+            fullPlay.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.togglePlay();
+            });
+        }
+
+        // 2. Previous / Next
+        const fullPrev = document.getElementById('player-full-prev');
+        if (fullPrev) {
+            fullPrev.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.previous();
+            });
+        }
+        const fullNext = document.getElementById('player-full-next');
+        if (fullNext) {
+            fullNext.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.next();
+            });
+        }
+
+        // 3. Shuffle / Repeat
+        const fullShuffle = document.getElementById('player-full-shuffle');
+        if (fullShuffle) {
+            fullShuffle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.toggleShuffle();
+            });
+        }
+        const fullRepeat = document.getElementById('player-full-repeat');
+        if (fullRepeat) {
+            fullRepeat.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.cycleRepeat();
+            });
+        }
+
+        // 4. Like / Favorite
+        const fullLike = document.getElementById('player-full-like');
+        if (fullLike) {
+            fullLike.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.toggleLike();
+            });
+        }
+
+        // 5. Progress Seek
+        const fullProgress = document.getElementById('player-full-progress');
+        if (fullProgress) {
+            let isSeeking = false;
+            const getPercent = (e) => {
+                const rect = fullProgress.getBoundingClientRect();
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            };
+
+            const startSeek = (e) => {
+                isSeeking = true;
+                this.seekToPercent(getPercent(e));
+            };
+            const moveSeek = (e) => {
+                if (isSeeking) this.seekToPercent(getPercent(e));
+            };
+            const endSeek = () => {
+                isSeeking = false;
+            };
+
+            fullProgress.addEventListener('mousedown', startSeek);
+            document.addEventListener('mousemove', moveSeek);
+            document.addEventListener('mouseup', endSeek);
+
+            fullProgress.addEventListener('touchstart', startSeek, { passive: true });
+            fullProgress.addEventListener('touchmove', moveSeek, { passive: true });
+            fullProgress.addEventListener('touchend', endSeek);
+        }
+
+        // 6. Volume Slider
+        const fullVolume = document.getElementById('player-full-volume');
+        if (fullVolume) {
+            let isDragging = false;
+            const getPercent = (e) => {
+                const rect = fullVolume.getBoundingClientRect();
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            };
+
+            const setVol = (e) => {
+                this.setVolumeLevel(getPercent(e));
+            };
+
+            fullVolume.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                setVol(e);
+            });
+            document.addEventListener('mousemove', (e) => { if (isDragging) setVol(e); });
+            document.addEventListener('mouseup', () => { isDragging = false; });
+
+            fullVolume.addEventListener('touchstart', (e) => {
+                isDragging = true;
+                setVol(e);
+            }, { passive: true });
+            fullVolume.addEventListener('touchmove', (e) => { if (isDragging) setVol(e); }, { passive: true });
+            fullVolume.addEventListener('touchend', () => { isDragging = false; });
+        }
+
+        if (window.lucide) window.lucide.createIcons();
+    }
+
+    updateFullScreenMetadata() {
+        const fullTitle = document.getElementById('player-full-title');
+        const fullArtist = document.getElementById('player-full-artist');
+        const fullArt = document.getElementById('player-full-art');
+
+        if (fullTitle) {
+            fullTitle.textContent = (this.currentTrack && this.currentTrack.title) || 'No Track Selected';
+        }
+        if (fullArtist) {
+            fullArtist.textContent = (this.currentTrack && this.currentTrack.artist) || 'Select a song to play';
+        }
+        if (fullArt && this.currentTrack) {
+            if (this.currentTrack.album_art_path) {
+                fullArt.innerHTML = `<img src="${this.currentTrack.album_art_path}" alt="${this.escapeHtml(this.currentTrack.title)}" style="width: 100%; height: 100%; object-fit: cover;">`;
+            } else {
+                fullArt.innerHTML = `<div class="artwork-placeholder"><i data-lucide="disc-3"></i></div>`;
+                if (window.lucide) window.lucide.createIcons();
+            }
+        }
+    }
+
     bindKeyboard() {
         document.addEventListener('keydown', (e) => {
             if (e.target.matches('input, textarea, select, [contenteditable="true"]')) return;
@@ -177,13 +337,11 @@ class PlayerController {
                     break;
                 case 'ArrowUp':
                     e.preventDefault();
-                    this.volume = Math.min(1, this.volume + 0.05);
-                    this.updateVolumeUI();
+                    this.setVolumeLevel(Math.min(1, this.volume + 0.05));
                     break;
                 case 'ArrowDown':
                     e.preventDefault();
-                    this.volume = Math.max(0, this.volume - 0.05);
-                    this.updateVolumeUI();
+                    this.setVolumeLevel(Math.max(0, this.volume - 0.05));
                     break;
                 case 'KeyS':
                     this.toggleShuffle();
@@ -275,9 +433,7 @@ class PlayerController {
 
     toggleShuffle() {
         this.shuffle = !this.shuffle;
-        if (this.shuffleBtn) {
-            this.shuffleBtn.classList.toggle('active', this.shuffle);
-        }
+        this.updateShuffleRepeatUI();
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('set_shuffle', { enabled: this.shuffle });
         }
@@ -287,45 +443,144 @@ class PlayerController {
         const modes = ['off', 'all', 'one'];
         const idx = modes.indexOf(this.repeatMode);
         this.repeatMode = modes[(idx + 1) % modes.length];
-        if (this.repeatBtn) {
-            this.repeatBtn.classList.toggle('active', this.repeatMode !== 'off');
-        }
+        this.updateShuffleRepeatUI();
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('set_repeat_mode', { mode: this.repeatMode });
         }
     }
 
-    updatePlayButton() {
-        if (!this.playBtn) return;
-        const icon = this.playBtn.querySelector('i');
-        if (icon) {
-            icon.setAttribute('data-lucide', this.isPlaying ? 'pause' : 'play');
-            if (window.lucide) lucide.createIcons({ icon });
+    updateShuffleRepeatUI() {
+        if (this.shuffleBtn) {
+            this.shuffleBtn.classList.toggle('active', this.shuffle);
         }
+        const fullShuffle = document.getElementById('player-full-shuffle');
+        if (fullShuffle) {
+            fullShuffle.classList.toggle('active', this.shuffle);
+        }
+
+        if (this.repeatBtn) {
+            this.repeatBtn.classList.toggle('active', this.repeatMode !== 'off');
+        }
+        const fullRepeat = document.getElementById('player-full-repeat');
+        if (fullRepeat) {
+            fullRepeat.classList.toggle('active', this.repeatMode !== 'off');
+        }
+    }
+
+    updatePlayButton() {
+        // Player bar button
+        if (this.playBtn) {
+            const icon = this.playBtn.querySelector('i');
+            if (icon) {
+                icon.setAttribute('data-lucide', this.isPlaying ? 'pause' : 'play');
+            }
+        }
+        // Full screen player button
+        const fullPlay = document.getElementById('player-full-play');
+        if (fullPlay) {
+            const icon = fullPlay.querySelector('i');
+            if (icon) {
+                icon.setAttribute('data-lucide', this.isPlaying ? 'pause' : 'play');
+            }
+        }
+        if (window.lucide) window.lucide.createIcons();
     }
 
     updateProgressUI() {
+        const pct = this.duration > 0 ? (this.progress / this.duration) * 100 : 0;
+        const currentStr = this.formatTime(this.progress);
+        const totalStr = this.formatTime(this.duration);
+
+        // Player bar
         if (this.progressFill) {
-            this.progressFill.style.width = `${this.duration > 0 ? (this.progress / this.duration) * 100 : 0}%`;
+            this.progressFill.style.width = `${pct}%`;
         }
         if (this.progressHandle) {
-            this.progressHandle.style.left = `${this.duration > 0 ? (this.progress / this.duration) * 100 : 0}%`;
+            this.progressHandle.style.left = `${pct}%`;
         }
         if (this.timeCurrent) {
-            this.timeCurrent.textContent = this.formatTime(this.progress);
+            this.timeCurrent.textContent = currentStr;
         }
         if (this.timeTotal) {
-            this.timeTotal.textContent = this.formatTime(this.duration);
+            this.timeTotal.textContent = totalStr;
+        }
+
+        // Full screen player
+        const fullFill = document.getElementById('player-full-progress-fill');
+        if (fullFill) {
+            fullFill.style.width = `${pct}%`;
+        }
+        const fullHandle = document.getElementById('player-full-progress-handle');
+        if (fullHandle) {
+            fullHandle.style.left = `${pct}%`;
+        }
+        const fullCurrent = document.getElementById('full-time-current');
+        if (fullCurrent) {
+            fullCurrent.textContent = currentStr;
+        }
+        const fullTotal = document.getElementById('full-time-total');
+        if (fullTotal) {
+            fullTotal.textContent = totalStr;
         }
     }
 
-    toggleLike() {
-        this.isLiked = !this.isLiked;
+    async toggleLike() {
+        if (!this.currentTrack) {
+            this.isLiked = !this.isLiked;
+            this.updateLikeUI();
+            return;
+        }
+
+        const newFavoriteState = !this.isLiked;
+        this.isLiked = newFavoriteState;
+        this.currentTrack.is_favorite = newFavoriteState;
+        this.updateLikeUI();
+
+        if (window.Auralis && window.Auralis.bridge) {
+            try {
+                await window.Auralis.bridge.invoke('set_track_favorite', {
+                    id: this.currentTrack.id,
+                    favorite: newFavoriteState
+                });
+                window.Auralis.bridge.showToast(
+                    newFavoriteState ? 'Added to Liked Songs' : 'Removed from Liked Songs',
+                    'info'
+                );
+                // Also update any matching track row heart icon in the UI
+                const rowHearts = document.querySelectorAll(`[data-track-id="${this.currentTrack.id}"] .track-row-actions .btn:nth-child(2)`);
+                rowHearts.forEach(btn => {
+                    btn.classList.toggle('liked', newFavoriteState);
+                    if (newFavoriteState) btn.style.color = 'var(--like)';
+                    else btn.style.color = '';
+                });
+            } catch (err) {
+                console.error('Failed to set favorite:', err);
+                // Rollback on error
+                this.isLiked = !newFavoriteState;
+                this.currentTrack.is_favorite = !newFavoriteState;
+                this.updateLikeUI();
+                window.Auralis.bridge.showToast(`Failed to update favorite: ${err}`, 'error');
+            }
+        }
+    }
+
+    updateLikeUI() {
         if (this.likeBtn) {
             this.likeBtn.classList.toggle('liked', this.isLiked);
+            if (this.isLiked) {
+                this.likeBtn.style.color = 'var(--like)';
+            } else {
+                this.likeBtn.style.color = '';
+            }
         }
-        if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.showToast(this.isLiked ? 'Added to Liked Songs' : 'Removed from Liked Songs', 'info');
+        const fullLike = document.getElementById('player-full-like');
+        if (fullLike) {
+            fullLike.classList.toggle('liked', this.isLiked);
+            if (this.isLiked) {
+                fullLike.style.color = 'var(--like)';
+            } else {
+                fullLike.style.color = '';
+            }
         }
     }
 
@@ -456,19 +711,30 @@ class PlayerController {
     }
 
     updateVolumeUI() {
+        const pct = `${this.volume * 100}%`;
         if (this.volumeFill) {
-            this.volumeFill.style.width = `${this.volume * 100}%`;
+            this.volumeFill.style.width = pct;
         }
+        const fullVolFill = document.getElementById('player-full-volume-fill');
+        if (fullVolFill) {
+            fullVolFill.style.width = pct;
+        }
+
+        let iconName = 'volume-2';
+        if (this.volume === 0) iconName = 'volume-x';
+        else if (this.volume < 0.5) iconName = 'volume-1';
+
         if (this.volumeBtn) {
             const icon = this.volumeBtn.querySelector('i');
             if (icon) {
-                let iconName = 'volume-2';
-                if (this.volume === 0) iconName = 'volume-x';
-                else if (this.volume < 0.5) iconName = 'volume-1';
                 icon.setAttribute('data-lucide', iconName);
-                if (window.lucide) window.lucide.createIcons();
             }
         }
+        const fullVolIcon = document.getElementById('player-full-volume-icon');
+        if (fullVolIcon) {
+            fullVolIcon.setAttribute('data-lucide', iconName);
+        }
+        if (window.lucide) window.lucide.createIcons();
     }
 
     startTimeTracking() {
@@ -493,6 +759,13 @@ class PlayerController {
         const m = Math.floor(secs / 60);
         const s = Math.floor(secs % 60);
         return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/[&<>"']/g, match => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[match]));
     }
 }
 

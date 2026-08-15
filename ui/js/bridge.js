@@ -157,11 +157,20 @@ class Bridge {
         let successCount = 0;
         for (const file of files) {
             try {
-                const arrayBuffer = await file.arrayBuffer();
-                const uint8Array = new Uint8Array(arrayBuffer);
+                const base64Data = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        const result = String(reader.result || '');
+                        const commaIdx = result.indexOf(',');
+                        resolve(commaIdx !== -1 ? result.substring(commaIdx + 1) : result);
+                    };
+                    reader.onerror = (e) => reject(e);
+                    reader.readAsDataURL(file);
+                });
+
                 const result = await this.invoke('import_audio_file', {
                     name: file.name,
-                    data: Array.from(uint8Array)
+                    data_base64: base64Data
                 });
                 if (result) successCount++;
             } catch (err) {
@@ -760,7 +769,9 @@ class Bridge {
     }
 
     renderTrackRows(container, tracks) {
-        container.innerHTML = tracks.map(track => `
+        container.innerHTML = tracks.map(track => {
+            const isFav = Boolean(track.is_favorite);
+            return `
             <div class="track-row neu-glass" data-track-id="${track.id}" onclick="window.Auralis.bridge.playTrack('${track.id}')" style="cursor: pointer; margin-bottom: var(--space-2); border-radius: var(--radius-md);">
                 <div class="track-row-artwork">
                     ${track.album_art_path ? `<img src="${track.album_art_path}" alt="${this.escapeHtml(track.title)}">` : `<i data-lucide="music"></i>`}
@@ -774,14 +785,50 @@ class Bridge {
                     <button class="btn btn-ghost btn-icon" title="Play" onclick="window.Auralis.bridge.playTrack('${track.id}')">
                         <i data-lucide="play"></i>
                     </button>
-                    <button class="btn btn-ghost btn-icon" title="Like">
+                    <button class="btn btn-ghost btn-icon ${isFav ? 'liked' : ''}" style="${isFav ? 'color: var(--like);' : ''}" title="Like" onclick="window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)">
                         <i data-lucide="heart"></i>
                     </button>
                 </div>
             </div>
-        `).join('');
+        `;
+        }).join('');
 
         if (window.lucide) window.lucide.createIcons();
+    }
+
+    async toggleTrackFavorite(trackId, buttonEl) {
+        const track = this.tracks.find(t => t.id === trackId);
+        const currentFav = track ? Boolean(track.is_favorite) : (buttonEl && buttonEl.classList.contains('liked'));
+        const nextFav = !currentFav;
+
+        if (track) {
+            track.is_favorite = nextFav;
+        }
+
+        if (buttonEl) {
+            buttonEl.classList.toggle('liked', nextFav);
+            buttonEl.style.color = nextFav ? 'var(--like)' : '';
+        }
+
+        // If this track is currently playing in PlayerController, update player controller state too
+        if (window.Auralis && window.Auralis.player && window.Auralis.player.currentTrack && window.Auralis.player.currentTrack.id === trackId) {
+            window.Auralis.player.isLiked = nextFav;
+            window.Auralis.player.currentTrack.is_favorite = nextFav;
+            window.Auralis.player.updateLikeUI();
+        }
+
+        try {
+            await this.invoke('set_track_favorite', { id: trackId, favorite: nextFav });
+            this.showToast(nextFav ? 'Added to Liked Songs' : 'Removed from Liked Songs', 'info');
+        } catch (err) {
+            console.error('Failed to update track favorite:', err);
+            if (track) track.is_favorite = currentFav;
+            if (buttonEl) {
+                buttonEl.classList.toggle('liked', currentFav);
+                buttonEl.style.color = currentFav ? 'var(--like)' : '';
+            }
+            this.showToast(`Failed to update favorite: ${err}`, 'error');
+        }
     }
 
     updateDownloadProgressUI(progress) {

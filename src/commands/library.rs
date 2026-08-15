@@ -197,14 +197,26 @@ pub async fn scan_library_paths(
     Ok(summary)
 }
 
-/// Import an audio file directly from binary payload (bypasses Android 14/15/16 Scoped Storage restrictions)
+/// Import an audio file directly from binary or base64 payload (bypasses Android 14/15/16 Scoped Storage restrictions)
 #[tauri::command]
 pub async fn import_audio_file(
     app: tauri::AppHandle,
     db: State<'_, Database>,
     name: String,
-    data: Vec<u8>,
+    data: Option<Vec<u8>>,
+    data_base64: Option<String>,
 ) -> Result<Track, String> {
+    let bytes = match (data, data_base64) {
+        (Some(b), _) => b,
+        (_, Some(b64)) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|e| format!("Invalid base64 payload: {e}"))?
+        }
+        (None, None) => return Err("No audio data provided".to_string()),
+    };
+
     let app_dir = app
         .path()
         .app_data_dir()
@@ -214,7 +226,7 @@ pub async fn import_audio_file(
         .map_err(|e| format!("Failed to create music directory: {e}"))?;
 
     let file_path = music_dir.join(&name);
-    std::fs::write(&file_path, &data).map_err(|e| format!("Failed to write audio file: {e}"))?;
+    std::fs::write(&file_path, &bytes).map_err(|e| format!("Failed to write audio file: {e}"))?;
 
     let repo = track_repo(&db);
     let mut track = match crate::infrastructure::filesystem::MetadataExtractor::extract(&file_path)
@@ -245,4 +257,21 @@ pub async fn import_audio_file(
 
     let _ = app.emit("library:track_imported", &track);
     Ok(track)
+}
+
+/// Set favorite status for a track.
+#[tauri::command]
+pub async fn set_track_favorite(
+    db: State<'_, Database>,
+    id: String,
+    favorite: bool,
+) -> Result<(), String> {
+    let repo = track_repo(&db);
+    repo.set_favorite(&id, favorite).await.map_err(|e| {
+        tracing::error!(error = %e, id = %id, "Failed to set track favorite");
+        format!("Failed to set favorite: {e}")
+    })?;
+
+    tracing::info!(id = %id, favorite = favorite, "Track favorite status updated");
+    Ok(())
 }

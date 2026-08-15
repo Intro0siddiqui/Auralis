@@ -124,6 +124,7 @@ impl AuralisApp {
                 commands::library::delete_tracks,
                 commands::library::scan_library_paths,
                 commands::library::import_audio_file,
+                commands::library::set_track_favorite,
                 // Playback commands
                 commands::playback::play,
                 commands::playback::pause,
