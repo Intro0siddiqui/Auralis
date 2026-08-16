@@ -4,7 +4,7 @@
   "version": "2.0.33",
   "identifier": "com.auralis.v2",
   "build": {
-    "frontendDist": "ui",
+    "frontendDist": "dist/ui",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "",
     "beforeBuildCommand": ""
