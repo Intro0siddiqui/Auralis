@@ -89,13 +89,98 @@ impl AndroidScanner {
             track.title = name.to_string();
         }
 
-        track_repo
-            .insert(&track)
+        let path_str = file_path.to_string_lossy().to_string();
+        let existing = track_repo
+            .find_by_path(&path_str)
             .await
             .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
 
-        info!(id = %track.id, title = %track.title, "Ingested audio buffer into library");
-        Ok(track)
+        if let Some(existing_track) = existing {
+            let mut updated_track = track;
+            updated_track.id = existing_track.id;
+            updated_track.date_added = existing_track.date_added;
+            updated_track.last_played = existing_track.last_played;
+            updated_track.play_count = existing_track.play_count;
+            if updated_track.album_art_path.is_none() {
+                updated_track.album_art_path = existing_track.album_art_path;
+            }
+            track_repo
+                .update(&updated_track)
+                .await
+                .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+
+            info!(id = %updated_track.id, title = %updated_track.title, "Updated existing audio buffer track in library");
+            Ok(updated_track)
+        } else {
+            track_repo
+                .insert(&track)
+                .await
+                .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+
+            info!(id = %track.id, title = %track.title, "Ingested audio buffer into library");
+            Ok(track)
+        }
+    }
+
+    /// Process single sandboxed audio file and update/insert in repository
+    async fn process_file(
+        &self,
+        path: &Path,
+        track_repo: &Arc<dyn TrackRepository>,
+    ) -> Result<crate::infrastructure::filesystem::scanner::ScanResult, ScannerError> {
+        let path_str = path.to_string_lossy().to_string();
+
+        let existing = track_repo
+            .find_by_path(&path_str)
+            .await
+            .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+
+        let mut track = match MetadataExtractor::extract(path) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(file = %path_str, error = %e, "Metadata extraction failed; using fallback");
+                let format = detect_format(path).unwrap_or(AudioFormat::Mp3);
+                let file_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                Track::new(file_name, path_str.clone(), 0, format)
+            }
+        };
+
+        if track.title.trim().is_empty() || track.title == "Unknown" {
+            track.title = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+        }
+
+        if let Some(existing_track) = existing {
+            let mut updated_track = track;
+            updated_track.id = existing_track.id;
+            updated_track.date_added = existing_track.date_added;
+            updated_track.last_played = existing_track.last_played;
+            updated_track.play_count = existing_track.play_count;
+            if updated_track.album_art_path.is_none() {
+                updated_track.album_art_path = existing_track.album_art_path;
+            }
+
+            track_repo
+                .update(&updated_track)
+                .await
+                .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+
+            debug!(path = %path_str, id = %updated_track.id, "Track updated");
+            Ok(crate::infrastructure::filesystem::scanner::ScanResult::Updated)
+        } else {
+            track_repo
+                .insert(&track)
+                .await
+                .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+
+            debug!(path = %path_str, id = %track.id, "Track added");
+            Ok(crate::infrastructure::filesystem::scanner::ScanResult::Added)
+        }
     }
 
     /// Recursively scan sandboxed app-internal directories (`app_data_dir/music`, `app_data_dir/downloads`)
@@ -150,8 +235,9 @@ impl AndroidScanner {
                     if entry_path.is_dir() {
                         dirs_to_visit.push(entry_path);
                     } else if entry_path.is_file() && is_audio_file(&entry_path) {
-                        found_files.insert(entry_path.clone());
-                        all_audio_files.push(entry_path);
+                        if found_files.insert(entry_path.clone()) {
+                            all_audio_files.push(entry_path);
+                        }
                     }
                 }
             }
@@ -162,29 +248,16 @@ impl AndroidScanner {
         for (idx, file_path) in all_audio_files.into_iter().enumerate() {
             debug!(path = %file_path.display(), "Processing sandboxed audio file");
 
-            match MetadataExtractor::extract(&file_path) {
-                Ok(mut track) => {
-                    let file_name = file_path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "Unknown".to_string());
-
-                    if track.title.trim().is_empty() || track.title == "Unknown" {
-                        track.title = file_name;
-                    }
-
-                    match track_repo.insert(&track).await {
-                        Ok(()) => summary.tracks_added += 1,
-                        Err(e) => {
-                            error!(path = %file_path.display(), error = %e, "Failed to save track to DB");
-                            summary
-                                .errors
-                                .push(format!("{}: {}", file_path.display(), e));
-                        }
-                    }
+            match self.process_file(&file_path, &track_repo).await {
+                Ok(crate::infrastructure::filesystem::scanner::ScanResult::Added) => {
+                    summary.tracks_added += 1
                 }
+                Ok(crate::infrastructure::filesystem::scanner::ScanResult::Updated) => {
+                    summary.tracks_updated += 1
+                }
+                Ok(crate::infrastructure::filesystem::scanner::ScanResult::Skipped) => {}
                 Err(e) => {
-                    error!(path = %file_path.display(), error = %e, "Failed to extract metadata");
+                    error!(path = %file_path.display(), error = %e, "Failed to process audio file");
                     summary
                         .errors
                         .push(format!("{}: {}", file_path.display(), e));

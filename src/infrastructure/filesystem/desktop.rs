@@ -177,8 +177,9 @@ impl DesktopScanner {
             match self.scan(path).await {
                 Ok(audio_files) => {
                     for file_path in audio_files {
-                        found_files.insert(file_path.clone());
-                        all_audio_files.push(file_path);
+                        if found_files.insert(file_path.clone()) {
+                            all_audio_files.push(file_path);
+                        }
                     }
                 }
                 Err(e) => {

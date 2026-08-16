@@ -6,7 +6,6 @@
 use crate::domain::models::{ScanSummary, Track, TrackFilter, TrackMetadataUpdate};
 use crate::domain::repositories::TrackRepository;
 use crate::infrastructure::database::Database;
-use crate::infrastructure::filesystem::scanner::DirectoryScanner;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
@@ -136,110 +135,184 @@ pub async fn scan_library_paths(
     db: State<'_, Database>,
     paths: Option<Vec<String>>,
 ) -> Result<ScanSummary, String> {
-    let scanner = DirectoryScanner::default_audio();
-
-    let scan_paths: Vec<std::path::PathBuf> = match paths {
-        Some(p) => p.into_iter().map(std::path::PathBuf::from).collect(),
-        None => {
-            let mut default_paths = Vec::new();
-            if let Some(music) = dirs::audio_dir() {
-                if music.exists() {
-                    default_paths.push(music);
-                }
-            }
-            if let Some(download) = dirs::download_dir() {
-                if download.exists() {
-                    default_paths.push(download);
-                }
-            }
-
-            // Always include internal app sandboxed music and downloads directories
-            if let Ok(app_dir) = app.path().app_data_dir() {
-                let music_dir = app_dir.join("music");
-                if music_dir.exists() {
-                    default_paths.push(music_dir);
-                }
-                let dl_dir = app_dir.join("downloads");
-                if dl_dir.exists() {
-                    default_paths.push(dl_dir);
-                }
-            }
-
-            if default_paths.is_empty() {
-                default_paths.push(std::path::PathBuf::from("."));
-            }
-            default_paths
-        }
-    };
-
     let repo = track_repo(&db);
-
     let app_handle = app.clone();
     let app_log_handle = app.clone();
 
-    let _ = app.emit(
-        "library:scan_log",
-        format!(
-            "🚀 Starting library scan across {} target paths",
-            scan_paths.len()
-        ),
-    );
-    for p in &scan_paths {
+    #[cfg(target_os = "android")]
+    {
+        let scan_paths: Vec<std::path::PathBuf> = match paths {
+            Some(p) => p.into_iter().map(std::path::PathBuf::from).collect(),
+            None => {
+                let mut default_paths = Vec::new();
+                if let Ok(app_dir) = app.path().app_data_dir() {
+                    let music_dir = app_dir.join("music");
+                    if music_dir.exists() {
+                        default_paths.push(music_dir);
+                    }
+                    let dl_dir = app_dir.join("downloads");
+                    if dl_dir.exists() {
+                        default_paths.push(dl_dir);
+                    }
+                }
+                default_paths
+            }
+        };
+
         let _ = app.emit(
             "library:scan_log",
             format!(
-                "📂 Candidate path: {} (exists: {})",
-                p.display(),
-                p.exists()
+                "🚀 Starting Android sandboxed library scan across {} path(s)",
+                scan_paths.len()
             ),
         );
-    }
-
-    let summary = scanner
-        .scan_library_paths_with_progress(
-            &scan_paths,
-            repo,
-            Some(
-                move |progress: crate::infrastructure::filesystem::scanner::ScanProgress| {
-                    if !progress.current_file.is_empty() {
-                        let _ = app_log_handle.emit(
-                            "library:scan_log",
-                            format!("🎵 Processing: {}", progress.current_file),
-                        );
-                    }
-                    let _ = app_handle.emit("library:scan_progress", &progress);
-                },
-            ),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Scan failed");
+        for p in &scan_paths {
             let _ = app.emit(
                 "library:scan_log",
-                format!("❌ Scan failed with error: {e}"),
+                format!(
+                    "📂 Sandboxed path: {} (exists: {})",
+                    p.display(),
+                    p.exists()
+                ),
             );
-            format!("Scan failed: {e}")
-        })?;
+        }
 
-    for err in &summary.errors {
-        let _ = app.emit("library:scan_log", format!("⚠️ Warning/Error: {err}"));
+        let android_scanner = crate::infrastructure::filesystem::AndroidScanner::new();
+        let summary = android_scanner
+            .scan_sandboxed_dir(
+                &scan_paths,
+                repo,
+                Some(
+                    move |progress: crate::infrastructure::filesystem::scanner::ScanProgress| {
+                        if !progress.current_file.is_empty() {
+                            let _ = app_log_handle.emit(
+                                "library:scan_log",
+                                format!("🎵 Processing: {}", progress.current_file),
+                            );
+                        }
+                        let _ = app_handle.emit("library:scan_progress", &progress);
+                    },
+                ),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Android scan failed");
+                let _ = app.emit("library:scan_log", format!("❌ Scan failed: {e}"));
+                format!("Scan failed: {e}")
+            })?;
+
+        for err in &summary.errors {
+            let _ = app.emit("library:scan_log", format!("⚠️ Error: {err}"));
+        }
+
+        let _ = app.emit(
+            "library:scan_log",
+            format!(
+                "🎉 Scan finished: +{} tracks added, {} updated, {} removed, {} errors",
+                summary.tracks_added,
+                summary.tracks_updated,
+                summary.tracks_removed,
+                summary.errors.len()
+            ),
+        );
+
+        let _ = app.emit("library:scan_complete", &summary);
+        Ok(summary)
     }
 
-    let _ = app.emit(
-        "library:scan_log",
-        format!(
-            "🎉 Scan finished: +{} tracks added, {} updated, {} removed, {} errors",
-            summary.tracks_added,
-            summary.tracks_updated,
-            summary.tracks_removed,
-            summary.errors.len()
-        ),
-    );
+    #[cfg(not(target_os = "android"))]
+    {
+        let scan_paths: Vec<std::path::PathBuf> = match paths {
+            Some(p) => p.into_iter().map(std::path::PathBuf::from).collect(),
+            None => {
+                let mut default_paths = Vec::new();
+                if let Some(music) = dirs::audio_dir() {
+                    if music.exists() {
+                        default_paths.push(music);
+                    }
+                }
+                if let Some(download) = dirs::download_dir() {
+                    if download.exists() {
+                        default_paths.push(download);
+                    }
+                }
+                if let Ok(app_dir) = app.path().app_data_dir() {
+                    let music_dir = app_dir.join("music");
+                    if music_dir.exists() {
+                        default_paths.push(music_dir);
+                    }
+                    let dl_dir = app_dir.join("downloads");
+                    if dl_dir.exists() {
+                        default_paths.push(dl_dir);
+                    }
+                }
+                if default_paths.is_empty() {
+                    default_paths.push(std::path::PathBuf::from("."));
+                }
+                default_paths
+            }
+        };
 
-    // Notify the frontend that the scan finished so it can refresh.
-    let _ = app.emit("library:scan_complete", &summary);
+        let _ = app.emit(
+            "library:scan_log",
+            format!(
+                "🚀 Starting desktop library scan across {} target paths",
+                scan_paths.len()
+            ),
+        );
+        for p in &scan_paths {
+            let _ = app.emit(
+                "library:scan_log",
+                format!(
+                    "📂 Candidate path: {} (exists: {})",
+                    p.display(),
+                    p.exists()
+                ),
+            );
+        }
 
-    Ok(summary)
+        let desktop_scanner = crate::infrastructure::filesystem::DesktopScanner::default_audio();
+        let summary = desktop_scanner
+            .scan_library_paths_with_progress(
+                &scan_paths,
+                repo,
+                Some(
+                    move |progress: crate::infrastructure::filesystem::scanner::ScanProgress| {
+                        if !progress.current_file.is_empty() {
+                            let _ = app_log_handle.emit(
+                                "library:scan_log",
+                                format!("🎵 Processing: {}", progress.current_file),
+                            );
+                        }
+                        let _ = app_handle.emit("library:scan_progress", &progress);
+                    },
+                ),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Desktop scan failed");
+                let _ = app.emit("library:scan_log", format!("❌ Scan failed: {e}"));
+                format!("Scan failed: {e}")
+            })?;
+
+        for err in &summary.errors {
+            let _ = app.emit("library:scan_log", format!("⚠️ Warning/Error: {err}"));
+        }
+
+        let _ = app.emit(
+            "library:scan_log",
+            format!(
+                "🎉 Scan finished: +{} tracks added, {} updated, {} removed, {} errors",
+                summary.tracks_added,
+                summary.tracks_updated,
+                summary.tracks_removed,
+                summary.errors.len()
+            ),
+        );
+
+        let _ = app.emit("library:scan_complete", &summary);
+        Ok(summary)
+    }
 }
 
 /// Import an audio file directly from binary or base64 payload (bypasses Android 14/15/16 Scoped Storage restrictions)
@@ -267,38 +340,13 @@ pub async fn import_audio_file(
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {e}"))?;
     let music_dir = app_dir.join("music");
-    std::fs::create_dir_all(&music_dir)
-        .map_err(|e| format!("Failed to create music directory: {e}"))?;
-
-    let file_path = music_dir.join(&name);
-    std::fs::write(&file_path, &bytes).map_err(|e| format!("Failed to write audio file: {e}"))?;
 
     let repo = track_repo(&db);
-    let mut track = match crate::infrastructure::filesystem::MetadataExtractor::extract(&file_path)
-    {
-        Ok(t) => t,
-        Err(_) => {
-            let format =
-                crate::infrastructure::filesystem::scanner::DirectoryScanner::detect_format(
-                    &file_path,
-                )
-                .unwrap_or(crate::domain::models::AudioFormat::Mp3);
-            Track::new(
-                name.clone(),
-                file_path.to_string_lossy().to_string(),
-                0,
-                format,
-            )
-        }
-    };
-
-    if track.title.is_empty() {
-        track.title = name;
-    }
-
-    repo.insert(&track)
+    let android_scanner = crate::infrastructure::filesystem::AndroidScanner::new();
+    let track = android_scanner
+        .ingest_buffer(&name, &bytes, &music_dir, &repo)
         .await
-        .map_err(|e| format!("Failed to save track to database: {e}"))?;
+        .map_err(|e| format!("Failed to ingest audio track: {e}"))?;
 
     let _ = app.emit("library:track_imported", &track);
     Ok(track)
