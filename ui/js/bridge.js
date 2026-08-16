@@ -363,7 +363,8 @@ class Bridge {
 
                 const result = await this.invoke('import_audio_file', {
                     name: file.name,
-                    data_base64: base64Data
+                    data_base64: base64Data,
+                    dataBase64: base64Data
                 });
                 if (result) {
                     successCount++;
