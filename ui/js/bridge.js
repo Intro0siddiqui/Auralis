@@ -193,8 +193,29 @@ class Bridge {
         }
     }
 
-    triggerAudioImport() {
+    async triggerAudioImport() {
         this.appendScanLog('📥 Opening system audio file picker...');
+        try {
+            this.showToast('Select audio files to import...', 'info');
+            const summary = await this.invoke('pick_audio_files_and_import');
+            if (summary !== undefined && summary !== null) {
+                const added = summary.tracks_added ?? 0;
+                const updated = summary.tracks_updated ?? 0;
+                this.appendScanLog(`🎉 Import complete: ${added} added, ${updated} updated`);
+                this.showToast(`Import complete: ${added} added, ${updated} updated`, 'success');
+                await this.loadLibraryView();
+                this.refreshCurrentView();
+                return;
+            } else if (summary === null && this.tauriAvailable) {
+                this.appendScanLog('ℹ️ Audio picker was cancelled');
+                return;
+            }
+        } catch (err) {
+            this.appendScanLog(`⚠️ Native audio picker notice: ${err}`);
+            console.log('Native audio picker fallback to web input:', err);
+        }
+
+        // Web input fallback if running in generic browser
         const input = document.getElementById('global-audio-import-input') || document.getElementById('audio-import-input');
         if (input) {
             input.click();
@@ -205,39 +226,30 @@ class Bridge {
     }
 
     async triggerFolderScan() {
-        this.appendScanLog('📂 Requesting folder selection...');
-        // 1. Attempt native desktop folder picker (Windows, macOS, Linux)
+        this.appendScanLog('📂 Requesting music storage selection...');
+        // 1. Attempt native folder/multi-file picker via Tauri dialog
         try {
-            this.showToast('Select a music folder to scan...', 'info');
+            this.showToast('Select music folder or files to import...', 'info');
             const summary = await this.invoke('pick_folder_and_scan');
             if (summary !== undefined && summary !== null) {
                 const added = summary.tracks_added ?? 0;
                 const updated = summary.tracks_updated ?? 0;
-                this.appendScanLog(`🎉 Native scan complete: ${added} added, ${updated} updated`);
+                this.appendScanLog(`🎉 Scan complete: ${added} added, ${updated} updated`);
                 this.showToast(`Scan complete: ${added} added, ${updated} updated`, 'success');
                 await this.loadLibraryView();
                 this.refreshCurrentView();
                 return;
             } else if (summary === null && this.tauriAvailable) {
-                // User cancelled native dialog
                 this.appendScanLog('ℹ️ Folder picker was cancelled');
                 return;
             }
         } catch (err) {
             this.appendScanLog(`⚠️ Platform notice: ${err}`);
-            console.log('Native folder dialog fallback (Android Scoped Storage):', err);
+            console.log('Native folder dialog fallback:', err);
         }
 
-        // 2. Fallback on Android or Web: Folder selection via SAF or Audio Picker
-        const folderInput = document.getElementById('global-folder-scan-input') || document.getElementById('folder-scan-input');
-        if (folderInput && typeof folderInput.webkitdirectory !== 'undefined') {
-            this.appendScanLog('📱 Opening SAF directory picker...');
-            folderInput.click();
-        } else {
-            // Android 11-16: Scoped storage restricts webkitdirectory, fallback directly to audio file picker
-            this.appendScanLog('📱 Android Scoped Storage: Launching multi-file audio picker...');
-            this.triggerAudioImport();
-        }
+        // 2. Fallback to audio picker
+        await this.triggerAudioImport();
     }
 
     async handleFolderScan(input) {
