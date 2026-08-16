@@ -12,7 +12,7 @@ use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::io::SeekFrom;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -37,6 +37,8 @@ pub struct StreamDownload {
     pub ext: String,
     /// Known total size in bytes, if available up-front.
     pub total_bytes: Option<u64>,
+    /// Optional thumbnail/cover URL, fetched and saved as `<audio>.jpg`.
+    pub thumbnail: Option<String>,
 }
 
 /// Per-job bookkeeping required to (re)start and resume a download.
@@ -44,6 +46,7 @@ pub struct StreamDownload {
 struct DownloadJob {
     stream_url: String,
     output_path: PathBuf,
+    thumbnail: Option<String>,
 }
 
 /// Streams a resolved audio URL to disk with progress tracking.
@@ -144,6 +147,7 @@ impl Downloader {
                 DownloadJob {
                     stream_url: req.stream_url.clone(),
                     output_path: path,
+                    thumbnail: req.thumbnail,
                 },
             );
         }
@@ -298,8 +302,33 @@ impl Downloader {
             }
         }
 
+        if let Some(thumb) = &job.thumbnail {
+            Self::save_thumbnail(&client, thumb, &job.output_path).await;
+        }
+
         info!(download_id = %id, path = ?job.output_path, "Download complete");
         Ok(())
+    }
+
+    /// Fetch a thumbnail/cover URL and save it as a `<audio>.jpg` sidecar so the
+    /// library scanner can associate it with the downloaded track. Non-fatal.
+    async fn save_thumbnail(client: &reqwest::Client, url: &str, audio_path: &Path) {
+        let cover_path = audio_path.with_extension("jpg");
+        let res = match client
+            .get(url)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => return,
+        };
+        if let Ok(bytes) = res.bytes().await {
+            if let Ok(mut f) = tokio::fs::File::create(&cover_path).await {
+                let _ = f.write_all(&bytes).await;
+                let _ = f.flush().await;
+            }
+        }
     }
 
     /// Pause an in-progress download by aborting its task and truncating the

@@ -3,15 +3,34 @@
         <h2 class="section-title">Download Audio</h2>
     </header>
 
+    <!-- YouTube Search -->
+    <div class="card" style="padding: var(--space-2); margin-bottom: var(--space-4);">
+        <form id="youtube-search-form" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
+            <input type="text" name="q" class="input" placeholder="Search YouTube…"
+                   style="flex: 1; min-width: 200px;">
+            <button type="submit" class="btn btn-secondary">
+                <i data-lucide="search"></i>
+                Search
+            </button>
+        </form>
+        <div id="youtube-search-results" class="track-list" style="display: none; margin-top: var(--space-3);"></div>
+    </div>
+
+    <!-- Paste URL -->
     <div class="card" style="padding: var(--space-2);">
         <form id="download-form" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
             <input type="url" name="url" class="input" placeholder="https://youtube.com/... or https://.../audio.mp3"
                    style="flex: 1; min-width: 200px;" required>
-            <select name="format" class="input">
-                <option value="mp3">MP3</option>
-                <option value="flac">FLAC</option>
-                <option value="m4a">M4A</option>
-                <option value="wav">WAV</option>
+            <select name="container" class="input" title="Container">
+                <option value="auto">Auto (best playable)</option>
+                <option value="mp4">M4A / AAC</option>
+                <option value="webm">WEBM / Opus</option>
+            </select>
+            <select name="quality" class="input" title="Quality">
+                <option value="best">Best</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
             </select>
             <button type="submit" class="btn btn-primary">
                 <i data-lucide="download"></i>

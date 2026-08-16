@@ -89,6 +89,14 @@ pub struct DownloadSettings {
 
     /// Embed metadata in files
     pub embed_metadata: bool,
+
+    /// YouTube cookie (for age-restricted / geo-restricted videos)
+    #[serde(default)]
+    pub youtube_cookie: Option<String>,
+
+    /// YouTube InnerTube PO token (for bot-locked videos)
+    #[serde(default)]
+    pub youtube_po_token: Option<String>,
 }
 
 impl Default for DownloadSettings {
@@ -100,6 +108,8 @@ impl Default for DownloadSettings {
             max_concurrent: 3,
             embed_artwork: true,
             embed_metadata: true,
+            youtube_cookie: None,
+            youtube_po_token: None,
         }
     }
 }

@@ -408,3 +408,27 @@ pub async fn pick_folder_and_scan(
         Err("Native folder dialog is only available on desktop platforms. Please use Android SAF picker.".to_string())
     }
 }
+
+/// Read a local image file and return it as a `data:` URI so the webview can
+/// render cover art even when the Tauri asset protocol is unavailable.
+#[tauri::command]
+pub async fn media_data_url(path: String) -> Result<String, String> {
+    use base64::Engine;
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
+    let mime = match std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("jpg")
+        .to_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/jpeg",
+    };
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}

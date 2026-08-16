@@ -310,7 +310,11 @@ class PlayerController {
         }
         if (fullArt && this.currentTrack) {
             if (this.currentTrack.album_art_path) {
-                fullArt.innerHTML = `<img src="${this.currentTrack.album_art_path}" alt="${this.escapeHtml(this.currentTrack.title)}" style="width: 100%; height: 100%; object-fit: cover;">`;
+                const src = (window.Auralis && window.Auralis.assetUrl)
+                    ? window.Auralis.assetUrl(this.currentTrack.album_art_path)
+                    : this.currentTrack.album_art_path;
+                const jsonPath = JSON.stringify(this.currentTrack.album_art_path).replace(/</g, '\\u003c');
+                fullArt.innerHTML = `<img src="${src}" alt="${this.escapeHtml(this.currentTrack.title)}" style="width: 100%; height: 100%; object-fit: cover;" onerror="if(!this.dataset.fb){this.dataset.fb='1';window.Auralis.bridge.embedArt(this, ${jsonPath})}">`;
             } else {
                 fullArt.innerHTML = `<div class="artwork-placeholder"><i data-lucide="disc-3"></i></div>`;
                 if (window.lucide) window.lucide.createIcons();

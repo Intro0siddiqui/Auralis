@@ -69,6 +69,7 @@ pub async fn download_audio(
             .clone()
             .unwrap_or_else(|| format.extension().to_string()),
         total_bytes: request.total_bytes,
+        thumbnail: request.thumbnail,
     };
 
     let id = downloader.download(stream).await.map_err(|e| {
@@ -140,6 +141,7 @@ pub async fn download_playlist(
                 .clone()
                 .unwrap_or_else(|| format.extension().to_string()),
             total_bytes: item.total_bytes,
+            thumbnail: item.thumbnail,
         };
 
         match downloader.download(stream).await {

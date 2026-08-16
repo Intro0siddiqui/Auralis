@@ -127,6 +127,7 @@ impl AuralisApp {
                 commands::library::pick_folder_and_scan,
                 commands::library::import_audio_file,
                 commands::library::set_track_favorite,
+                commands::library::media_data_url,
                 // Playback commands
                 commands::playback::play,
                 commands::playback::pause,

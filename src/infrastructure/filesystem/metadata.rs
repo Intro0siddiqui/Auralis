@@ -55,8 +55,24 @@ impl MetadataExtractor {
             track.sample_rate = Some(properties.sample_rate().unwrap_or(0));
         }
 
+        // If the file has no embedded cover, check for a sidecar image
+        // (`<audio>.jpg/.jpeg/.png/.webp`) next to it. This lets downloaded
+        // thumbnails and user-managed cover files show artwork.
+        track.album_art_path = Self::find_sidecar_art(path);
+
         debug!(path = %path.display(), title = %track.title, "Metadata extracted");
         Ok(track)
+    }
+
+    /// Locate a sidecar cover image for an audio file.
+    fn find_sidecar_art(path: &Path) -> Option<String> {
+        for ext in ["jpg", "jpeg", "png", "webp"] {
+            let side = path.with_extension(ext);
+            if side.is_file() {
+                return Some(side.to_string_lossy().to_string());
+            }
+        }
+        None
     }
 
     fn get_title(tag: &dyn lofty::tag::Accessor) -> String {

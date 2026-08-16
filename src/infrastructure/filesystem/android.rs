@@ -234,10 +234,11 @@ impl AndroidScanner {
 
                     if entry_path.is_dir() {
                         dirs_to_visit.push(entry_path);
-                    } else if entry_path.is_file() && is_audio_file(&entry_path) {
-                        if found_files.insert(entry_path.clone()) {
-                            all_audio_files.push(entry_path);
-                        }
+                    } else if entry_path.is_file()
+                        && is_audio_file(&entry_path)
+                        && found_files.insert(entry_path.clone())
+                    {
+                        all_audio_files.push(entry_path);
                     }
                 }
             }

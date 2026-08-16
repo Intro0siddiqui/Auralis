@@ -663,7 +663,7 @@ class Bridge {
                     shelf.innerHTML = page.tracks.slice(0, 6).map(track => `
                         <div class="card album-card neu-glass" onclick="window.Auralis.bridge.playTrack('${track.id}')" style="cursor: pointer;">
                             <div class="card-artwork">
-                                ${track.album_art_path ? `<img src="${track.album_art_path}" alt="${this.escapeHtml(track.title)}">` : `<i data-lucide="disc-3"></i>`}
+                                ${track.album_art_path ? this.artImgTag(track.album_art_path, track.title) : `<i data-lucide="disc-3"></i>`}
                             </div>
                             <div class="card-body">
                                 <div class="card-title">${this.escapeHtml(track.title)}</div>
@@ -729,7 +729,7 @@ class Bridge {
                 grid.innerHTML = Array.from(albumMap.values()).map(album => `
                     <div class="card album-card neu-glass" onclick="window.Auralis.bridge.playTrack('${album.tracks[0].id}')" style="cursor: pointer;">
                         <div class="card-artwork">
-                            ${album.art ? `<img src="${album.art}" alt="${this.escapeHtml(album.name)}">` : `<i data-lucide="disc-3"></i>`}
+                            ${album.art ? this.artImgTag(album.art, album.name) : `<i data-lucide="disc-3"></i>`}
                         </div>
                         <div class="card-body">
                             <div class="card-title">${this.escapeHtml(album.name)}</div>
@@ -1054,63 +1054,157 @@ class Bridge {
         }
     }
 
+    async ensureSettings() {
+        if (this.currentSettings) return this.currentSettings;
+        try {
+            this.currentSettings = await this.invoke('get_settings');
+        } catch (_) {}
+        return this.currentSettings;
+    }
+
+    getDownloadOptions(form) {
+        const containerSelect = form ? form.querySelector('select[name="container"]') : null;
+        const qualitySelect = form ? form.querySelector('select[name="quality"]') : null;
+        const opts = {
+            container: containerSelect ? containerSelect.value : 'auto',
+            quality: qualitySelect ? qualitySelect.value : 'best',
+        };
+        const dl = (this.currentSettings && this.currentSettings.downloads) || {};
+        opts.cookie = dl.youtube_cookie || '';
+        opts.poToken = dl.youtube_po_token || '';
+        return opts;
+    }
+
+    buildDownloadPayload(resolved, format) {
+        return {
+            request: {
+                url: resolved.stream_url,
+                title: resolved.title,
+                platform: resolved.platform,
+                format,
+                ext: resolved.ext,
+                total_bytes: resolved.total_bytes,
+                thumbnail: resolved.thumbnail,
+            },
+        };
+    }
+
+    async downloadResolvedTrack(resolved, format) {
+        if (!resolved || resolved.kind !== 'track') throw new Error('Not a downloadable track');
+        const result = await this.invoke('download_audio', this.buildDownloadPayload(resolved, format));
+        if (result) this.updateDownloadProgressUI(result);
+        return result;
+    }
+
     async loadDownloadView() {
         const form = document.getElementById('download-form');
+        const searchForm = document.getElementById('youtube-search-form');
         if (!form || form.dataset.bound) return;
         form.dataset.bound = 'true';
+
+        await this.ensureSettings();
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             const urlInput = form.querySelector('input[name="url"]');
-            const formatSelect = form.querySelector('select[name="format"]');
             if (!urlInput || !urlInput.value) return;
 
             const url = urlInput.value.trim();
-            const format = formatSelect ? formatSelect.value : 'mp3';
-
             if (!url.startsWith('https://')) {
                 this.showToast('Only secure HTTPS URLs are supported', 'error');
                 return;
             }
-
             if (!window.AuralisYouTube) {
                 this.showToast('YouTube resolver unavailable', 'error');
                 return;
             }
 
+            const opts = this.getDownloadOptions(form);
             this.showToast('Resolving source…', 'info');
             try {
-                const resolved = await window.AuralisYouTube.resolve(url);
-
+                const resolved = await window.AuralisYouTube.resolve(url, opts);
                 if (resolved.kind === 'playlist') {
-                    await this.startPlaylistDownloads(resolved.items, format, urlInput);
+                    await this.startPlaylistDownloads(resolved.items, 'm4a', opts, urlInput);
                     return;
                 }
-
-                const result = await this.invoke('download_audio', {
-                    request: {
-                        url: resolved.stream_url,
-                        title: resolved.title,
-                        platform: resolved.platform,
-                        format,
-                        ext: resolved.ext,
-                        total_bytes: resolved.total_bytes,
-                        thumbnail: resolved.thumbnail,
-                    },
-                });
+                const result = await this.downloadResolvedTrack(resolved, 'm4a');
                 if (result) {
                     this.showToast('Download started!', 'success');
                     urlInput.value = '';
-                    this.updateDownloadProgressUI(result);
                 }
             } catch (err) {
                 console.error(err);
                 this.showToast(`Resolve failed: ${err && err.message ? err.message : err}`, 'error');
             }
         });
+
+        if (searchForm && !searchForm.dataset.bound) {
+            searchForm.dataset.bound = 'true';
+            searchForm.addEventListener('submit', async (ev) => {
+                ev.preventDefault();
+                const q = searchForm.querySelector('input[name="q"]');
+                if (!q || !q.value.trim()) return;
+                await this.performYouTubeSearch(q.value.trim(), this.getDownloadOptions(form || searchForm));
+            });
+        }
     }
 
-    async startPlaylistDownloads(items, format, urlInput) {
+    async performYouTubeSearch(query, opts) {
+        if (!window.AuralisYouTube) {
+            this.showToast('YouTube resolver unavailable', 'error');
+            return;
+        }
+        const resultsEl = document.getElementById('youtube-search-results');
+        if (!resultsEl) return;
+        this.showToast('Searching YouTube…', 'info');
+        try {
+            const results = await window.AuralisYouTube.search(query, opts);
+            resultsEl.style.display = 'block';
+            if (!results || results.length === 0) {
+                resultsEl.innerHTML = `
+                    <div class="empty-state" style="padding: var(--space-4);">
+                        <p style="color: var(--text-3); font-size: var(--text-sm);">No results found for “${this.escapeHtml(query)}”.</p>
+                    </div>`;
+                return;
+            }
+            this._lastSearchResults = results;
+            resultsEl.innerHTML = results.map((r, i) => `
+                <div class="track-row neu-glass" style="cursor: pointer;">
+                    <div class="track-row-info" style="flex: 1; min-width: 0;" onclick="window.Auralis.bridge.downloadSearchResult(${i})">
+                        <div class="track-row-title">${this.escapeHtml(r.title)}</div>
+                        <div class="track-row-subtitle">YouTube${r.channel ? ` • ${this.escapeHtml(r.channel)}` : ''}</div>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); window.Auralis.bridge.downloadSearchResult(${i})">
+                        <i data-lucide="download"></i>
+                    </button>
+                </div>
+            `).join('');
+            if (window.lucide) window.lucide.createIcons();
+        } catch (err) {
+            console.error(err);
+            this.showToast(`Search failed: ${err && err.message ? err.message : err}`, 'error');
+        }
+    }
+
+    async downloadSearchResult(index) {
+        const results = this._lastSearchResults || [];
+        const item = results[index];
+        if (!item) return;
+        const form = document.getElementById('download-form');
+        const opts = this.getDownloadOptions(form);
+        this.showToast('Resolving track…', 'info');
+        try {
+            const resolved = await window.AuralisYouTube.resolve(item.url, opts);
+            if (resolved.kind !== 'track') throw new Error('Not a track');
+            const result = await this.downloadResolvedTrack(resolved, 'm4a');
+            if (result) this.showToast('Download started!', 'success');
+        } catch (err) {
+            console.error(err);
+            this.showToast(`Resolve failed: ${err && err.message ? err.message : err}`, 'error');
+        }
+    }
+
+    async startPlaylistDownloads(items, format, opts, urlInput) {
         if (!items || items.length === 0) {
             this.showToast('Playlist contained no tracks', 'error');
             return;
@@ -1121,23 +1215,10 @@ class Bridge {
         let started = 0;
         for (const item of capped) {
             try {
-                const t = await window.AuralisYouTube.resolve(item.url);
+                const t = await window.AuralisYouTube.resolve(item.url, opts);
                 if (t.kind !== 'track') continue;
-                const result = await this.invoke('download_audio', {
-                    request: {
-                        url: t.stream_url,
-                        title: t.title,
-                        platform: t.platform,
-                        format,
-                        ext: t.ext,
-                        total_bytes: t.total_bytes,
-                        thumbnail: t.thumbnail,
-                    },
-                });
-                if (result) {
-                    this.updateDownloadProgressUI(result);
-                    started++;
-                }
+                const result = await this.downloadResolvedTrack(t, format);
+                if (result) started++;
             } catch (err) {
                 console.error('Playlist item failed:', err);
             }
@@ -1145,7 +1226,7 @@ class Bridge {
 
         if (started > 0) {
             this.showToast(`Started ${started} downloads from playlist`, 'success');
-            urlInput.value = '';
+            if (urlInput) urlInput.value = '';
         } else {
             this.showToast('Could not start any playlist downloads', 'error');
         }
@@ -1256,6 +1337,23 @@ class Bridge {
                 formatSelect.value = String(settings.downloads.default_format).toLowerCase();
             }
 
+            const ytCookieInput = settingsView.querySelector('input[name="youtube_cookie"]');
+            if (ytCookieInput && settings.downloads) {
+                ytCookieInput.value = settings.downloads.youtube_cookie || '';
+            }
+
+            const ytPoTokenInput = settingsView.querySelector('input[name="youtube_po_token"]');
+            if (ytPoTokenInput && settings.downloads) {
+                ytPoTokenInput.value = settings.downloads.youtube_po_token || '';
+            }
+
+            if (window.AuralisYouTube && settings.downloads) {
+                window.AuralisYouTube.setCredentials({
+                    cookie: settings.downloads.youtube_cookie,
+                    po_token: settings.downloads.youtube_po_token,
+                });
+            }
+
             const currentTheme = (settings.appearance && settings.appearance.theme) ? String(settings.appearance.theme).toLowerCase() : 'dark';
             const themeOptions = settingsView.querySelectorAll('.theme-option[data-theme]');
             themeOptions.forEach(opt => {
@@ -1317,6 +1415,24 @@ class Bridge {
                 formatSelect.addEventListener('change', async (e) => {
                     if (this.currentSettings && this.currentSettings.downloads) {
                         this.currentSettings.downloads.default_format = e.target.value;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (ytCookieInput) {
+                ytCookieInput.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.downloads) {
+                        this.currentSettings.downloads.youtube_cookie = e.target.value || null;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (ytPoTokenInput) {
+                ytPoTokenInput.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.downloads) {
+                        this.currentSettings.downloads.youtube_po_token = e.target.value || null;
                         await saveSettings();
                     }
                 });
@@ -1385,7 +1501,7 @@ class Bridge {
             return `
             <div class="track-row neu-glass" data-track-id="${track.id}" onclick="window.Auralis.bridge.playTrack('${track.id}')" style="cursor: pointer; margin-bottom: var(--space-2); border-radius: var(--radius-md);">
                 <div class="track-row-artwork">
-                    ${track.album_art_path ? `<img src="${track.album_art_path}" alt="${this.escapeHtml(track.title)}">` : `<i data-lucide="music"></i>`}
+                    ${track.album_art_path ? this.artImgTag(track.album_art_path, track.title) : `<i data-lucide="music"></i>`}
                 </div>
                 <div class="track-row-info">
                     <div class="track-row-title">${this.escapeHtml(track.title)}</div>
@@ -1485,7 +1601,7 @@ class Bridge {
         if (artist) artist.textContent = track.artist || 'Select a song';
         if (artwork) {
             if (track.album_art_path) {
-                artwork.innerHTML = `<img src="${track.album_art_path}" alt="${this.escapeHtml(track.title)}">`;
+                artwork.innerHTML = this.artImgTag(track.album_art_path, track.title);
             } else {
                 artwork.innerHTML = `<i data-lucide="music"></i>`;
                 if (window.lucide) window.lucide.createIcons();
@@ -1504,6 +1620,41 @@ class Bridge {
         return str.replace(/[&<>"']/g, match => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
         }[match]));
+    }
+
+    assetUrl(path) {
+        if (!path) return '';
+        if (/^(https?:|data:|blob:|asset:)/.test(path)) return path;
+        const internals = window.__TAURI_INTERNALS__;
+        if (internals && typeof internals.convertFileSrc === 'function') {
+            try {
+                return internals.convertFileSrc(path);
+            } catch (_) {}
+        }
+        if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.convertFileSrc === 'function') {
+            try {
+                return window.__TAURI__.core.convertFileSrc(path);
+            } catch (_) {}
+        }
+        return path;
+    }
+
+    async embedArt(imgEl, path) {
+        if (!imgEl || !path) return;
+        try {
+            const dataUri = await this.invoke('media_data_url', { path });
+            if (dataUri) imgEl.src = dataUri;
+        } catch (err) {
+            console.error('Cover art fallback failed:', err);
+        }
+    }
+
+    artImgTag(path, altText) {
+        if (!path) return '';
+        const safeAlt = this.escapeHtml(altText || '');
+        const src = this.assetUrl(path);
+        const jsonPath = JSON.stringify(path).replace(/</g, '\\u003c');
+        return `<img src="${src}" alt="${safeAlt}" onerror="if(!this.dataset.fb){this.dataset.fb='1';window.Auralis.bridge.embedArt(this, ${jsonPath})}">`;
     }
 
     showToast(message, type = 'info') {
@@ -1528,6 +1679,7 @@ class Bridge {
 
 window.Auralis = window.Auralis || {};
 window.Auralis.bridge = new Bridge();
+window.Auralis.assetUrl = (path) => window.Auralis.bridge.assetUrl(path);
 document.addEventListener('DOMContentLoaded', () => {
     window.Auralis.bridge.init();
 });

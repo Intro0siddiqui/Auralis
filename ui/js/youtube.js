@@ -16,7 +16,7 @@
 class YouTubeResolver {
     constructor() {
         this._module = null;
-        this._client = null;
+        this._clients = {};
     }
 
     async _module() {
@@ -26,14 +26,23 @@ class YouTubeResolver {
         return this._module;
     }
 
-    async _client() {
-        if (!this._client) {
-            const mod = await this._module();
-            const YouTube = mod.YouTube || (mod.default && mod.default.YouTube);
-            if (!YouTube) throw new Error('youtube.js failed to expose YouTube');
-            this._client = new YouTube();
+    async _client(opts = {}) {
+        const mod = await this._module();
+        const YouTube = mod.YouTube || (mod.default && mod.default.YouTube);
+        if (!YouTube) throw new Error('youtube.js failed to expose YouTube');
+
+        const key = [opts.cookie || '', opts.poToken || ''].join('|');
+        if (!this._clients[key]) {
+            const cfg = {};
+            if (opts.cookie) cfg.cookie = opts.cookie;
+            if (opts.poToken) cfg.poToken = opts.poToken;
+            try {
+                this._clients[key] = new YouTube(cfg);
+            } catch (_) {
+                this._clients[key] = new YouTube();
+            }
         }
-        return this._client;
+        return this._clients[key];
     }
 
     isDirectAudio(url) {
@@ -83,7 +92,7 @@ class YouTubeResolver {
         return /[?&]list=([^&]+)/.test(url) && !/watch\?/.test(url);
     }
 
-    async resolve(rawUrl) {
+    async resolve(rawUrl, opts = {}) {
         const url = (rawUrl || '').trim();
         if (!url) throw new Error('Empty URL');
 
@@ -100,26 +109,31 @@ class YouTubeResolver {
         }
 
         if (this.isPlaylistUrl(url)) {
-            const items = await this.resolvePlaylist(url);
+            const items = await this.resolvePlaylist(url, opts);
             return { kind: 'playlist', items };
         }
 
-        const client = await this._client();
+        const client = await this._client(opts);
         const info = await client.getInfo(url);
         const bi = info.basic_info || {};
         const sd = info.streaming_data || {};
 
+        const container = opts.container === 'mp4' || opts.container === 'webm' ? opts.container : null;
+        const quality = opts.quality || 'best';
         let fmt = null;
+
         if (typeof sd.chooseFormat === 'function') {
-            // Prefer an mp4 (m4a/aac) audio stream so the downloaded file is
-            // playable by the in-app rodio backend, which has no opus/webm
-            // decoder. Fall back to the best audio stream if mp4 is unavailable.
-            try {
-                fmt = sd.chooseFormat({ type: 'audio', quality: 'best', format: 'mp4' });
-            } catch (_) {}
-            if (!fmt) {
+            // Prefer an mp4 (m4a/aac) stream so downloaded files stay playable
+            // by the in-app rodio backend (no opus/webm decoder). When the user
+            // pins a container, honour it first and fall back to any audio.
+            const attempts = container ? [container, null] : ['mp4', null];
+            for (const c of attempts) {
+                if (fmt) break;
+                const attempt = { type: 'audio', quality };
+                if (c) attempt.format = c;
                 try {
-                    fmt = sd.chooseFormat({ type: 'audio', quality: 'best' });
+                    const cand = sd.chooseFormat(attempt);
+                    if (cand && cand.url) fmt = cand;
                 } catch (_) {}
             }
         }
@@ -148,9 +162,9 @@ class YouTubeResolver {
         };
     }
 
-    async resolvePlaylist(rawUrl) {
+    async resolvePlaylist(rawUrl, opts = {}) {
         const url = (rawUrl || '').trim();
-        const client = await this._client();
+        const client = await this._client(opts);
         const match = url.match(/[?&]list=([^&]+)/);
         if (!match) throw new Error('Not a playlist URL');
         const playlist = await client.getPlaylist(match[1]);
@@ -172,6 +186,28 @@ class YouTubeResolver {
         }
         if (items.length === 0) throw new Error('Playlist contained no videos');
         return items;
+    }
+
+    async search(query, opts = {}) {
+        const q = (query || '').trim();
+        if (!q) return [];
+        const client = await this._client(opts);
+        const res = await client.search(q);
+
+        const raw = res.results || res.contents || [];
+        const out = [];
+        for (const r of raw) {
+            const isVideo = r && (r.type === 'video' || r.type === 'reel');
+            if (!isVideo || !r.id) continue;
+            out.push({
+                id: r.id,
+                title: String(r.title || 'Unknown').trim() || 'Unknown',
+                url: `https://www.youtube.com/watch?v=${r.id}`,
+                channel: (r.author && r.author.name) ? String(r.author.name) : '',
+            });
+            if (out.length >= 10) break;
+        }
+        return out;
     }
 }
 

@@ -17,7 +17,7 @@ pub fn is_supported_audio_extension(ext: &str) -> bool {
     let ext_lower = ext.trim_start_matches('.').to_lowercase();
     matches!(
         ext_lower.as_str(),
-        "mp3" | "flac" | "wav" | "m4a" | "aac" | "ogg" | "oga" | "mp4"
+        "mp3" | "flac" | "wav" | "m4a" | "aac" | "ogg" | "oga" | "mp4" | "webm"
     )
 }
 
