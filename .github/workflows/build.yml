@@ -139,11 +139,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: v0.5.4
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
