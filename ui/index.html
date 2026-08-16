@@ -139,8 +139,8 @@
     <div id="overlay-root"></div>
     
     <!-- Global Audio File & Directory Inputs (Android 16 & Scoped Storage compatible) -->
-    <input type="file" id="global-audio-import-input" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus,.wma" style="position: fixed; left: -9999px; top: -9999px; width: 1px; height: 1px; opacity: 0; pointer-events: none;" onchange="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.handleAudioImport(this)">
-    <input type="file" id="global-folder-scan-input" webkitdirectory directory multiple style="position: fixed; left: -9999px; top: -9999px; width: 1px; height: 1px; opacity: 0; pointer-events: none;" onchange="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.handleFolderScan(this)">
+    <input type="file" id="global-audio-import-input" multiple accept="audio/*" style="position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0.01; clip-path: inset(50%); z-index: -1;" onchange="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.handleAudioImport(this)">
+    <input type="file" id="global-folder-scan-input" webkitdirectory directory multiple style="position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0.01; clip-path: inset(50%); z-index: -1;" onchange="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.handleFolderScan(this)">
     
     <!-- Toast & Diagnostic Notification Container -->
     <div id="toast-container"></div>

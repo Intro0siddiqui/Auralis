@@ -260,37 +260,53 @@ impl Default for SyncSettings {
 }
 
 impl Settings {
-    /// Load settings from disk
-    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let config_path = Self::config_path()?;
-
+    /// Load settings from an explicit configuration file path
+    pub fn load_from_path(
+        config_path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)?;
+            let content = std::fs::read_to_string(config_path)?;
             let settings: Settings = toml::from_str(&content)?;
             Ok(settings)
         } else {
             let settings = Settings::default();
-            settings.save()?;
+            let _ = settings.save_to_path(config_path);
             Ok(settings)
         }
     }
 
-    /// Save settings to disk
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let config_path = Self::config_path()?;
+    /// Save settings to an explicit configuration file path
+    pub fn save_to_path(
+        &self,
+        config_path: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            let _ = std::fs::create_dir_all(parent);
         }
-
         let content = toml::to_string_pretty(self)?;
         std::fs::write(config_path, content)?;
         Ok(())
     }
 
-    /// Get the configuration file path
-    fn config_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let config_dir = dirs::config_dir().ok_or("Failed to get config directory")?;
-        Ok(config_dir.join("auralis").join("settings.toml"))
+    /// Load settings from disk (using default config path with safe fallback)
+    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+        let config_path = Self::config_path();
+        Self::load_from_path(&config_path)
+    }
+
+    /// Save settings to disk (using default config path with safe fallback)
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let config_path = Self::config_path();
+        self.save_to_path(&config_path)
+    }
+
+    /// Get the configuration file path with safe fallbacks
+    fn config_path() -> PathBuf {
+        if let Some(config_dir) = dirs::config_dir() {
+            config_dir.join("auralis").join("settings.toml")
+        } else {
+            PathBuf::from("settings.toml")
+        }
     }
 }
 

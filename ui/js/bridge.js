@@ -195,6 +195,12 @@ class Bridge {
 
     async triggerAudioImport() {
         this.appendScanLog('📥 Opening system audio file picker...');
+        const input = document.getElementById('global-audio-import-input') || document.getElementById('audio-import-input');
+        if (input) {
+            input.click();
+            return;
+        }
+
         try {
             this.showToast('Select audio files to import...', 'info');
             const summary = await this.invoke('pick_audio_files_and_import');
@@ -205,31 +211,18 @@ class Bridge {
                 this.showToast(`Import complete: ${added} added, ${updated} updated`, 'success');
                 await this.loadLibraryView();
                 this.refreshCurrentView();
-                return;
             } else if (summary === null && this.tauriAvailable) {
                 this.appendScanLog('ℹ️ Audio picker was cancelled');
-                return;
             }
         } catch (err) {
             this.appendScanLog(`⚠️ Native audio picker notice: ${err}`);
-            console.log('Native audio picker fallback to web input:', err);
-        }
-
-        // Web input fallback if running in generic browser
-        const input = document.getElementById('global-audio-import-input') || document.getElementById('audio-import-input');
-        if (input) {
-            input.click();
-        } else {
-            this.appendScanLog('❌ Audio file input element not found');
-            this.showToast('Audio file picker input not found.', 'warning');
+            console.log('Native audio picker fallback:', err);
         }
     }
 
     async triggerFolderScan() {
         this.appendScanLog('📂 Requesting music storage selection...');
-        // 1. Attempt native folder/multi-file picker via Tauri dialog
         try {
-            this.showToast('Select music folder or files to import...', 'info');
             const summary = await this.invoke('pick_folder_and_scan');
             if (summary !== undefined && summary !== null) {
                 const added = summary.tracks_added ?? 0;
@@ -244,11 +237,10 @@ class Bridge {
                 return;
             }
         } catch (err) {
-            this.appendScanLog(`⚠️ Platform notice: ${err}`);
-            console.log('Native folder dialog fallback:', err);
+            console.log('Native folder dialog notice:', err);
         }
 
-        // 2. Fallback to audio picker
+        // Fallback to direct audio file picker
         await this.triggerAudioImport();
     }
 

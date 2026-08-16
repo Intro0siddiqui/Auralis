@@ -273,7 +273,16 @@ impl AuralisApp {
     fn load_settings(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         info!("Loading application settings");
 
-        let settings = Settings::load()?;
+        let app_dir = app_handle
+            .path()
+            .app_data_dir()
+            .or_else(|_| app_handle.path().app_config_dir())
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+        let _ = std::fs::create_dir_all(&app_dir);
+        let config_path = app_dir.join("settings.toml");
+
+        let settings = Settings::load_from_path(&config_path).unwrap_or_default();
         app_handle.manage(settings);
 
         Ok(())
