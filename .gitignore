@@ -34,3 +34,15 @@ yarn-error.log*
 
 # Scratch & Temporary Testing Files
 scratch/
+.coverage/
+*.profraw
+*.profdata
+
+# Release & Package Artifacts
+*.apk
+*.aab
+*.dmg
+*.msi
+*.exe
+*.tar.gz
+*.zip

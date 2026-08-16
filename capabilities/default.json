@@ -13,13 +13,6 @@
     "shell:allow-open",
     "dialog:allow-open",
     "dialog:allow-save",
-    "dialog:allow-message",
-    "fs:allow-read-file",
-    "fs:allow-read-dir",
-    "fs:allow-write-file",
-    "fs:allow-exists",
-    "store:default",
-    "os:allow-platform",
-    "os:allow-version"
+    "dialog:allow-message"
   ]
 }

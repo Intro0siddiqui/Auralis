@@ -42,14 +42,8 @@ DIST_DIR="$ROOT/dist"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
-# Copy UI assets
+# Copy UI assets (includes HTML partials)
 cp -r "$ROOT/ui" "$DIST_DIR/ui"
-
-# Copy templates if present
-if [ -d "$ROOT/src/templates" ]; then
-    mkdir -p "$DIST_DIR/templates"
-    cp -r "$ROOT/src/templates/"* "$DIST_DIR/templates/"
-fi
 
 # Copy the binary
 BIN_NAME="auralis"
