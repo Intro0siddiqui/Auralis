@@ -2,9 +2,11 @@ name: Build & Release
 
 on:
   push:
+    branches: [main]
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -397,5 +399,6 @@ jobs:
             release-assets/**/*.exe
             release-assets/**/*.apk
             release-assets/**/*.tar.gz
+          prerelease: ${{ contains(github.ref_name, 'dev') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
           generate_release_notes: true
           fail_on_unmatched_files: false
