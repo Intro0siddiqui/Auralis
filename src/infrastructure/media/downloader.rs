@@ -1,530 +1,327 @@
 //! Media Downloader
 //!
-//! Downloads media using yt-dlp with progress tracking.
+//! Streams media from a *resolved* direct audio URL (e.g. produced by the
+//! frontend `youtube.js` resolver) to disk using `reqwest`, with pause/resume
+//! (via HTTP `Range`) and cancel support.
+//!
+//! No external binaries (`yt-dlp` / `ffmpeg`) or dedicated Rust YouTube crates
+//! are required — resolution of user-facing URLs (YouTube, SoundCloud, …) is
+//! the frontend's responsibility; this layer only fetches bytes.
 
 use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
-#[cfg(unix)]
-use nix::sys::signal::{kill, Signal};
-#[cfg(unix)]
-use nix::unistd::Pid;
-use rusty_ytdl::{Video, VideoOptions, VideoQuality, VideoSearchOptions};
+use chrono::Utc;
 use std::collections::HashMap;
+use std::io::SeekFrom;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::RwLock;
+use tracing::{error, info};
 use uuid::Uuid;
 
-/// Active download process handle
-#[allow(dead_code)]
-struct ActiveDownload {
-    id: Uuid,
-    url: String,
-    format: AudioFormat,
-    child: Mutex<Option<tokio::process::Child>>,
+/// A fully-resolved download job submitted to the downloader.
+///
+/// The frontend resolves a user-facing URL into a directly streamable audio URL
+/// (together with display metadata) before calling `download`.
+pub struct StreamDownload {
+    /// Direct, streamable audio URL (http/https).
+    pub stream_url: String,
+    /// Display title used for the output filename and UI.
+    pub title: String,
+    /// Source platform label (`youtube`, `direct`, …) for display.
+    pub platform: String,
+    /// Container/format metadata (display only; the bytes are saved with `ext`).
+    pub format: AudioFormat,
+    /// File extension for the saved bytes (e.g. `webm`, `m4a`, `mp3`).
+    pub ext: String,
+    /// Known total size in bytes, if available up-front.
+    pub total_bytes: Option<u64>,
 }
 
-/// Downloads media from various platforms using yt-dlp
+/// Per-job bookkeeping required to (re)start and resume a download.
+#[derive(Clone)]
+struct DownloadJob {
+    stream_url: String,
+    output_path: PathBuf,
+}
+
+/// Streams a resolved audio URL to disk with progress tracking.
 #[derive(Clone)]
 pub struct Downloader {
     output_dir: PathBuf,
-    ffmpeg_path: Option<String>,
     active_downloads: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
-    processes: Arc<RwLock<HashMap<Uuid, Arc<ActiveDownload>>>>,
+    jobs: Arc<RwLock<HashMap<Uuid, DownloadJob>>>,
+    tasks: Arc<RwLock<HashMap<Uuid, tokio::task::JoinHandle<()>>>>,
 }
 
-/// Media information
-#[derive(Debug)]
-pub struct MediaInfo {
-    pub title: String,
-    pub duration: u32,
-    pub uploader: Option<String>,
-    pub thumbnail: Option<String>,
-}
-
-/// Resolve the path to a Tauri sidecar (an `externalBin` binary bundled next to
-/// the application executable). If no sidecar is bundled, falls back to the
-/// bare program name so the system `PATH` is used.
-///
-/// Tauri copies `externalBin` entries into the same directory as the main
-/// executable on every platform (appending `.exe` on Windows), so checking the
-/// executable's parent directory is the portable way to locate a bundled
-/// `yt-dlp` / `ffmpeg` without relying on `PATH`.
-fn resolve_sidecar(name: &str) -> PathBuf {
-    let candidates: &[&str] = if cfg!(windows) {
-        &[&format!("{name}.exe"), name]
-    } else {
-        &[name]
-    };
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for candidate in candidates {
-                let path = dir.join(candidate);
-                if path.is_file() {
-                    return path;
-                }
-            }
-        }
-    }
-
-    PathBuf::from(name)
-}
-
-/// Path to the `yt-dlp` executable (bundled sidecar if present, else `PATH`).
-///
-/// Exposed so command handlers that invoke `yt-dlp` directly (e.g. playlist
-/// extraction) resolve the same binary as the downloader.
-pub fn ytdlp_executable() -> PathBuf {
-    resolve_sidecar("yt-dlp")
-}
-
-/// Downloader errors
+/// Downloader errors.
 #[derive(Debug, thiserror::Error)]
 pub enum DownloaderError {
-    #[error(
-        "yt-dlp was not found on this device. Please install yt-dlp to download streaming media."
-    )]
-    YtDlpNotFound,
-
-    #[error("Process error: {0}")]
-    ProcessError(String),
-
-    #[error("Download failed with code {0}")]
-    DownloadFailed(i32),
-
-    #[error("Failed to get info")]
-    InfoFailed,
-
-    #[error("Parse error: {0}")]
-    ParseError(String),
-
-    #[error("Output file not found")]
-    OutputNotFound,
-
     #[error("Download not found: {0}")]
     DownloadNotFound(Uuid),
 
-    #[error("Operation not supported on this platform: {0}")]
-    PlatformUnsupported(String),
+    #[error("Invalid or unsupported URL: {0}")]
+    InvalidUrl(String),
+
+    #[error("HTTP error: {0}")]
+    HttpError(String),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("Download failed: {0}")]
+    DownloadFailed(String),
+}
+
+/// Replace filesystem-unsafe characters so titles produce valid filenames.
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_end_matches('.').to_string();
+    if trimmed.is_empty() {
+        "audio_track".to_string()
+    } else {
+        trimmed
+    }
 }
 
 impl Downloader {
-    /// Send a signal to a child process to pause it (Unix: SIGSTOP).
-    #[cfg(unix)]
-    fn signal_pause(child: &tokio::process::Child) -> Result<(), DownloaderError> {
-        let pid = child
-            .id()
-            .ok_or_else(|| DownloaderError::ProcessError("Failed to get process ID".to_string()))?;
-        let nix_pid = Pid::from_raw(pid as i32);
-        kill(nix_pid, Signal::SIGSTOP)
-            .map_err(|e| DownloaderError::ProcessError(format!("Failed to send SIGSTOP: {e}")))
-    }
-
-    /// Send a signal to a child process to resume it (Unix: SIGCONT).
-    #[cfg(unix)]
-    fn signal_continue(child: &tokio::process::Child) -> Result<(), DownloaderError> {
-        let pid = child
-            .id()
-            .ok_or_else(|| DownloaderError::ProcessError("Failed to get process ID".to_string()))?;
-        let nix_pid = Pid::from_raw(pid as i32);
-        kill(nix_pid, Signal::SIGCONT)
-            .map_err(|e| DownloaderError::ProcessError(format!("Failed to send SIGCONT: {e}")))
-    }
-
-    /// Pause a child process on Windows.
-    ///
-    /// NOTE: Pausing an *active* child process is not implemented on Windows.
-    /// Unlike Unix (`SIGSTOP`/`SIGCONT`), Windows has no portable process-level
-    /// suspend signal exposed through the standard library, and adding the
-    /// `windows` crate just to call `NtSuspendProcess` is out of scope here.
-    /// Rather than silently doing nothing (the previous behavior), we return a
-    /// clear error so the UI/command layer can surface it instead of appearing
-    /// to pause while the download keeps running.
-    #[cfg(windows)]
-    fn signal_pause(_child: &tokio::process::Child) -> Result<(), DownloaderError> {
-        Err(DownloaderError::PlatformUnsupported(
-            "Pausing an active download is not supported on Windows".to_string(),
-        ))
-    }
-
-    /// Resume a child process on Windows. See `signal_pause` for rationale.
-    #[cfg(windows)]
-    fn signal_continue(_child: &tokio::process::Child) -> Result<(), DownloaderError> {
-        Err(DownloaderError::PlatformUnsupported(
-            "Resuming a paused download is not supported on Windows".to_string(),
-        ))
-    }
-    /// Create a new downloader
+    /// Create a new downloader that writes files into `output_dir`.
     pub fn new(output_dir: PathBuf) -> Self {
-        // If a bundled `ffmpeg` sidecar is present next to the executable, point
-        // yt-dlp at its directory so post-processing works without `ffmpeg`
-        // being on the system `PATH`.
-        let ffmpeg_sidecar = resolve_sidecar("ffmpeg");
-        let ffmpeg_path = ffmpeg_sidecar
-            .is_file()
-            .then(|| ffmpeg_sidecar.to_string_lossy().to_string());
-
         Self {
             output_dir,
-            ffmpeg_path,
             active_downloads: Arc::new(RwLock::new(HashMap::new())),
-            processes: Arc::new(RwLock::new(HashMap::new())),
+            jobs: Arc::new(RwLock::new(HashMap::new())),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Set custom ffmpeg path
-    pub fn with_ffmpeg(mut self, path: String) -> Self {
-        self.ffmpeg_path = Some(path);
-        self
-    }
+    /// Begin streaming a resolved download. Returns the job id immediately;
+    /// progress is tracked in `active_downloads` and surfaced via the
+    /// `download:progress` / `download:completed` events emitted by the command.
+    pub async fn download(&self, req: StreamDownload) -> Result<Uuid, DownloaderError> {
+        info!(url = %req.stream_url, title = %req.title, "Starting download");
 
-    /// Start a download
-    pub async fn download(&self, url: &str, format: AudioFormat) -> Result<Uuid, DownloaderError> {
-        info!(url = %url, format = ?format, "Starting download");
-
-        if !url.starts_with("https://") {
-            return Err(DownloaderError::ProcessError(
-                "Only secure HTTPS URLs are supported".to_string(),
-            ));
+        if !req.stream_url.starts_with("https://") && !req.stream_url.starts_with("http://") {
+            return Err(DownloaderError::InvalidUrl(req.stream_url));
         }
 
-        let is_ytdlp = self.is_ytdlp_available().await;
-        let is_youtube = url.contains("youtube.com") || url.contains("youtu.be");
-        let is_https_audio = url.starts_with("https://");
-        let is_other_platform = url.contains("soundcloud.com")
-            || url.contains("bandcamp.com")
-            || url.contains("instagram.com");
-
-        if is_other_platform && !is_ytdlp {
-            return Err(DownloaderError::YtDlpNotFound);
-        }
-
-        let title = if is_youtube {
-            "YouTube Audio Track".to_string()
-        } else if is_other_platform {
-            format!("Download from {}", Self::detect_platform(url))
+        let id = Uuid::new_v4();
+        let ext = if req.ext.is_empty() {
+            req.format.extension().to_string()
         } else {
-            url.split('/')
-                .next_back()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("audio_track")
-                .to_string()
+            req.ext.clone()
         };
+        let filename = format!("{}.{}", sanitize_filename(&req.title), ext);
+        let path = self.output_dir.join(&filename);
 
-        let progress = DownloadProgress::new(url.to_string(), title, format);
-        let id = progress.id;
+        let mut progress =
+            DownloadProgress::new(req.stream_url.clone(), req.title.clone(), req.format);
+        progress.platform = req.platform.clone();
+        progress.total_bytes = req.total_bytes;
+        progress.status = DownloadStatus::Downloading;
+        progress.output_path = Some(path.to_string_lossy().to_string());
+        progress.started_at = Utc::now();
+        progress.updated_at = Utc::now();
 
         {
             let mut downloads = self.active_downloads.write().await;
             downloads.insert(id, progress);
         }
-
-        let active = Arc::new(ActiveDownload {
-            id,
-            url: url.to_string(),
-            format,
-            child: Mutex::new(None),
-        });
-
         {
-            let mut processes = self.processes.write().await;
-            processes.insert(id, active.clone());
+            let mut jobs = self.jobs.write().await;
+            jobs.insert(
+                id,
+                DownloadJob {
+                    stream_url: req.stream_url.clone(),
+                    output_path: path,
+                },
+            );
         }
 
-        let downloads = self.active_downloads.clone();
-        let processes = self.processes.clone();
-        let ffmpeg_path = self.ffmpeg_path.clone();
-        let output_dir = self.output_dir.clone();
-        let url_str = url.to_string();
-
-        tokio::spawn(async move {
-            let res = if is_youtube {
-                Self::run_rusty_ytdl_download(
-                    id,
-                    &url_str,
-                    format,
-                    output_dir.clone(),
-                    downloads.clone(),
-                )
-                .await
-            } else if is_other_platform || (is_ytdlp && !is_https_audio) {
-                Self::run_download(
-                    id,
-                    &url_str,
-                    format,
-                    ffmpeg_path,
-                    output_dir.clone(),
-                    downloads.clone(),
-                    processes.clone(),
-                )
-                .await
-            } else if is_https_audio {
-                Self::run_http_stream_download(
-                    id,
-                    &url_str,
-                    format,
-                    output_dir.clone(),
-                    downloads.clone(),
-                )
-                .await
-            } else {
-                Err(DownloaderError::ProcessError(
-                    "Unsupported URL protocol".to_string(),
-                ))
-            };
-
-            if let Err(e) = res {
-                error!(download_id = %id, error = %e, "Download failed");
-                let mut guard = downloads.write().await;
-                if let Some(state) = guard.get_mut(&id) {
-                    state.fail(e.to_string());
-                }
-            }
-        });
+        self.spawn_stream(id, 0).await;
 
         Ok(id)
     }
 
-    /// Run native YouTube audio download via rusty_ytdl (pure Rust, zero external binaries)
-    async fn run_rusty_ytdl_download(
-        id: Uuid,
-        url: &str,
-        format: AudioFormat,
-        output_dir: PathBuf,
-        downloads: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
-    ) -> Result<(), DownloaderError> {
-        info!(download_id = %id, url = %url, "Executing native YouTube audio download via rusty_ytdl");
+    /// Spawn the streaming task for `id`, resuming from `start_byte`.
+    async fn spawn_stream(&self, id: Uuid, start_byte: u64) {
+        let jobs = self.jobs.clone();
+        let active = self.active_downloads.clone();
+        let tasks = self.tasks.clone();
 
-        // Clean tracking parameters and normalize youtu.be URLs
-        let clean_url = if let Some(idx) = url.find("youtu.be/") {
-            let id_part = &url[idx + 9..];
-            let video_id = id_part.split('?').next().unwrap_or(id_part);
-            format!("https://www.youtube.com/watch?v={video_id}")
-        } else if let Some(idx) = url.find("youtube.com/watch?v=") {
-            let rest = &url[idx + 20..];
-            let video_id = rest.split('&').next().unwrap_or(rest);
-            format!("https://www.youtube.com/watch?v={video_id}")
-        } else {
-            url.to_string()
-        };
-
-        let video_options = VideoOptions {
-            quality: VideoQuality::Highest,
-            filter: VideoSearchOptions::Audio,
-            ..Default::default()
-        };
-
-        let video = Video::new_with_options(&clean_url, video_options).map_err(|e| {
-            DownloaderError::ProcessError(format!("Failed to parse YouTube video: {e}"))
-        })?;
-
-        // Fetch video details to populate real song metadata
-        if let Ok(info) = video.get_info().await {
-            let mut guard = downloads.write().await;
-            if let Some(state) = guard.get_mut(&id) {
-                state.title = info.video_details.title;
-            }
-        }
-
-        // Native YouTube audio streams are AAC; container must be m4a unless transcoded
-        let ext = if matches!(
-            format,
-            AudioFormat::Mp3 | AudioFormat::M4a | AudioFormat::Aac
-        ) {
-            "m4a"
-        } else {
-            format.extension()
-        };
-        let filename = format!("track_{}.{}", &id.to_string()[..8], ext);
-        let out_path = output_dir.join(&filename);
-
-        std::fs::create_dir_all(&output_dir)?;
-        let mut file = tokio::fs::File::create(&out_path)
-            .await
-            .map_err(DownloaderError::IoError)?;
-
-        let stream = video.stream().await.map_err(|e| {
-            DownloaderError::ProcessError(format!("Failed to open YouTube audio stream: {e}"))
-        })?;
-
-        let total_size = stream.content_length() as u64;
-
-        {
-            let mut guard = downloads.write().await;
-            if let Some(state) = guard.get_mut(&id) {
-                state.status = DownloadStatus::Downloading;
-                state.total_bytes = if total_size > 0 {
-                    Some(total_size)
-                } else {
-                    None
-                };
-                state.output_path = Some(out_path.to_string_lossy().to_string());
-                state.updated_at = chrono::Utc::now();
-            }
-        }
-
-        let mut downloaded: u64 = 0;
-        while let Some(chunk) = stream
-            .chunk()
-            .await
-            .map_err(|e| DownloaderError::ProcessError(format!("YouTube stream read error: {e}")))?
-        {
-            use tokio::io::AsyncWriteExt;
-            file.write_all(&chunk)
-                .await
-                .map_err(DownloaderError::IoError)?;
-
-            downloaded += chunk.len() as u64;
-
-            let mut guard = downloads.write().await;
-            if let Some(state) = guard.get_mut(&id) {
-                state.downloaded_bytes = downloaded;
-                if total_size > 0 {
-                    state.progress = (downloaded as f32) / (total_size as f32);
+        let handle = tokio::spawn(async move {
+            let job = {
+                let jobs = jobs.read().await;
+                match jobs.get(&id) {
+                    Some(j) => j.clone(),
+                    None => return,
                 }
-                state.updated_at = chrono::Utc::now();
+            };
+
+            if let Err(e) = Self::run_stream(id, &job, start_byte, active.clone()).await {
+                error!(download_id = %id, error = %e, "Download failed");
+                let mut guard = active.write().await;
+                if let Some(state) = guard.get_mut(&id) {
+                    state.fail(e.to_string());
+                }
             }
-        }
 
-        use tokio::io::AsyncWriteExt;
-        file.flush().await.map_err(DownloaderError::IoError)?;
+            tasks.write().await.remove(&id);
+        });
 
-        {
-            let mut guard = downloads.write().await;
-            if let Some(state) = guard.get_mut(&id) {
-                state.status = DownloadStatus::Completed;
-                state.progress = 1.0;
-                state.output_path = Some(out_path.to_string_lossy().to_string());
-                state.completed_at = Some(chrono::Utc::now());
-                state.updated_at = chrono::Utc::now();
-            }
-        }
-
-        info!(download_id = %id, path = ?out_path, "Native YouTube audio download complete");
-        Ok(())
+        let mut tasks = self.tasks.write().await;
+        tasks.insert(id, handle);
     }
 
-    /// Run native pure-Rust HTTP stream download for direct media audio links
-    async fn run_http_stream_download(
+    /// Stream `job.stream_url` to `job.output_path`, updating progress.
+    async fn run_stream(
         id: Uuid,
-        url: &str,
-        format: AudioFormat,
-        output_dir: PathBuf,
-        downloads: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
+        job: &DownloadJob,
+        start_byte: u64,
+        active: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
     ) -> Result<(), DownloaderError> {
-        info!(download_id = %id, url = %url, "Executing native HTTP stream download");
-
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(Duration::from_secs(300))
             .build()
-            .map_err(|e| {
-                DownloaderError::ProcessError(format!("Failed to build HTTP client: {e}"))
-            })?;
+            .map_err(|e| DownloaderError::HttpError(format!("failed to build HTTP client: {e}")))?;
 
-        let mut res = client
-            .get(url)
+        let mut req = client.get(&job.stream_url);
+        if start_byte > 0 {
+            req = req.header("Range", format!("bytes={}-", start_byte));
+        }
+        let mut res = req
             .send()
             .await
-            .map_err(|e| DownloaderError::ProcessError(format!("HTTP request failed: {e}")))?;
+            .map_err(|e| DownloaderError::HttpError(format!("request failed: {e}")))?;
 
-        if !res.status().is_success() {
-            return Err(DownloaderError::ProcessError(format!(
-                "HTTP error: status {}",
+        let resuming = start_byte > 0 && res.status().as_u16() == 206;
+
+        let total: Option<u64> = if resuming {
+            res.headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.rsplit('/').next())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .or_else(|| res.content_length())
+        } else {
+            res.content_length()
+        };
+
+        if !res.status().is_success() && res.status().as_u16() != 206 {
+            return Err(DownloaderError::HttpError(format!(
+                "HTTP status {}",
                 res.status()
             )));
         }
 
-        let total_size = res.content_length();
-        let ext = format.extension();
-        let filename = format!("track_{}.{}", &id.to_string()[..8], ext);
-        let out_path = output_dir.join(&filename);
-
-        std::fs::create_dir_all(&output_dir)?;
-        let mut file = tokio::fs::File::create(&out_path)
-            .await
-            .map_err(DownloaderError::IoError)?;
-
         {
-            let mut guard = downloads.write().await;
+            let mut guard = active.write().await;
             if let Some(state) = guard.get_mut(&id) {
                 state.status = DownloadStatus::Downloading;
-                state.total_bytes = total_size;
-                state.output_path = Some(out_path.to_string_lossy().to_string());
-                state.updated_at = chrono::Utc::now();
+                if total.is_some() {
+                    state.total_bytes = total;
+                }
+                state.updated_at = Utc::now();
             }
         }
 
-        let mut downloaded: u64 = 0;
+        let mut file = if resuming {
+            // File already holds the `start_byte` bytes we committed before the
+            // pause; append the remainder.
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&job.output_path)
+                .await?
+        } else {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&job.output_path)
+                .await?
+        };
+
+        if !resuming {
+            file.seek(SeekFrom::Start(0)).await?;
+        }
+
+        let start_instant = Instant::now();
+        let mut downloaded = start_byte;
+
         while let Some(chunk) = res
             .chunk()
             .await
-            .map_err(|e| DownloaderError::ProcessError(format!("Stream read error: {e}")))?
+            .map_err(|e| DownloaderError::HttpError(format!("stream read error: {e}")))?
         {
-            use tokio::io::AsyncWriteExt;
             file.write_all(&chunk)
                 .await
                 .map_err(DownloaderError::IoError)?;
-
             downloaded += chunk.len() as u64;
 
-            let mut guard = downloads.write().await;
+            let elapsed = start_instant.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                ((downloaded - start_byte) as f64 / elapsed) as u64
+            } else {
+                0
+            };
+
+            let mut guard = active.write().await;
             if let Some(state) = guard.get_mut(&id) {
                 state.downloaded_bytes = downloaded;
-                if let Some(total) = total_size {
-                    if total > 0 {
-                        state.progress = (downloaded as f32) / (total as f32);
+                if let Some(t) = total {
+                    if t > 0 {
+                        state.progress = (downloaded as f32) / (t as f32);
                     }
                 }
-                state.updated_at = chrono::Utc::now();
+                state.speed_bps = speed;
+                state.updated_at = Utc::now();
             }
         }
 
-        use tokio::io::AsyncWriteExt;
         file.flush().await.map_err(DownloaderError::IoError)?;
 
         {
-            let mut guard = downloads.write().await;
+            let mut guard = active.write().await;
             if let Some(state) = guard.get_mut(&id) {
-                state.status = DownloadStatus::Completed;
-                state.progress = 1.0;
-                state.output_path = Some(out_path.to_string_lossy().to_string());
-                state.completed_at = Some(chrono::Utc::now());
-                state.updated_at = chrono::Utc::now();
+                state.complete(job.output_path.to_string_lossy().to_string());
             }
         }
 
-        info!(download_id = %id, path = ?out_path, "Native HTTP stream download complete");
+        info!(download_id = %id, path = ?job.output_path, "Download complete");
         Ok(())
     }
 
-    /// Pause a download by sending SIGSTOP to the process
+    /// Pause an in-progress download by aborting its task and truncating the
+    /// partial file to the last fully-written byte (so resume is clean).
     pub async fn pause(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Pausing download");
 
-        {
+        if let Some(handle) = self.tasks.write().await.remove(&id) {
+            handle.abort();
+        }
+
+        let snapshot = {
             let downloads = self.active_downloads.read().await;
-            if !downloads.contains_key(&id) {
-                return Err(DownloaderError::DownloadNotFound(id));
+            downloads
+                .get(&id)
+                .map(|s| (s.output_path.clone(), s.downloaded_bytes))
+        };
+        if let Some((Some(path), downloaded)) = snapshot {
+            if let Ok(f) = tokio::fs::OpenOptions::new().write(true).open(&path).await {
+                let _ = f.set_len(downloaded).await;
             }
         }
-
-        let processes = self.processes.read().await;
-        let active = processes
-            .get(&id)
-            .ok_or(DownloaderError::DownloadNotFound(id))?;
-
-        let child_guard = active.child.lock().await;
-        if let Some(ref child) = *child_guard {
-            Self::signal_pause(child)?;
-        }
-        drop(child_guard);
 
         let mut downloads = self.active_downloads.write().await;
         if let Some(state) = downloads.get_mut(&id) {
@@ -534,63 +331,47 @@ impl Downloader {
         Ok(())
     }
 
-    /// Resume a paused download by sending SIGCONT
+    /// Resume a paused download from the last committed byte via HTTP Range.
     pub async fn resume(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Resuming download");
 
-        {
+        let start = {
             let downloads = self.active_downloads.read().await;
-            if !downloads.contains_key(&id) {
-                return Err(DownloaderError::DownloadNotFound(id));
+            downloads
+                .get(&id)
+                .ok_or(DownloaderError::DownloadNotFound(id))?
+                .downloaded_bytes
+        };
+
+        {
+            let mut downloads = self.active_downloads.write().await;
+            if let Some(state) = downloads.get_mut(&id) {
+                if state.status == DownloadStatus::Paused {
+                    state.status = DownloadStatus::Downloading;
+                    state.updated_at = Utc::now();
+                }
             }
         }
 
-        let processes = self.processes.read().await;
-        let active = processes
-            .get(&id)
-            .ok_or(DownloaderError::DownloadNotFound(id))?;
-
-        let child_guard = active.child.lock().await;
-        if let Some(ref child) = *child_guard {
-            Self::signal_continue(child)?;
-        }
-        drop(child_guard);
-
-        let mut downloads = self.active_downloads.write().await;
-        if let Some(state) = downloads.get_mut(&id) {
-            if state.status == DownloadStatus::Paused {
-                state.status = DownloadStatus::Downloading;
-                state.updated_at = chrono::Utc::now();
-            }
-        }
-
+        self.spawn_stream(id, start).await;
         Ok(())
     }
 
-    /// Cancel a download by killing the process
+    /// Cancel a download, killing its task and removing any partial file.
     pub async fn cancel(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Cancelling download");
 
-        {
+        if let Some(handle) = self.tasks.write().await.remove(&id) {
+            handle.abort();
+        }
+
+        let path = {
             let downloads = self.active_downloads.read().await;
-            if !downloads.contains_key(&id) {
-                return Err(DownloaderError::DownloadNotFound(id));
-            }
+            downloads.get(&id).and_then(|s| s.output_path.clone())
+        };
+        if let Some(path) = path {
+            let _ = tokio::fs::remove_file(&path).await;
         }
-
-        let processes = self.processes.read().await;
-        let active = processes
-            .get(&id)
-            .ok_or(DownloaderError::DownloadNotFound(id))?;
-
-        let mut child_guard = active.child.lock().await;
-        if let Some(mut child) = child_guard.take() {
-            child
-                .kill()
-                .await
-                .map_err(|e| DownloaderError::ProcessError(e.to_string()))?;
-        }
-        drop(child_guard);
 
         let mut downloads = self.active_downloads.write().await;
         if let Some(state) = downloads.get_mut(&id) {
@@ -600,335 +381,15 @@ impl Downloader {
         Ok(())
     }
 
-    /// Get current progress for a download
+    /// Get current progress for a download.
     pub async fn get_progress(&self, id: Uuid) -> Option<DownloadProgress> {
         let downloads = self.active_downloads.read().await;
         downloads.get(&id).cloned()
     }
 
-    /// List all active downloads
+    /// List all active downloads.
     pub async fn list_active(&self) -> Vec<DownloadProgress> {
         let downloads = self.active_downloads.read().await;
         downloads.values().cloned().collect()
-    }
-
-    /// Get video info without downloading
-    pub async fn get_info(&self, url: &str) -> Result<MediaInfo, DownloaderError> {
-        info!(url = %url, "Getting media info");
-
-        let output = Command::new(ytdlp_executable())
-            .args(["--dump-json", "--no-download", url])
-            .output()
-            .await
-            .map_err(|e| DownloaderError::ProcessError(e.to_string()))?;
-
-        if !output.status.success() {
-            return Err(DownloaderError::InfoFailed);
-        }
-
-        let json = String::from_utf8_lossy(&output.stdout);
-        let info: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|_| DownloaderError::ParseError("Invalid JSON".to_string()))?;
-
-        Ok(MediaInfo {
-            title: info["title"].as_str().unwrap_or("Unknown").to_string(),
-            duration: info["duration"].as_f64().unwrap_or(0.0) as u32,
-            uploader: info["uploader"].as_str().map(|s| s.to_string()),
-            thumbnail: info["thumbnail"].as_str().map(|s| s.to_string()),
-        })
-    }
-
-    /// Check if yt-dlp is available
-    async fn is_ytdlp_available(&self) -> bool {
-        Command::new(ytdlp_executable())
-            .arg("--version")
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-
-    /// Detect platform from URL
-    fn detect_platform(url: &str) -> String {
-        if url.contains("youtube.com") || url.contains("youtu.be") {
-            "youtube".to_string()
-        } else if url.contains("soundcloud.com") {
-            "soundcloud".to_string()
-        } else if url.contains("instagram.com") {
-            "instagram".to_string()
-        } else if url.contains("bandcamp.com") {
-            "bandcamp".to_string()
-        } else {
-            "unknown".to_string()
-        }
-    }
-
-    /// Run the actual yt-dlp download process
-    async fn run_download(
-        id: Uuid,
-        url: &str,
-        format: AudioFormat,
-        ffmpeg_path: Option<String>,
-        output_dir: PathBuf,
-        downloads: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
-        processes: Arc<RwLock<HashMap<Uuid, Arc<ActiveDownload>>>>,
-    ) -> Result<(), DownloaderError> {
-        let output_template = output_dir
-            .join("%(title)s-%(id)s.%(ext)s")
-            .to_string_lossy()
-            .to_string();
-
-        let mut cmd = Command::new(ytdlp_executable());
-        cmd.args([
-            "-x",
-            "--audio-format",
-            format.extension(),
-            "-o",
-            &output_template,
-            "--no-playlist",
-            "--newline",
-            "--progress-template",
-            "download:%(progress._percent_str)s %(progress._speed_str)s %(progress._eta_str)s",
-            "-f",
-            "bestaudio/best",
-        ]);
-
-        if let Some(ffmpeg) = ffmpeg_path {
-            cmd.arg("--ffmpeg-location").arg(ffmpeg);
-        }
-
-        cmd.arg(url);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        debug!(command = ?cmd, "Executing yt-dlp");
-
-        let child = cmd.spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                DownloaderError::YtDlpNotFound
-            } else {
-                DownloaderError::ProcessError(e.to_string())
-            }
-        })?;
-
-        {
-            let processes = processes.read().await;
-            if let Some(active) = processes.get(&id) {
-                let mut child_guard = active.child.lock().await;
-                *child_guard = Some(child);
-            }
-        }
-
-        {
-            let mut guard = downloads.write().await;
-            if let Some(state) = guard.get_mut(&id) {
-                state.status = DownloadStatus::Downloading;
-                state.updated_at = chrono::Utc::now();
-            }
-        }
-
-        let stdout = {
-            let processes = processes.read().await;
-            let active = processes
-                .get(&id)
-                .ok_or(DownloaderError::DownloadNotFound(id))?;
-            let mut child_guard = active.child.lock().await;
-            let child = child_guard.as_mut().ok_or_else(|| {
-                DownloaderError::ProcessError("Child process not available".to_string())
-            })?;
-            child
-                .stdout
-                .take()
-                .ok_or_else(|| DownloaderError::ProcessError("No stdout".to_string()))?
-        };
-
-        let mut reader = BufReader::new(stdout).lines();
-
-        while let Some(line_result) = reader.next_line().await.transpose() {
-            let line = line_result.map_err(|e| DownloaderError::ProcessError(e.to_string()))?;
-            debug!(line = %line, "yt-dlp output");
-
-            if line.contains("[download]") && line.contains('%') {
-                let mut guard = downloads.write().await;
-                if let Some(state) = guard.get_mut(&id) {
-                    if let Some(pct) = Self::parse_percentage(&line) {
-                        state.progress = pct / 100.0;
-                    }
-                    if let Some(speed) = Self::parse_speed(&line) {
-                        state.speed_bps = speed;
-                    }
-                    if let Some(eta) = Self::parse_eta(&line) {
-                        state.eta_secs = Some(eta);
-                    }
-                    if let Some(total) = Self::parse_total_bytes(&line) {
-                        state.total_bytes = Some(total);
-                    }
-                    state.downloaded_bytes =
-                        (state.progress * state.total_bytes.unwrap_or(0) as f32) as u64;
-                    state.updated_at = chrono::Utc::now();
-                }
-            }
-
-            if line.contains("Destination:") || line.contains("[ExtractAudio]") {
-                let mut guard = downloads.write().await;
-                if let Some(state) = guard.get_mut(&id) {
-                    if let Some(start) = line.find("Destination:") {
-                        let path = line[start + 13..].trim().to_string();
-                        state.output_path = Some(path);
-                    }
-                }
-            }
-        }
-
-        let status = {
-            let processes = processes.read().await;
-            let active = processes
-                .get(&id)
-                .ok_or(DownloaderError::DownloadNotFound(id))?;
-            let mut child_guard = active.child.lock().await;
-            if let Some(mut child) = child_guard.take() {
-                child
-                    .wait()
-                    .await
-                    .map_err(|e| DownloaderError::ProcessError(e.to_string()))?
-            } else {
-                return Err(DownloaderError::ProcessError(
-                    "Process already gone".to_string(),
-                ));
-            }
-        };
-
-        let mut guard = downloads.write().await;
-        if let Some(state) = guard.get_mut(&id) {
-            if status.success() {
-                state.status = DownloadStatus::Completed;
-                state.progress = 1.0;
-                state.completed_at = Some(chrono::Utc::now());
-                state.updated_at = chrono::Utc::now();
-
-                if state.output_path.is_none() {
-                    state.output_path = Self::find_output_file(&output_dir).await;
-                }
-
-                info!(download_id = %id, "Download completed");
-            } else {
-                state.status = DownloadStatus::Failed;
-                state.error = Some(format!(
-                    "yt-dlp exited with code {}",
-                    status.code().unwrap_or(-1)
-                ));
-                state.completed_at = Some(chrono::Utc::now());
-                state.updated_at = chrono::Utc::now();
-            }
-        }
-
-        if !status.success() {
-            return Err(DownloaderError::DownloadFailed(status.code().unwrap_or(-1)));
-        }
-
-        Ok(())
-    }
-
-    /// Parse download percentage from output line
-    fn parse_percentage(line: &str) -> Option<f32> {
-        if let Some(idx) = line.find('%') {
-            let start = line[..idx]
-                .rfind(|c: char| !c.is_ascii_digit() && c != '.' && c != ' ')
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            line[start..idx].trim().parse().ok()
-        } else {
-            None
-        }
-    }
-
-    /// Parse download speed from output line
-    fn parse_speed(line: &str) -> Option<u64> {
-        if let Some(idx) = line.find("at ") {
-            let rest = &line[idx + 3..];
-            if let Some(end_idx) = rest.find(['/', 's']) {
-                let speed_str = rest[..end_idx].trim();
-                if speed_str.contains("MiB") {
-                    let value: f64 = speed_str.replace("MiB", "").trim().parse().ok()?;
-                    Some((value * 1024.0 * 1024.0) as u64)
-                } else if speed_str.contains("KiB") {
-                    let value: f64 = speed_str.replace("KiB", "").trim().parse().ok()?;
-                    Some((value * 1024.0) as u64)
-                } else {
-                    speed_str.parse().ok()
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Parse ETA from output line
-    fn parse_eta(line: &str) -> Option<u32> {
-        if let Some(idx) = line.find("ETA ") {
-            let eta_str = &line[idx + 4..];
-            let parts: Vec<&str> = eta_str.split(':').collect();
-            match parts.len() {
-                2 => {
-                    let mins: u32 = parts[0].trim().parse().ok()?;
-                    let secs: u32 = parts[1].trim().parse().ok()?;
-                    Some(mins * 60 + secs)
-                }
-                3 => {
-                    let hrs: u32 = parts[0].trim().parse().ok()?;
-                    let mins: u32 = parts[1].trim().parse().ok()?;
-                    let secs: u32 = parts[2].trim().parse().ok()?;
-                    Some(hrs * 3600 + mins * 60 + secs)
-                }
-                _ => None,
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Parse total bytes from output line
-    fn parse_total_bytes(line: &str) -> Option<u64> {
-        if let Some(idx) = line.find("of ~") {
-            let rest = &line[idx + 4..];
-            let end_idx = rest.find(" at").or_else(|| rest.find(" ETA"))?;
-            let size_str = rest[..end_idx].trim();
-            if size_str.contains("MiB") {
-                let value: f64 = size_str.replace("MiB", "").trim().parse().ok()?;
-                Some((value * 1024.0 * 1024.0) as u64)
-            } else if size_str.contains("KiB") {
-                let value: f64 = size_str.replace("KiB", "").trim().parse().ok()?;
-                Some((value * 1024.0) as u64)
-            } else if size_str.contains("GiB") {
-                let value: f64 = size_str.replace("GiB", "").trim().parse().ok()?;
-                Some((value * 1024.0 * 1024.0 * 1024.0) as u64)
-            } else {
-                size_str.parse().ok()
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Find the output file after download
-    async fn find_output_file(output_dir: &PathBuf) -> Option<String> {
-        let mut entries = tokio::fs::read_dir(output_dir).await.ok()?;
-        let mut latest: Option<(String, std::time::SystemTime)> = None;
-
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            if let Ok(metadata) = entry.metadata().await {
-                if metadata.is_file() {
-                    let modified = metadata.modified().ok()?;
-                    let path = entry.path().to_string_lossy().to_string();
-                    if latest.as_ref().map_or(true, |(_, t)| modified > *t) {
-                        latest = Some((path, modified));
-                    }
-                }
-            }
-        }
-
-        latest.map(|(p, _)| p)
     }
 }

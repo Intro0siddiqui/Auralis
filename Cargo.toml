@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "2.0.36"
+version = "2.0.37"
 edition = "2021"
 authors = ["Auralis Team"]
 description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
@@ -32,9 +32,9 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 futures = "0.3"
 async-trait = "0.1"
 
-# HTTP streaming client (pure-Rust for native audio downloads)
+# HTTP streaming client (pure-Rust; fetches resolved audio streams from the
+# frontend youtube.js resolver — no yt-dlp / ffmpeg / rusty_ytdl sidecars)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-rusty_ytdl = { version = "0.7", default-features = false, features = ["rustls-tls"] }
 
 # Tauri runtime (v2)
 tauri = { version = "2", features = [] }
@@ -79,10 +79,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 base64 = "0.22"
 
 # Audio playback
-# AAC/OPUS: rodio 0.17 has NO built-in OPUS decoder. AAC is enabled via
-# rodio's symphonia backend ("symphonia-aac"). OPUS files are not decodable by
-# this stack (symphonia 0.5 has no opus codec); they are rejected with a clear
-# error in the player (see player.rs:UnsupportedFormat).
+# rodio 0.17 supports aac/mp3/flac/wav via its symphonia backends (no opus/webm
+# decoder). The youtube.js resolver therefore prefers an mp4 (m4a/aac) audio
+# stream so downloaded files stay playable in-app.
 rodio = { version = "0.17", default-features = false, features = ["symphonia-aac", "symphonia-mp3", "symphonia-flac", "symphonia-wav"] }
 
 # Audio metadata
@@ -90,10 +89,6 @@ lofty = "0.21"
 
 # Filesystem globbing
 glob = "0.3"
-
-# Unix signals for process control (pause/resume downloads)
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", features = ["signal", "process"] }
 
 # Android: initialize the ndk-context global used by cpal/oboe's audio
 # backend. Tauri v2 does not set it up, so we export JNI_OnLoad ourselves.

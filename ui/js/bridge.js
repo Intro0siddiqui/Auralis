@@ -161,11 +161,11 @@ class Bridge {
     }
 
     async scanLibrary(paths = null) {
-        this.appendScanLog('🚀 Initiating device storage scan...');
-        this.showToast('Scanning storage for audio files...', 'info');
+        this.appendScanLog('🚀 Initiating storage scan...');
+        this.showToast('Scanning storage for audio tracks...', 'info');
         this.updateScanProgressUI({
             title: 'Scanning Storage',
-            subtitle: 'Searching device directories...',
+            subtitle: 'Searching audio paths...',
             current: 0,
             percentage: 0
         });
@@ -175,14 +175,32 @@ class Bridge {
             if (summary) {
                 const added = summary.tracks_added ?? 0;
                 const updated = summary.tracks_updated ?? 0;
-                this.appendScanLog(`🎉 Complete: ${added} added, ${updated} updated`);
-                this.showToast(`Scan complete: ${added} added, ${updated} updated`, 'success');
+                const errCount = (summary.errors && summary.errors.length) || 0;
+                this.appendScanLog(`🎉 Complete: ${added} added, ${updated} updated, ${errCount} errors`);
+                
+                if (added === 0 && updated === 0 && (!paths || paths.length === 0)) {
+                    this.showToast('No audio files in app sandbox. Tap "Import Audio" to add songs from device storage.', 'info');
+                    this.appendScanLog('ℹ️ Android Scoped Storage: Tap "Import Audio" to select audio files from your device storage');
+                } else {
+                    this.showToast(`Scan complete: ${added} added, ${updated} updated`, 'success');
+                }
                 await this.loadLibraryView();
                 this.refreshCurrentView();
             }
         } catch (err) {
             this.appendScanLog(`❌ Scan error: ${err}`);
             this.showToast(`Scan error: ${err}`, 'error');
+        }
+    }
+
+    triggerAudioImport() {
+        this.appendScanLog('📥 Opening system audio file picker...');
+        const input = document.getElementById('global-audio-import-input') || document.getElementById('audio-import-input');
+        if (input) {
+            input.click();
+        } else {
+            this.appendScanLog('❌ Audio file input element not found');
+            this.showToast('Audio file picker input not found.', 'warning');
         }
     }
 
@@ -206,18 +224,19 @@ class Bridge {
                 return;
             }
         } catch (err) {
-            this.appendScanLog(`⚠️ Native dialog fallback: ${err}`);
-            console.log('Native dialog fallback to SAF / HTML5 folder picker:', err);
+            this.appendScanLog(`⚠️ Platform notice: ${err}`);
+            console.log('Native folder dialog fallback (Android Scoped Storage):', err);
         }
 
-        // 2. Fallback to SAF / HTML5 Directory Picker on Android or Web
-        const folderInput = document.getElementById('folder-scan-input');
-        if (folderInput) {
+        // 2. Fallback on Android or Web: Folder selection via SAF or Audio Picker
+        const folderInput = document.getElementById('global-folder-scan-input') || document.getElementById('folder-scan-input');
+        if (folderInput && typeof folderInput.webkitdirectory !== 'undefined') {
             this.appendScanLog('📱 Opening SAF directory picker...');
             folderInput.click();
         } else {
-            this.appendScanLog('❌ Folder scanner input element not found');
-            this.showToast('Folder scanner input not found.', 'warning');
+            // Android 11-16: Scoped storage restricts webkitdirectory, fallback directly to audio file picker
+            this.appendScanLog('📱 Android Scoped Storage: Launching multi-file audio picker...');
+            this.triggerAudioImport();
         }
     }
 
@@ -279,7 +298,7 @@ class Bridge {
                 });
                 if (result) {
                     importedCount++;
-                    this.appendScanLog(`✅ Imported: ${result.artist} - ${result.title}`);
+                    this.appendScanLog(`✅ Imported: ${result.artist || 'Unknown'} - ${result.title || file.name}`);
                     this.handleTrackImported(result);
                 }
             } catch (err) {
@@ -616,13 +635,13 @@ class Bridge {
                     <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">No tracks found in library</h2>
                     <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Scan your device storage or download music to start listening.</p>
                     <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
-                        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
-                            <i data-lucide="folder-search"></i>
-                            Scan Music Directory
-                        </button>
-                        <button class="btn btn-secondary neu" onclick="document.getElementById('audio-import-input')?.click()">
+                        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerAudioImport()">
                             <i data-lucide="file-plus-2"></i>
-                            Import Audio Files
+                            Import Audio
+                        </button>
+                        <button class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
+                            <i data-lucide="folder-search"></i>
+                            Scan Storage
                         </button>
                     </div>
                 </div>
@@ -665,11 +684,15 @@ class Bridge {
                                 <i data-lucide="music" style="width: 48px; height: 48px;"></i>
                             </div>
                             <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">Your library is empty</h2>
-                            <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Scan your device storage for local audio files or download audio streams to start playing.</p>
+                            <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Import audio files from your device storage or download music to start playing.</p>
                             <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
-                                <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
+                                <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerAudioImport()">
+                                    <i data-lucide="file-plus-2"></i>
+                                    Import Audio
+                                </button>
+                                <button class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
                                     <i data-lucide="folder-search"></i>
-                                    Scan Device Storage
+                                    Scan Storage
                                 </button>
                                 <button class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML transition:true">
                                     <i data-lucide="download"></i>
@@ -1050,18 +1073,82 @@ class Bridge {
                 return;
             }
 
-            this.showToast('Starting audio download...', 'info');
+            if (!window.AuralisYouTube) {
+                this.showToast('YouTube resolver unavailable', 'error');
+                return;
+            }
+
+            this.showToast('Resolving source…', 'info');
             try {
-                const result = await this.invoke('download_audio', { request: { url, format } });
+                const resolved = await window.AuralisYouTube.resolve(url);
+
+                if (resolved.kind === 'playlist') {
+                    await this.startPlaylistDownloads(resolved.items, format, urlInput);
+                    return;
+                }
+
+                const result = await this.invoke('download_audio', {
+                    request: {
+                        url: resolved.stream_url,
+                        title: resolved.title,
+                        platform: resolved.platform,
+                        format,
+                        ext: resolved.ext,
+                        total_bytes: resolved.total_bytes,
+                        thumbnail: resolved.thumbnail,
+                    },
+                });
                 if (result) {
                     this.showToast('Download started!', 'success');
                     urlInput.value = '';
                     this.updateDownloadProgressUI(result);
                 }
             } catch (err) {
-                this.showToast(`Download failed: ${err}`, 'error');
+                console.error(err);
+                this.showToast(`Resolve failed: ${err && err.message ? err.message : err}`, 'error');
             }
         });
+    }
+
+    async startPlaylistDownloads(items, format, urlInput) {
+        if (!items || items.length === 0) {
+            this.showToast('Playlist contained no tracks', 'error');
+            return;
+        }
+        const capped = items.slice(0, 20);
+        this.showToast(`Resolving playlist (${capped.length} tracks)…`, 'info');
+
+        let started = 0;
+        for (const item of capped) {
+            try {
+                const t = await window.AuralisYouTube.resolve(item.url);
+                if (t.kind !== 'track') continue;
+                const result = await this.invoke('download_audio', {
+                    request: {
+                        url: t.stream_url,
+                        title: t.title,
+                        platform: t.platform,
+                        format,
+                        ext: t.ext,
+                        total_bytes: t.total_bytes,
+                        thumbnail: t.thumbnail,
+                    },
+                });
+                if (result) {
+                    this.updateDownloadProgressUI(result);
+                    started++;
+                }
+            } catch (err) {
+                console.error('Playlist item failed:', err);
+            }
+        }
+
+        if (started > 0) {
+            this.showToast(`Started ${started} downloads from playlist`, 'success');
+            urlInput.value = '';
+        } else {
+            this.showToast('Could not start any playlist downloads', 'error');
+        }
     }
 
     async loadSearchView() {
@@ -1369,7 +1456,7 @@ class Bridge {
         const pct = Math.round((progress.progress || 0) * 100);
         row.innerHTML = `
             <div class="track-row-info">
-                <div class="track-row-title">${this.escapeHtml(progress.filename || progress.url || 'Downloading...')}</div>
+                <div class="track-row-title">${this.escapeHtml(progress.title || progress.url || 'Downloading...')}</div>
                 <div class="track-row-subtitle">${progress.status} • ${pct}%</div>
             </div>
             <div class="progress-track neu-inset" style="width: 120px; height: 6px;">

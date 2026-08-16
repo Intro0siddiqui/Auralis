@@ -138,19 +138,28 @@
     <!-- Overlay Root for Full-Screen Player -->
     <div id="overlay-root"></div>
     
+    <!-- Global Audio File & Directory Inputs (Android 16 & Scoped Storage compatible) -->
+    <input type="file" id="global-audio-import-input" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus,.wma" style="position: fixed; left: -9999px; top: -9999px; width: 1px; height: 1px; opacity: 0; pointer-events: none;" onchange="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.handleAudioImport(this)">
+    <input type="file" id="global-folder-scan-input" webkitdirectory directory multiple style="position: fixed; left: -9999px; top: -9999px; width: 1px; height: 1px; opacity: 0; pointer-events: none;" onchange="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.handleFolderScan(this)">
+    
+    <!-- Toast & Diagnostic Notification Container -->
+    <div id="toast-container"></div>
+
     <!-- App Scripts -->
     <script src="js/bridge.js"></script>
     <script src="js/player.js"></script>
+    <!-- youtube.js resolver (sets window.AuralisYouTube; lazy-imports the lib) -->
+    <script src="js/youtube.js"></script>
     
     <!-- Initialize Icons -->
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            lucide.createIcons();
+            if (window.lucide) lucide.createIcons();
         });
         
         // Re-init icons after HTMX swaps
         document.body.addEventListener('htmx:afterSwap', () => {
-            lucide.createIcons();
+            if (window.lucide) lucide.createIcons();
         });
     </script>
 </body>

@@ -4,9 +4,13 @@
     </div>
 
     <section class="quick-actions" style="display: flex; gap: var(--space-3); margin-bottom: var(--space-6); flex-wrap: wrap;">
-        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.scanLibrary()">
-            <i data-lucide="refresh-cw"></i>
-            Scan Library
+        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerAudioImport()">
+            <i data-lucide="file-plus-2"></i>
+            Import Audio
+        </button>
+        <button class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
+            <i data-lucide="folder-search"></i>
+            Scan Storage
         </button>
         <button class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML transition:true">
             <i data-lucide="download"></i>

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Auralis",
-  "version": "2.0.36",
+  "version": "2.0.37",
   "identifier": "com.auralis.v2",
   "build": {
     "frontendDist": "ui",
@@ -29,7 +29,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: https: data: blob: ipc: http://ipc.localhost; img-src 'self' data: blob: asset: https://i.ytimg.com https://*.ytimg.com; media-src 'self' data: blob: asset: ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com; connect-src 'self' ipc: http://ipc.localhost https:; font-src 'self' data: https:;"
+      "csp": "default-src 'self' tauri: https: data: blob: ipc: http://ipc.localhost; img-src 'self' data: blob: asset: https://i.ytimg.com https://*.ytimg.com; media-src 'self' data: blob: asset: ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://esm.sh; connect-src 'self' ipc: http://ipc.localhost https:; font-src 'self' data: https:;"
     }
   },
   "bundle": {

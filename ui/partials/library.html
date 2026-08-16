@@ -2,16 +2,14 @@
     <header class="section-header">
         <h2 class="section-title">Library</h2>
         <div style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
-            <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
-                <i data-lucide="folder-search"></i>
-                Scan Device / Folder
-            </button>
-            <button class="btn btn-secondary neu" onclick="document.getElementById('audio-import-input').click()">
+            <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerAudioImport()">
                 <i data-lucide="file-plus-2"></i>
                 Import Audio
             </button>
-            <input type="file" id="audio-import-input" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus,.wma" style="display: none;" onchange="window.Auralis.bridge.handleAudioImport(this)">
-            <input type="file" id="folder-scan-input" webkitdirectory directory multiple style="display: none;" onchange="window.Auralis.bridge.handleFolderScan(this)">
+            <button class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
+                <i data-lucide="folder-search"></i>
+                Scan Storage
+            </button>
         </div>
     </header>
 

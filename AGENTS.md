@@ -6,7 +6,7 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 ## 1. Project Overview
 
-Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a pure-Rust `rusty_ytdl` downloader (with an optional `yt-dlp` CLI fallback) for media downloads.
+Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
 **Current State: Active Development** — Core architecture is in place and most features are implemented. Remaining work is primarily around polish and a few partial features (built-in smart-playlist presets). For the verified 2026 platform-compliance status (16 KB alignment ✅, but the Android background-media foreground-service *type* and macOS/Windows signing are current gaps), see `PROJECT.md` §11.
 
@@ -93,8 +93,8 @@ ui/
 
 | Task | Status |
 |------|--------|
-| Download pipeline (`infrastructure/media/downloader.rs`) | ✅ `rusty_ytdl` native stream + optional `yt-dlp` fallback, progress tracking |
-| Download commands (`commands/downloads.rs`) | ✅ Real native download + optional yt-dlp invocation |
+| Download pipeline (`infrastructure/media/downloader.rs`) | ✅ `reqwest` streaming of a resolved audio URL, HTTP-Range pause/resume + cancel, progress tracking |
+| Download commands (`commands/downloads.rs`) | ✅ Frontend `youtube.js` resolves the URL; Rust streams bytes + emits `download:progress`/`download:completed` |
 
 ### Phase 4: Playlists — ✅ COMPLETE
 

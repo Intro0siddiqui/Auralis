@@ -1,33 +1,48 @@
 //! Download Commands
 //!
-//! Tauri command handlers for media downloads via yt-dlp.
+//! Tauri command handlers for media downloads. The frontend resolves a
+//! user-facing URL (e.g. YouTube) into a direct audio stream URL via
+//! `youtube.js`; these commands stream that URL to disk through the
+//! [`Downloader`].
 
 use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
-use crate::infrastructure::media::downloader::{ytdlp_executable, Downloader};
+use crate::infrastructure::media::downloader::{Downloader, StreamDownload};
 use serde::{Deserialize, Serialize};
-use std::process::Stdio;
 use tauri::{AppHandle, Emitter, State};
-use tokio::process::Command;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
-/// Download request
+/// A single resolved download request.
+///
+/// The `url` is a *direct* audio stream URL (already resolved by the frontend
+/// `youtube.js` resolver), not a raw user-facing link.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadRequest {
+    /// Resolved direct audio stream URL (https).
     pub url: String,
+    /// Display title.
+    pub title: String,
+    /// Source platform label (e.g. `youtube`, `direct`).
+    pub platform: Option<String>,
+    /// Container/format metadata (display only).
     pub format: Option<AudioFormat>,
-    pub quality: Option<u32>,
+    /// File extension of the saved bytes (e.g. `webm`, `m4a`).
+    pub ext: Option<String>,
+    /// Known total size in bytes, if known.
+    pub total_bytes: Option<u64>,
+    /// Optional thumbnail URL for display.
+    pub thumbnail: Option<String>,
 }
 
-/// Playlist download request
+/// Playlist download request — a pre-resolved list of items.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PlaylistDownloadRequest {
-    pub url: String,
+    pub items: Vec<DownloadRequest>,
     pub format: Option<AudioFormat>,
     pub max_items: Option<u32>,
 }
 
-/// Start downloading a single audio track.
+/// Start downloading a single resolved audio track.
 #[tauri::command]
 pub async fn download_audio(
     request: DownloadRequest,
@@ -41,14 +56,25 @@ pub async fn download_audio(
     }
 
     let format = request.format.unwrap_or(AudioFormat::Mp3);
+    let stream = StreamDownload {
+        stream_url: request.url.clone(),
+        title: request.title.clone(),
+        platform: request
+            .platform
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        format,
+        ext: request
+            .ext
+            .clone()
+            .unwrap_or_else(|| format.extension().to_string()),
+        total_bytes: request.total_bytes,
+    };
 
-    let id = downloader
-        .download(&request.url, format)
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to start download");
-            e.to_string()
-        })?;
+    let id = downloader.download(stream).await.map_err(|e| {
+        error!(error = %e, "Failed to start download");
+        e.to_string()
+    })?;
 
     let state = downloader
         .get_progress(id)
@@ -56,7 +82,7 @@ pub async fn download_audio(
         .ok_or("Download not found after starting")?;
 
     // Stream progress + completion events to the frontend while the
-    // underlying yt-dlp process runs.
+    // download task runs.
     let app_handle = app.clone();
     let dl = (*downloader).clone();
     tauri::async_runtime::spawn(async move {
@@ -83,81 +109,47 @@ pub async fn download_audio(
     Ok(state)
 }
 
-/// Start downloading a playlist (creates one download per item).
+/// Start downloading a playlist (one download per pre-resolved item).
 #[tauri::command]
 pub async fn download_playlist(
     request: PlaylistDownloadRequest,
     downloader: State<'_, Downloader>,
 ) -> Result<Vec<DownloadProgress>, String> {
-    info!(url = %request.url, "Playlist download requested");
+    info!(count = request.items.len(), "Playlist download requested");
 
-    if !request.url.starts_with("https://") {
-        return Err("Only secure HTTPS URLs are supported".to_string());
-    }
+    let max_items = request.max_items.unwrap_or(25) as usize;
+    let mut results: Vec<DownloadProgress> = Vec::new();
 
-    let format = request.format.unwrap_or(AudioFormat::Mp3);
-    let max_items = request.max_items.unwrap_or(50) as usize;
-
-    // Use yt-dlp to extract individual track URLs from the playlist.
-    // Resolves the bundled sidecar if present, otherwise falls back to PATH.
-    let mut cmd = Command::new(ytdlp_executable());
-    cmd.args([
-        "--flat-playlist",
-        "--dump-json",
-        "--playlist-end",
-        &max_items.to_string(),
-        &request.url,
-    ]);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let output = cmd.output().await.map_err(|e| {
-        error!(error = %e, "Failed to launch yt-dlp for playlist extraction");
-        format!("Failed to launch yt-dlp: {e}")
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        error!(stderr = %stderr, "yt-dlp playlist extraction failed");
-        return Err(format!("Failed to extract playlist: {stderr}"));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut track_urls: Vec<String> = Vec::new();
-
-    for line in stdout.lines() {
-        if line.trim().is_empty() {
+    for item in request.items.into_iter().take(max_items) {
+        if !item.url.starts_with("https://") {
+            error!(url = %item.url, "Skipping non-https playlist item");
             continue;
         }
-        match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(entry) => {
-                if let Some(url) = entry.get("url").and_then(|u| u.as_str()) {
-                    track_urls.push(url.to_string());
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, line = %line, "Failed to parse playlist entry JSON");
-            }
-        }
-    }
 
-    if track_urls.is_empty() {
-        return Err("No tracks found in playlist".to_string());
-    }
+        let format = item.format.or(request.format).unwrap_or(AudioFormat::Mp3);
+        let stream = StreamDownload {
+            stream_url: item.url.clone(),
+            title: item.title.clone(),
+            platform: item
+                .platform
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            format,
+            ext: item
+                .ext
+                .clone()
+                .unwrap_or_else(|| format.extension().to_string()),
+            total_bytes: item.total_bytes,
+        };
 
-    info!(count = track_urls.len(), "Extracted playlist track URLs");
-
-    let mut results: Vec<DownloadProgress> = Vec::with_capacity(track_urls.len());
-
-    for url in track_urls {
-        match downloader.download(&url, format).await {
+        match downloader.download(stream).await {
             Ok(id) => {
                 if let Some(progress) = downloader.get_progress(id).await {
                     results.push(progress);
                 }
             }
             Err(e) => {
-                error!(url = %url, error = %e, "Failed to queue playlist track");
+                error!(url = %item.url, error = %e, "Failed to queue playlist track");
             }
         }
     }
