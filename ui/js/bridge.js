@@ -639,14 +639,14 @@ class Bridge {
                     <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">No tracks found in library</h2>
                     <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Scan your device storage or download music to start listening.</p>
                     <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
-                        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerAudioImport()">
+                        <label class="btn btn-primary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
                             <i data-lucide="file-plus-2"></i>
                             Import Audio
-                        </button>
-                        <button class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
+                        </label>
+                        <label class="btn btn-secondary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
                             <i data-lucide="folder-search"></i>
                             Scan Storage
-                        </button>
+                        </label>
                     </div>
                 </div>
             `;
@@ -690,14 +690,14 @@ class Bridge {
                             <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">Your library is empty</h2>
                             <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Import audio files from your device storage or download music to start playing.</p>
                             <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
-                                <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerAudioImport()">
+                                <label class="btn btn-primary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
                                     <i data-lucide="file-plus-2"></i>
                                     Import Audio
-                                </button>
-                                <button class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
+                                </label>
+                                <label class="btn btn-secondary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
                                     <i data-lucide="folder-search"></i>
                                     Scan Storage
-                                </button>
+                                </label>
                                 <button class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML transition:true">
                                     <i data-lucide="download"></i>
                                     Download Audio

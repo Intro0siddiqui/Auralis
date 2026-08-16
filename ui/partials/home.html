@@ -4,14 +4,14 @@
     </div>
 
     <section class="quick-actions" style="display: flex; gap: var(--space-3); margin-bottom: var(--space-6); flex-wrap: wrap;">
-        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.triggerAudioImport()">
+        <label class="btn btn-primary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
             <i data-lucide="file-plus-2"></i>
             Import Audio
-        </button>
-        <button class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()">
+        </label>
+        <label class="btn btn-secondary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
             <i data-lucide="folder-search"></i>
             Scan Storage
-        </button>
+        </label>
         <button class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML transition:true">
             <i data-lucide="download"></i>
             Download Audio
