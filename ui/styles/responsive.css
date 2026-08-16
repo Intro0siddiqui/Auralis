@@ -201,15 +201,26 @@
         padding: var(--space-4) var(--space-3);
     }
     
-    /* Mobile Pills */
-    .pill-tabs {
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
+    /* Mobile Settings Page Layout */
+    .settings-item {
+        flex-direction: column;
+        align-items: stretch;
+        gap: var(--space-3);
     }
-    
-    .pill-tabs::-webkit-scrollbar {
-        display: none;
+
+    .theme-segmented {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .theme-option {
+        flex: 1;
+        justify-content: center;
+        padding: var(--space-2) var(--space-2);
+    }
+
+    .volume-slider-group {
+        width: 100%;
     }
 }
 

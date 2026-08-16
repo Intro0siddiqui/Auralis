@@ -62,6 +62,12 @@ class Bridge {
                     this.updateScanProgressUI(event.payload);
                 });
 
+                // Listen for live diagnostic scan logs
+                await tauriListen('library:scan_log', (event) => {
+                    this.emit('library:scan_log', event.payload);
+                    this.appendScanLog(event.payload);
+                });
+
                 // Listen for individual tracks imported in real-time
                 await tauriListen('library:track_imported', (event) => {
                     this.emit('library:track_imported', event.payload);
@@ -71,7 +77,7 @@ class Bridge {
                 // Listen for scan completion
                 await tauriListen('library:scan_complete', (event) => {
                     this.emit('library:scan', event.payload);
-                    this.hideScanProgressUI();
+                    this.finishScanProgressUI(event.payload);
                     const added = (event.payload && event.payload.tracks_added) || 0;
                     const updated = (event.payload && event.payload.tracks_updated) || 0;
                     this.showToast(`Library scan complete: ${added} added, ${updated} updated`, 'success');
@@ -155,6 +161,7 @@ class Bridge {
     }
 
     async scanLibrary(paths = null) {
+        this.appendScanLog('🚀 Initiating device storage scan...');
         this.showToast('Scanning storage for audio files...', 'info');
         this.updateScanProgressUI({
             title: 'Scanning Storage',
@@ -165,21 +172,22 @@ class Bridge {
 
         try {
             const summary = await this.invoke('scan_library_paths', { paths: paths || null });
-            this.hideScanProgressUI();
             if (summary) {
                 const added = summary.tracks_added ?? 0;
                 const updated = summary.tracks_updated ?? 0;
+                this.appendScanLog(`🎉 Complete: ${added} added, ${updated} updated`);
                 this.showToast(`Scan complete: ${added} added, ${updated} updated`, 'success');
                 await this.loadLibraryView();
                 this.refreshCurrentView();
             }
         } catch (err) {
-            this.hideScanProgressUI();
-            this.showToast(`Scan finished: ${err}`, 'info');
+            this.appendScanLog(`❌ Scan error: ${err}`);
+            this.showToast(`Scan error: ${err}`, 'error');
         }
     }
 
     async triggerFolderScan() {
+        this.appendScanLog('📂 Requesting folder selection...');
         // 1. Attempt native desktop folder picker (Windows, macOS, Linux)
         try {
             this.showToast('Select a music folder to scan...', 'info');
@@ -187,23 +195,28 @@ class Bridge {
             if (summary !== undefined && summary !== null) {
                 const added = summary.tracks_added ?? 0;
                 const updated = summary.tracks_updated ?? 0;
+                this.appendScanLog(`🎉 Native scan complete: ${added} added, ${updated} updated`);
                 this.showToast(`Scan complete: ${added} added, ${updated} updated`, 'success');
                 await this.loadLibraryView();
                 this.refreshCurrentView();
                 return;
             } else if (summary === null && this.tauriAvailable) {
                 // User cancelled native dialog
+                this.appendScanLog('ℹ️ Folder picker was cancelled');
                 return;
             }
         } catch (err) {
+            this.appendScanLog(`⚠️ Native dialog fallback: ${err}`);
             console.log('Native dialog fallback to SAF / HTML5 folder picker:', err);
         }
 
         // 2. Fallback to SAF / HTML5 Directory Picker on Android or Web
         const folderInput = document.getElementById('folder-scan-input');
         if (folderInput) {
+            this.appendScanLog('📱 Opening SAF directory picker...');
             folderInput.click();
         } else {
+            this.appendScanLog('❌ Folder scanner input element not found');
             this.showToast('Folder scanner input not found.', 'warning');
         }
     }
@@ -211,6 +224,7 @@ class Bridge {
     async handleFolderScan(input) {
         if (!input || !input.files || input.files.length === 0) return;
         const allFiles = Array.from(input.files);
+        this.appendScanLog(`📱 SAF picker returned ${allFiles.length} raw files`);
         const audioExtensions = ['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.wma'];
         const audioFiles = allFiles.filter(file => {
             const name = file.name.toLowerCase();
@@ -218,11 +232,13 @@ class Bridge {
         });
 
         if (audioFiles.length === 0) {
+            this.appendScanLog('⚠️ No supported audio format files found in selected directory');
             this.showToast('No audio files found in selected folder.', 'info');
             input.value = '';
             return;
         }
 
+        this.appendScanLog(`🎵 Found ${audioFiles.length} audio file(s) to import`);
         this.showToast(`Found ${audioFiles.length} audio file(s). Scanning & importing...`, 'info');
         this.updateScanProgressUI({
             title: 'Importing Folder Audio',
@@ -245,6 +261,7 @@ class Bridge {
             });
 
             try {
+                this.appendScanLog(`⏳ Reading: ${file.name} (${Math.round(file.size / 1024)} KB)`);
                 const base64Data = await new Promise((resolve, reject) => {
                     const reader = new FileReader();
                     reader.onload = () => {
@@ -262,15 +279,17 @@ class Bridge {
                 });
                 if (result) {
                     importedCount++;
+                    this.appendScanLog(`✅ Imported: ${result.artist} - ${result.title}`);
                     this.handleTrackImported(result);
                 }
             } catch (err) {
+                this.appendScanLog(`❌ Failed to import ${file.name}: ${err}`);
                 console.error(`Failed to scan file ${file.name}:`, err);
             }
         }
 
         input.value = '';
-        this.hideScanProgressUI();
+        this.finishScanProgressUI({ tracks_added: importedCount, errors: [] });
 
         if (importedCount > 0) {
             this.showToast(`Scan complete: ${importedCount} track(s) added to library!`, 'success');
@@ -284,6 +303,7 @@ class Bridge {
     async handleAudioImport(input) {
         if (!input || !input.files || input.files.length === 0) return;
         const files = Array.from(input.files);
+        this.appendScanLog(`📥 Selected ${files.length} audio file(s) for direct import`);
         this.showToast(`Importing ${files.length} audio file(s)...`, 'info');
         this.updateScanProgressUI({
             title: 'Importing Audio Files',
@@ -306,6 +326,7 @@ class Bridge {
             });
 
             try {
+                this.appendScanLog(`⏳ Processing buffer: ${file.name}`);
                 const base64Data = await new Promise((resolve, reject) => {
                     const reader = new FileReader();
                     reader.onload = () => {
@@ -323,15 +344,17 @@ class Bridge {
                 });
                 if (result) {
                     successCount++;
+                    this.appendScanLog(`✅ Successfully ingested: ${result.artist} - ${result.title}`);
                     this.handleTrackImported(result);
                 }
             } catch (err) {
+                this.appendScanLog(`❌ Ingestion failed for ${file.name}: ${err}`);
                 console.error(`Failed to import ${file.name}:`, err);
             }
         }
 
         input.value = '';
-        this.hideScanProgressUI();
+        this.finishScanProgressUI({ tracks_added: successCount, errors: [] });
 
         if (successCount > 0) {
             this.showToast(`Successfully imported ${successCount} track(s)!`, 'success');
@@ -428,6 +451,79 @@ class Bridge {
             </div>
         `;
         toast.style.opacity = '1';
+    }
+
+    appendScanLog(msg) {
+        if (!msg) return;
+        const banner = document.getElementById('library-scan-progress');
+        if (banner) banner.style.display = 'flex';
+
+        const box = document.getElementById('library-scan-logbox');
+        if (box) box.style.display = 'block';
+
+        const content = document.getElementById('library-scan-log-content');
+        if (content) {
+            const line = document.createElement('div');
+            const time = new Date().toLocaleTimeString();
+            line.style.cssText = 'white-space: pre-wrap; word-break: break-all; margin-bottom: 2px;';
+            if (msg.includes('❌') || msg.includes('Error') || msg.includes('failed')) {
+                line.style.color = '#ef4444';
+            } else if (msg.includes('⚠️') || msg.includes('Warning')) {
+                line.style.color = '#f59e0b';
+            } else if (msg.includes('✅') || msg.includes('🎉')) {
+                line.style.color = '#10b981';
+            } else if (msg.includes('🎵') || msg.includes('📂')) {
+                line.style.color = '#38bdf8';
+            }
+            line.textContent = `[${time}] ${msg}`;
+            content.appendChild(line);
+            if (box) box.scrollTop = box.scrollHeight;
+        }
+    }
+
+    toggleScanLogs() {
+        const box = document.getElementById('library-scan-logbox');
+        if (box) {
+            box.style.display = box.style.display === 'none' ? 'block' : 'none';
+        }
+    }
+
+    copyScanLogs() {
+        const content = document.getElementById('library-scan-log-content');
+        if (content) {
+            const text = content.innerText || content.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                this.showToast('Diagnostic logs copied to clipboard!', 'success');
+            }).catch(() => {
+                this.showToast('Failed to copy logs', 'error');
+            });
+        }
+    }
+
+    finishScanProgressUI(payload) {
+        const titleEl = document.getElementById('library-scan-title');
+        const subEl = document.getElementById('library-scan-subtitle');
+        const icon = document.querySelector('#library-scan-progress i');
+
+        if (titleEl) titleEl.textContent = 'Scan Complete';
+        if (subEl) {
+            const added = (payload && payload.tracks_added) || 0;
+            const errors = (payload && payload.errors && payload.errors.length) || 0;
+            subEl.textContent = `${added} tracks added • ${errors} errors`;
+        }
+        if (icon) {
+            icon.classList.remove('spin');
+            icon.setAttribute('data-lucide', 'check-circle-2');
+            if (window.lucide) window.lucide.createIcons();
+        }
+
+        const toast = document.getElementById('scan-progress-toast');
+        if (toast) {
+            toast.style.opacity = '0';
+            setTimeout(() => {
+                if (toast && toast.parentElement) toast.remove();
+            }, 300);
+        }
     }
 
     hideScanProgressUI() {

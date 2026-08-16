@@ -157,8 +157,14 @@ pub async fn scan_library_paths(
                 "/storage/emulated/0/Music",
                 "/storage/emulated/0/Download",
                 "/storage/emulated/0/Audio",
+                "/storage/emulated/0/Podcasts",
+                "/storage/emulated/0/Recordings",
+                "/storage/emulated/0/Documents",
+                "/storage/emulated/0/Telegram/Telegram Audio",
                 "/sdcard/Music",
                 "/sdcard/Download",
+                "/sdcard/Audio",
+                "/sdcard/Telegram/Telegram Audio",
             ] {
                 let p = std::path::PathBuf::from(android_path);
                 if p.exists() {
@@ -188,19 +194,66 @@ pub async fn scan_library_paths(
     let repo = track_repo(&db);
 
     let app_handle = app.clone();
+    let app_log_handle = app.clone();
+
+    let _ = app.emit(
+        "library:scan_log",
+        format!(
+            "🚀 Starting library scan across {} target paths",
+            scan_paths.len()
+        ),
+    );
+    for p in &scan_paths {
+        let _ = app.emit(
+            "library:scan_log",
+            format!(
+                "📂 Candidate path: {} (exists: {})",
+                p.display(),
+                p.exists()
+            ),
+        );
+    }
+
     let summary = scanner
         .scan_library_paths_with_progress(
             &scan_paths,
             repo,
-            Some(move |progress| {
-                let _ = app_handle.emit("library:scan_progress", &progress);
-            }),
+            Some(
+                move |progress: crate::infrastructure::filesystem::scanner::ScanProgress| {
+                    if !progress.current_file.is_empty() {
+                        let _ = app_log_handle.emit(
+                            "library:scan_log",
+                            format!("🎵 Processing: {}", progress.current_file),
+                        );
+                    }
+                    let _ = app_handle.emit("library:scan_progress", &progress);
+                },
+            ),
         )
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Scan failed");
+            let _ = app.emit(
+                "library:scan_log",
+                format!("❌ Scan failed with error: {e}"),
+            );
             format!("Scan failed: {e}")
         })?;
+
+    for err in &summary.errors {
+        let _ = app.emit("library:scan_log", format!("⚠️ Warning/Error: {err}"));
+    }
+
+    let _ = app.emit(
+        "library:scan_log",
+        format!(
+            "🎉 Scan finished: +{} tracks added, {} updated, {} removed, {} errors",
+            summary.tracks_added,
+            summary.tracks_updated,
+            summary.tracks_removed,
+            summary.errors.len()
+        ),
+    );
 
     // Notify the frontend that the scan finished so it can refresh.
     let _ = app.emit("library:scan_complete", &summary);

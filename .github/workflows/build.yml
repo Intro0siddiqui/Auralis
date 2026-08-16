@@ -198,6 +198,15 @@ jobs:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
+      - name: Apply Custom Auralis App Icons
+        run: |
+          RES_DIR="gen/android/app/src/main/res"
+          if [ -d "icons/android" ] && [ -d "$RES_DIR" ]; then
+            echo "Copying custom Auralis mipmap icons to $RES_DIR"
+            cp -r icons/android/* "$RES_DIR/"
+            echo "Custom launcher icons applied successfully!"
+          fi
+
       - name: Inject Android Audio & Storage Permissions
         run: |
           MANIFEST="gen/android/app/src/main/AndroidManifest.xml"

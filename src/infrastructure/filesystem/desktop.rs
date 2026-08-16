@@ -73,7 +73,14 @@ impl DesktopScanner {
             let entries = match std::fs::read_dir(&current_dir) {
                 Ok(entries) => entries,
                 Err(e) => {
-                    warn!(path = %current_dir.display(), error = %e, "Cannot read directory; skipping");
+                    warn!(path = %current_dir.display(), error = %e, "Cannot read directory");
+                    if current_dir == path {
+                        return Err(ScannerError::IoError(format!(
+                            "Access denied or error reading {}: {}",
+                            current_dir.display(),
+                            e
+                        )));
+                    }
                     continue;
                 }
             };

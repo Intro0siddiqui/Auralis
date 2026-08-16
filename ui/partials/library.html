@@ -28,20 +28,32 @@
         </label>
     </div>
 
-    <!-- Live Scan & Import Progress Indicator -->
-    <div id="library-scan-progress" class="neu-glass" style="display: none; margin-bottom: var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); align-items: center; justify-content: space-between; gap: var(--space-3);">
-        <div style="display: flex; align-items: center; gap: var(--space-3); flex: 1; min-width: 0;">
-            <i data-lucide="loader-2" style="width: 20px; height: 20px; color: var(--accent); flex-shrink: 0;"></i>
-            <div style="flex: 1; min-width: 0;">
-                <div id="library-scan-title" style="font-weight: var(--font-semibold); font-size: var(--text-sm); color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Scanning library...</div>
-                <div id="library-scan-subtitle" style="font-size: var(--text-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Processing audio files</div>
+    <!-- Live Scan & Import Progress Indicator & Diagnostic Console -->
+    <div id="library-scan-progress" class="neu-glass" style="display: none; margin-bottom: var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); flex-direction: column; gap: var(--space-3);">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); width: 100%;">
+            <div style="display: flex; align-items: center; gap: var(--space-3); flex: 1; min-width: 0;">
+                <i data-lucide="loader-2" style="width: 20px; height: 20px; color: var(--accent); flex-shrink: 0;" class="spin"></i>
+                <div style="flex: 1; min-width: 0;">
+                    <div id="library-scan-title" style="font-weight: var(--font-semibold); font-size: var(--text-sm); color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Scanning library...</div>
+                    <div id="library-scan-subtitle" style="font-size: var(--text-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Processing audio files</div>
+                </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: var(--space-3);">
+                <span id="library-scan-counter" style="font-size: var(--text-xs); color: var(--accent); font-weight: var(--font-medium); white-space: nowrap;"></span>
+                <div class="progress-track neu-inset" style="width: 100px; height: 6px; flex-shrink: 0;">
+                    <div id="library-scan-bar" class="progress-fill" style="width: 0%; background: var(--accent); height: 100%; transition: width 0.2s ease;"></div>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="window.Auralis.bridge.toggleScanLogs()" style="font-size: 10px; padding: 2px 8px;">Logs</button>
             </div>
         </div>
-        <div style="display: flex; align-items: center; gap: var(--space-3);">
-            <span id="library-scan-counter" style="font-size: var(--text-xs); color: var(--accent); font-weight: var(--font-medium); white-space: nowrap;"></span>
-            <div class="progress-track neu-inset" style="width: 100px; height: 6px; flex-shrink: 0;">
-                <div id="library-scan-bar" class="progress-fill" style="width: 0%; background: var(--accent); height: 100%; transition: width 0.2s ease;"></div>
+
+        <!-- Collapsible Diagnostic Log Box -->
+        <div id="library-scan-logbox" style="display: none; background: #080a0f; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: var(--space-2); max-height: 160px; overflow-y: auto; font-family: monospace; font-size: 11px; color: #94a3b8; line-height: 1.5;">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1a202c; padding-bottom: 4px; margin-bottom: 6px;">
+                <span style="color: var(--accent); font-weight: bold;">📜 Diagnostic Scan Log</span>
+                <button type="button" class="btn btn-sm" onclick="window.Auralis.bridge.copyScanLogs()" style="font-size: 10px; padding: 1px 6px;">Copy</button>
             </div>
+            <div id="library-scan-log-content"></div>
         </div>
     </div>
 
