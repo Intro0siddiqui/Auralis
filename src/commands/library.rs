@@ -152,27 +152,8 @@ pub async fn scan_library_paths(
                     default_paths.push(download);
                 }
             }
-            // Android-specific standard storage paths
-            for android_path in [
-                "/storage/emulated/0/Music",
-                "/storage/emulated/0/Download",
-                "/storage/emulated/0/Audio",
-                "/storage/emulated/0/Podcasts",
-                "/storage/emulated/0/Recordings",
-                "/storage/emulated/0/Documents",
-                "/storage/emulated/0/Telegram/Telegram Audio",
-                "/sdcard/Music",
-                "/sdcard/Download",
-                "/sdcard/Audio",
-                "/sdcard/Telegram/Telegram Audio",
-            ] {
-                let p = std::path::PathBuf::from(android_path);
-                if p.exists() {
-                    default_paths.push(p);
-                }
-            }
 
-            // Also include internal app music and downloads directory
+            // Always include internal app sandboxed music and downloads directories
             if let Ok(app_dir) = app.path().app_data_dir() {
                 let music_dir = app_dir.join("music");
                 if music_dir.exists() {
