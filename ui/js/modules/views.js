@@ -1,0 +1,669 @@
+/**
+ * Views Module
+ * Handles loading, rendering, filtering and UI state transitions for all app views.
+ */
+
+export const viewMethods = {
+    refreshCurrentView() {
+        const content = document.getElementById('content');
+        if (!content) return;
+
+        if (content.querySelector('.page-library')) {
+            this.activeView = 'library';
+            this.loadLibraryView();
+        } else if (content.querySelector('.page-albums')) {
+            this.activeView = 'albums';
+            this.loadAlbumsView();
+        } else if (content.querySelector('.page-artists')) {
+            this.activeView = 'artists';
+            this.loadArtistsView();
+        } else if (content.querySelector('.page-downloads')) {
+            this.activeView = 'downloads';
+            this.loadDownloadView();
+        } else if (content.querySelector('.page-search')) {
+            this.activeView = 'search';
+            this.loadSearchView();
+        } else if (content.querySelector('.page-settings, #settings-view')) {
+            this.activeView = 'settings';
+            this.loadSettingsView();
+        } else if (content.querySelector('.page-playlists')) {
+            this.activeView = 'playlists';
+            this.loadPlaylistsView();
+        } else if (content.querySelector('.page-sync')) {
+            this.activeView = 'sync';
+            this.loadSyncView();
+        } else {
+            this.activeView = 'home';
+            this.loadHomeView();
+        }
+    },
+
+    async loadLibraryView() {
+        const trackList = document.querySelector('.page-library .track-list');
+        if (!trackList) return;
+
+        try {
+            const page = await this.invoke('get_tracks');
+            if (page && page.tracks && page.tracks.length > 0) {
+                this.tracks = page.tracks;
+            } else {
+                this.tracks = [];
+            }
+            this.bindLibraryFilterControls();
+            this.renderLibraryTracks();
+        } catch (err) {
+            console.error('Error loading library:', err);
+            this.bindLibraryFilterControls();
+            this.renderLibraryTracks();
+        }
+    },
+
+    bindLibraryFilterControls() {
+        const sortSelect = document.querySelector('.page-library select[name="sort_by"]');
+        const downloadedCheckbox = document.querySelector('.page-library input[name="downloaded_only"]');
+
+        if (sortSelect && !sortSelect.dataset.bound) {
+            sortSelect.dataset.bound = 'true';
+            sortSelect.addEventListener('change', () => {
+                this.renderLibraryTracks();
+            });
+        }
+
+        if (downloadedCheckbox && !downloadedCheckbox.dataset.bound) {
+            downloadedCheckbox.dataset.bound = 'true';
+            downloadedCheckbox.addEventListener('change', () => {
+                this.renderLibraryTracks();
+            });
+        }
+    },
+
+    renderLibraryTracks() {
+        const trackList = document.querySelector('.page-library .track-list');
+        if (!trackList) return;
+
+        const sortSelect = document.querySelector('.page-library select[name="sort_by"]');
+        const downloadedCheckbox = document.querySelector('.page-library input[name="downloaded_only"]');
+
+        let filtered = [...this.tracks];
+
+        if (downloadedCheckbox && downloadedCheckbox.checked) {
+            filtered = filtered.filter(t => t.is_downloaded || (t.file_path && !t.file_path.startsWith('http')));
+        }
+
+        const sortBy = sortSelect ? sortSelect.value : 'date_added';
+        if (sortBy === 'title') {
+            filtered.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+        } else if (sortBy === 'artist') {
+            filtered.sort((a, b) => (a.artist || '').localeCompare(b.artist || ''));
+        } else if (sortBy === 'album') {
+            filtered.sort((a, b) => (a.album || '').localeCompare(b.album || ''));
+        } else if (sortBy === 'date_added') {
+            if (filtered.some(t => t.created_at || t.date_added)) {
+                filtered.sort((a, b) => new Date(b.created_at || b.date_added || 0) - new Date(a.created_at || a.date_added || 0));
+            }
+        }
+
+        if (filtered.length > 0) {
+            this.renderTrackRows(trackList, filtered);
+        } else {
+            trackList.innerHTML = `
+                <div class="empty-state glass neu" style="padding: var(--space-8); border-radius: var(--radius-lg); text-align: center;">
+                    <div class="empty-state-icon" style="color: var(--accent); margin-bottom: var(--space-4);">
+                        <i data-lucide="music" style="width: 48px; height: 48px;"></i>
+                    </div>
+                    <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">No tracks found in library</h2>
+                    <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Scan your device storage or download music to start listening.</p>
+                    <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
+                        <label class="btn btn-primary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+                            <i data-lucide="file-plus-2"></i>
+                            Import Audio
+                        </label>
+                        <label class="btn btn-secondary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+                            <i data-lucide="folder-search"></i>
+                            Scan Storage
+                        </label>
+                    </div>
+                </div>
+            `;
+            if (window.lucide) window.lucide.createIcons();
+        }
+    },
+
+    async loadHomeView() {
+        try {
+            const page = await this.invoke('get_tracks', { filter: { limit: 12 } });
+            const shelf = document.getElementById('recently-added-shelf') || document.querySelector('.page-home .shelf') || document.querySelector('#content .shelf');
+            const trackList = document.getElementById('continue-listening-tracks') || document.querySelector('.page-home .track-list');
+            const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home');
+
+            if (page && page.tracks && page.tracks.length > 0) {
+                this.tracks = page.tracks;
+                if (shelf) {
+                    shelf.innerHTML = page.tracks.slice(0, 6).map(track => `
+                        <div class="card album-card neu-glass" onclick="window.Auralis.bridge.playTrack('${track.id}')" style="cursor: pointer;">
+                            <div class="card-artwork">
+                                ${track.album_art_path ? this.artImgTag(track.album_art_path, track.title) : `<i data-lucide="disc-3"></i>`}
+                            </div>
+                            <div class="card-body">
+                                <div class="card-title">${this.escapeHtml(track.title)}</div>
+                                <div class="card-subtitle">${this.escapeHtml(track.artist || 'Unknown Artist')}</div>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+                if (trackList) {
+                    this.renderTrackRows(trackList, page.tracks.slice(0, 6));
+                }
+                if (window.lucide) window.lucide.createIcons();
+            } else {
+                if (container) {
+                    container.innerHTML = `
+                        <div class="empty-state glass neu" style="padding: var(--space-8); border-radius: var(--radius-lg); text-align: center; margin-top: var(--space-4);">
+                            <div class="empty-state-icon" style="color: var(--accent); margin-bottom: var(--space-4);">
+                                <i data-lucide="music" style="width: 48px; height: 48px;"></i>
+                            </div>
+                            <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">Your library is empty</h2>
+                            <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Import audio files from your device storage or download music to start playing.</p>
+                            <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
+                                <label class="btn btn-primary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+                                    <i data-lucide="file-plus-2"></i>
+                                    Import Audio
+                                </label>
+                                <label class="btn btn-secondary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+                                    <i data-lucide="folder-search"></i>
+                                    Scan Storage
+                                </label>
+                                <button class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML transition:true">
+                                    <i data-lucide="download"></i>
+                                    Download Audio
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            }
+        } catch (err) {
+            console.error('Error loading home view:', err);
+        }
+    },
+
+    async loadAlbumsView() {
+        const grid = document.getElementById('albums-grid') || document.querySelector('.page-albums .grid');
+        if (!grid) return;
+
+        try {
+            const page = await this.invoke('get_tracks');
+            if (page && page.tracks && page.tracks.length > 0) {
+                this.tracks = page.tracks;
+                const albumMap = new Map();
+                for (const t of page.tracks) {
+                    const albumName = t.album || 'Unknown Album';
+                    if (!albumMap.has(albumName)) {
+                        albumMap.set(albumName, { name: albumName, artist: t.artist || 'Unknown Artist', art: t.album_art_path, tracks: [] });
+                    }
+                    albumMap.get(albumName).tracks.push(t);
+                }
+
+                grid.innerHTML = Array.from(albumMap.values()).map(album => `
+                    <div class="card album-card neu-glass" onclick="window.Auralis.bridge.playTrack('${album.tracks[0].id}')" style="cursor: pointer;">
+                        <div class="card-artwork">
+                            ${album.art ? this.artImgTag(album.art, album.name) : `<i data-lucide="disc-3"></i>`}
+                        </div>
+                        <div class="card-body">
+                            <div class="card-title">${this.escapeHtml(album.name)}</div>
+                            <div class="card-subtitle">${this.escapeHtml(album.artist)} · ${album.tracks.length} tracks</div>
+                        </div>
+                    </div>
+                `).join('');
+                if (window.lucide) window.lucide.createIcons();
+            } else {
+                grid.innerHTML = `
+                    <div class="empty-state glass neu" style="grid-column: 1 / -1; padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
+                        <i data-lucide="disc-3" style="width: 48px; height: 48px; color: var(--accent); margin-bottom: var(--space-3);"></i>
+                        <h3 style="color: var(--text-1); font-size: var(--text-lg); margin-bottom: var(--space-2);">No albums found</h3>
+                        <p style="color: var(--text-3); font-size: var(--text-sm);">Scan your music library to populate your album catalog.</p>
+                    </div>
+                `;
+                if (window.lucide) window.lucide.createIcons();
+            }
+        } catch (err) {
+            console.error('Error loading albums:', err);
+        }
+    },
+
+    async loadArtistsView() {
+        const grid = document.getElementById('artists-grid') || document.querySelector('.page-artists .grid');
+        if (!grid) return;
+
+        try {
+            const page = await this.invoke('get_tracks');
+            if (page && page.tracks && page.tracks.length > 0) {
+                this.tracks = page.tracks;
+                const artistMap = new Map();
+                for (const t of page.tracks) {
+                    const artistName = t.artist || 'Unknown Artist';
+                    if (!artistMap.has(artistName)) {
+                        artistMap.set(artistName, { name: artistName, tracks: [] });
+                    }
+                    artistMap.get(artistName).tracks.push(t);
+                }
+
+                grid.innerHTML = Array.from(artistMap.values()).map(artist => `
+                    <div class="card artist-card neu-glass" onclick="window.Auralis.bridge.playTrack('${artist.tracks[0].id}')" style="cursor: pointer;">
+                        <div class="card-artwork">
+                            <i data-lucide="user"></i>
+                        </div>
+                        <div class="card-body">
+                            <div class="card-title">${this.escapeHtml(artist.name)}</div>
+                            <div class="card-subtitle">${artist.tracks.length} tracks</div>
+                        </div>
+                    </div>
+                `).join('');
+                if (window.lucide) window.lucide.createIcons();
+            } else {
+                grid.innerHTML = `
+                    <div class="empty-state glass neu" style="grid-column: 1 / -1; padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
+                        <i data-lucide="users" style="width: 48px; height: 48px; color: var(--accent); margin-bottom: var(--space-3);"></i>
+                        <h3 style="color: var(--text-1); font-size: var(--text-lg); margin-bottom: var(--space-2);">No artists found</h3>
+                        <p style="color: var(--text-3); font-size: var(--text-sm);">Scan your music library to discover artists.</p>
+                    </div>
+                `;
+                if (window.lucide) window.lucide.createIcons();
+            }
+        } catch (err) {
+            console.error('Error loading artists:', err);
+        }
+    },
+
+    async loadPlaylistsView() {
+        const grid = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
+        const detail = document.getElementById('playlist-detail');
+        if (detail) detail.style.display = 'none';
+        if (grid) grid.style.display = 'grid';
+        if (!grid) return;
+
+        try {
+            const playlists = await this.invoke('get_playlists');
+            if (playlists && playlists.length > 0) {
+                grid.innerHTML = playlists.map(pl => {
+                    const isSmart = Boolean(pl.is_smart);
+                    let iconName = 'list-music';
+                    let badgeHtml = '';
+                    if (isSmart) {
+                        const idStr = String(pl.id);
+                        if (idStr === 'smart_favorites' || pl.name === 'Favorites') {
+                            iconName = 'heart';
+                            badgeHtml = `<span class="badge" style="background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart</span>`;
+                        } else if (idStr === 'smart_recent' || pl.name === 'Recently Added') {
+                            iconName = 'clock';
+                            badgeHtml = `<span class="badge" style="background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart</span>`;
+                        } else if (idStr === 'smart_most_played' || pl.name === 'Most Played') {
+                            iconName = 'flame';
+                            badgeHtml = `<span class="badge" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart</span>`;
+                        } else {
+                            iconName = 'sparkles';
+                            badgeHtml = `<span class="badge" style="background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart</span>`;
+                        }
+                    }
+
+                    return `
+                    <div class="card playlist-card neu-glass" onclick="window.Auralis.bridge.openPlaylist('${pl.id}')" style="cursor: pointer;">
+                        <div class="card-artwork"><i data-lucide="${iconName}"></i></div>
+                        <div class="card-body">
+                            <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-1);">
+                                <div class="card-title" style="margin-bottom: 0;">${this.escapeHtml(pl.name)}</div>
+                                ${badgeHtml}
+                            </div>
+                            <div class="card-subtitle">${pl.track_ids ? pl.track_ids.length : 0} tracks</div>
+                        </div>
+                    </div>
+                `;
+                }).join('');
+                if (window.lucide) window.lucide.createIcons();
+            } else {
+                grid.innerHTML = `
+                    <div class="empty-state glass neu" style="grid-column: 1 / -1; padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
+                        <i data-lucide="list-music" style="width: 48px; height: 48px; color: var(--accent); margin-bottom: var(--space-3);"></i>
+                        <h3 style="color: var(--text-1); font-size: var(--text-lg); margin-bottom: var(--space-2);">No playlists created</h3>
+                        <p style="color: var(--text-3); font-size: var(--text-sm); margin-bottom: var(--space-4);">Create playlists to curate your favorite music collections.</p>
+                        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.promptCreatePlaylist()">
+                            <i data-lucide="plus"></i>
+                            Create First Playlist
+                        </button>
+                    </div>
+                `;
+                if (window.lucide) window.lucide.createIcons();
+            }
+        } catch (err) {
+            console.error('Error loading playlists:', err);
+        }
+    },
+
+    async openPlaylist(playlistId) {
+        if (!playlistId) return;
+        try {
+            const result = await this.invoke('get_playlist', { id: playlistId });
+            if (!result) {
+                this.showToast('Playlist not found', 'warning');
+                return;
+            }
+            const [playlist, tracks] = result;
+            const detailEl = document.getElementById('playlist-detail');
+            const gridEl = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
+
+            if (detailEl && gridEl) {
+                gridEl.style.display = 'none';
+                detailEl.style.display = 'block';
+
+                const isSmart = Boolean(playlist.is_smart);
+                let badge = isSmart ? `<span class="badge" style="background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px;">Smart Playlist</span>` : '';
+
+                detailEl.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-4);">
+                        <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.closePlaylistDetail()">
+                            <i data-lucide="arrow-left"></i>
+                            Back to Playlists
+                        </button>
+                        ${tracks && tracks.length > 0 ? `
+                            <button class="btn btn-primary btn-sm neu" onclick="window.Auralis.bridge.playTrack('${tracks[0].id}')">
+                                <i data-lucide="play"></i>
+                                Play All (${tracks.length})
+                            </button>
+                        ` : ''}
+                    </div>
+                    <div class="card neu-glass" style="margin-bottom: var(--space-4); padding: var(--space-4);">
+                        <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-1);">
+                            <h3 style="font-size: var(--text-xl); font-weight: var(--font-bold); color: var(--text-1); margin: 0;">${this.escapeHtml(playlist.name)}</h3>
+                            ${badge}
+                        </div>
+                        ${playlist.description ? `<p style="color: var(--text-3); font-size: var(--text-sm); margin: 0 0 var(--space-2) 0;">${this.escapeHtml(playlist.description)}</p>` : ''}
+                        <div style="color: var(--text-3); font-size: var(--text-xs);">${tracks ? tracks.length : 0} tracks</div>
+                    </div>
+                    <div class="track-list" id="playlist-track-list">
+                        <!-- Tracks -->
+                    </div>
+                `;
+
+                const trackListEl = document.getElementById('playlist-track-list');
+                if (tracks && tracks.length > 0) {
+                    this.renderTrackRows(trackListEl, tracks);
+                } else {
+                    trackListEl.innerHTML = `
+                        <div class="empty-state glass neu" style="padding: var(--space-6); text-align: center; border-radius: var(--radius-md);">
+                            <i data-lucide="music" style="width: 32px; height: 32px; color: var(--accent); margin-bottom: var(--space-2);"></i>
+                            <h4 style="color: var(--text-1); font-size: var(--text-base); margin-bottom: var(--space-1);">No tracks in playlist</h4>
+                            <p style="color: var(--text-3); font-size: var(--text-xs);">Add tracks to this playlist from your library.</p>
+                        </div>
+                    `;
+                }
+                if (window.lucide) window.lucide.createIcons();
+            }
+        } catch (err) {
+            console.error('Failed to open playlist:', err);
+            this.showToast(`Failed to open playlist: ${err}`, 'error');
+        }
+    },
+
+    closePlaylistDetail() {
+        const detailEl = document.getElementById('playlist-detail');
+        const gridEl = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
+        if (detailEl) detailEl.style.display = 'none';
+        if (gridEl) gridEl.style.display = 'grid';
+        if (window.lucide) window.lucide.createIcons();
+    },
+
+    async promptCreatePlaylist() {
+        const name = prompt('Enter playlist name:');
+        if (!name || !name.trim()) return;
+
+        try {
+            const created = await this.invoke('create_playlist', { request: { name: name.trim() } });
+            if (created) {
+                this.showToast(`Playlist "${created.name}" created!`, 'success');
+                this.loadPlaylistsView();
+            }
+        } catch (err) {
+            this.showToast(`Failed to create playlist: ${err}`, 'error');
+        }
+    },
+
+    async loadSearchView() {
+        const form = document.getElementById('search-form');
+        const resultsContainer = document.getElementById('search-results');
+        if (!form || !resultsContainer || form.dataset.bound) return;
+        form.dataset.bound = 'true';
+
+        const performSearch = async () => {
+            const input = form.querySelector('input[name="q"]');
+            if (!input || !input.value.trim()) return;
+
+            try {
+                const page = await this.invoke('get_tracks', { filter: { search: input.value.trim() } });
+                if (page && page.tracks && page.tracks.length > 0) {
+                    this.renderTrackRows(resultsContainer, page.tracks);
+                } else {
+                    resultsContainer.innerHTML = `
+                        <div class="empty-state glass neu" style="padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
+                            <div class="empty-state-icon"><i data-lucide="search"></i></div>
+                            <h2 class="empty-state-title">No matching tracks</h2>
+                            <p class="empty-state-description">Try searching for a different title, artist, or album.</p>
+                        </div>
+                    `;
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            } catch (err) {
+                console.error('Search error:', err);
+            }
+        };
+
+        form.addEventListener('submit', (e) => { e.preventDefault(); performSearch(); });
+        const searchInput = form.querySelector('input[name="q"]');
+        if (searchInput) {
+            let debounceTimer;
+            searchInput.addEventListener('input', () => {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(performSearch, 300);
+            });
+        }
+    },
+
+    async loadSettingsView() {
+        const settingsView = document.querySelector('.page-settings, #settings-view');
+        if (!settingsView || settingsView.dataset.bound) return;
+        settingsView.dataset.bound = 'true';
+
+        try {
+            const settings = await this.invoke('get_settings');
+            if (!settings) return;
+            this.currentSettings = settings;
+
+            const volInput = settingsView.querySelector('input[name="volume"]');
+            const volBadge = settingsView.querySelector('#settings-volume-val');
+            if (volInput && settings.audio) {
+                const volPct = Math.round(settings.audio.volume * 100);
+                volInput.value = volPct;
+                if (volBadge) volBadge.textContent = `${volPct}%`;
+            }
+
+            const downloadPathInput = settingsView.querySelector('input[name="download_path"]');
+            if (downloadPathInput && settings.downloads) {
+                downloadPathInput.value = settings.downloads.download_path || '';
+            }
+
+            const formatSelect = settingsView.querySelector('select[name="default_format"]');
+            if (formatSelect && settings.downloads && settings.downloads.default_format) {
+                formatSelect.value = String(settings.downloads.default_format).toLowerCase();
+            }
+
+            const ytCookieInput = settingsView.querySelector('input[name="youtube_cookie"]');
+            if (ytCookieInput && settings.downloads) {
+                ytCookieInput.value = settings.downloads.youtube_cookie || '';
+            }
+
+            const ytPoTokenInput = settingsView.querySelector('input[name="youtube_po_token"]');
+            if (ytPoTokenInput && settings.downloads) {
+                ytPoTokenInput.value = settings.downloads.youtube_po_token || '';
+            }
+
+            if (window.AuralisYouTube && settings.downloads) {
+                window.AuralisYouTube.setCredentials({
+                    cookie: settings.downloads.youtube_cookie,
+                    po_token: settings.downloads.youtube_po_token,
+                });
+            }
+
+            const currentTheme = (settings.appearance && settings.appearance.theme) ? String(settings.appearance.theme).toLowerCase() : 'dark';
+            const themeOptions = settingsView.querySelectorAll('.theme-option[data-theme]');
+            themeOptions.forEach(opt => {
+                opt.classList.toggle('active', opt.dataset.theme === currentTheme);
+            });
+
+            const syncToggle = settingsView.querySelector('[name="sync_enabled"], [data-name="sync_enabled"]');
+            if (syncToggle && settings.sync) {
+                if (syncToggle.type === 'checkbox') {
+                    syncToggle.checked = Boolean(settings.sync.enabled);
+                } else {
+                    syncToggle.classList.toggle('active', Boolean(settings.sync.enabled));
+                    syncToggle.setAttribute('aria-checked', Boolean(settings.sync.enabled).toString());
+                }
+            }
+
+            const wifiToggle = settingsView.querySelector('[name="sync_wifi_only"], [data-name="sync_wifi_only"]');
+            if (wifiToggle && settings.sync) {
+                if (wifiToggle.type === 'checkbox') {
+                    wifiToggle.checked = Boolean(settings.sync.wifi_only);
+                } else {
+                    wifiToggle.classList.toggle('active', Boolean(settings.sync.wifi_only));
+                    wifiToggle.setAttribute('aria-checked', Boolean(settings.sync.wifi_only).toString());
+                }
+            }
+
+            const saveSettings = async () => {
+                if (!this.currentSettings) return;
+                try {
+                    await this.invoke('update_settings', { settings: this.currentSettings });
+                    this.showToast('Settings saved', 'success');
+                } catch (err) {
+                    this.showToast(`Failed to save settings: ${err}`, 'error');
+                }
+            };
+
+            if (volInput) {
+                volInput.addEventListener('input', (e) => {
+                    if (volBadge) volBadge.textContent = `${e.target.value}%`;
+                });
+                volInput.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.audio) {
+                        this.currentSettings.audio.volume = parseFloat(e.target.value) / 100;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (downloadPathInput) {
+                downloadPathInput.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.downloads) {
+                        this.currentSettings.downloads.download_path = e.target.value;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (formatSelect) {
+                formatSelect.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.downloads) {
+                        this.currentSettings.downloads.default_format = e.target.value;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (ytCookieInput) {
+                ytCookieInput.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.downloads) {
+                        this.currentSettings.downloads.youtube_cookie = e.target.value || null;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (ytPoTokenInput) {
+                ytPoTokenInput.addEventListener('change', async (e) => {
+                    if (this.currentSettings && this.currentSettings.downloads) {
+                        this.currentSettings.downloads.youtube_po_token = e.target.value || null;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            themeOptions.forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const selectedTheme = btn.dataset.theme;
+                    themeOptions.forEach(opt => opt.classList.toggle('active', opt === btn));
+                    if (this.currentSettings && this.currentSettings.appearance) {
+                        this.currentSettings.appearance.theme = selectedTheme;
+                        this.applyTheme(selectedTheme);
+                        await saveSettings();
+                    }
+                });
+            });
+
+            if (syncToggle) {
+                syncToggle.addEventListener('click', async () => {
+                    if (this.currentSettings && this.currentSettings.sync) {
+                        const newState = !syncToggle.classList.contains('active');
+                        syncToggle.classList.toggle('active', newState);
+                        syncToggle.setAttribute('aria-checked', newState.toString());
+                        this.currentSettings.sync.enabled = newState;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (wifiToggle) {
+                wifiToggle.addEventListener('click', async () => {
+                    if (this.currentSettings && this.currentSettings.sync) {
+                        const newState = !wifiToggle.classList.contains('active');
+                        wifiToggle.classList.toggle('active', newState);
+                        wifiToggle.setAttribute('aria-checked', newState.toString());
+                        this.currentSettings.sync.wifi_only = newState;
+                        await saveSettings();
+                    }
+                });
+            }
+
+            if (window.lucide) window.lucide.createIcons();
+        } catch (err) {
+            console.error('Settings load error:', err);
+        }
+    },
+
+    renderTrackRows(container, tracks) {
+        container.innerHTML = tracks.map(track => {
+            const isFav = Boolean(track.is_favorite);
+            return `
+            <div class="track-row neu-glass" data-track-id="${track.id}" onclick="window.Auralis.bridge.playTrack('${track.id}')" style="cursor: pointer; margin-bottom: var(--space-2); border-radius: var(--radius-md);">
+                <div class="track-row-artwork">
+                    ${track.album_art_path ? this.artImgTag(track.album_art_path, track.title) : `<i data-lucide="music"></i>`}
+                </div>
+                <div class="track-row-info">
+                    <div class="track-row-title">${this.escapeHtml(track.title)}</div>
+                    <div class="track-row-subtitle">${this.escapeHtml(track.artist || 'Unknown Artist')} — ${this.escapeHtml(track.album || 'Single')}</div>
+                </div>
+                <span class="track-row-duration">${this.formatTime(track.duration_secs || 0)}</span>
+                <div class="track-row-actions" onclick="event.stopPropagation()">
+                    <button class="btn btn-ghost btn-icon" title="Play" onclick="window.Auralis.bridge.playTrack('${track.id}')">
+                        <i data-lucide="play"></i>
+                    </button>
+                    <button class="btn btn-ghost btn-icon ${isFav ? 'liked' : ''}" style="${isFav ? 'color: var(--like);' : ''}" title="Like" onclick="window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)">
+                        <i data-lucide="heart"></i>
+                    </button>
+                </div>
+            </div>
+        `;
+        }).join('');
+
+        if (window.lucide) window.lucide.createIcons();
+    }
+};

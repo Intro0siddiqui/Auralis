@@ -20,39 +20,43 @@ class PlayerController {
         this.bindVolume();
         this.bindKeyboard();
         this.bindFullScreenPlayerListeners();
+        this.initBridgeListeners();
+    }
 
-        if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.on('playback:state', (state) => {
-                this.isPlaying = state.is_playing;
-                this.updatePlayButton();
-            });
+    initBridgeListeners() {
+        if (!window.Auralis || !window.Auralis.bridge || this._bridgeBound) return;
+        this._bridgeBound = true;
 
-            window.Auralis.bridge.on('playback:track', (track) => {
-                this.currentTrack = track;
-                this.duration = track.duration_secs || 0;
-                this.progress = 0;
-                this.isLiked = Boolean(track.is_favorite);
-                this.updateLikeUI();
-                this.updateProgressUI();
-                this.updatePlayButton();
-                this.updateFullScreenMetadata();
-                if (this.queuePanel && this.queuePanel.classList.contains('open')) {
-                    this.renderQueuePanel();
-                }
-            });
+        window.Auralis.bridge.on('playback:state', (state) => {
+            this.isPlaying = state.is_playing;
+            this.updatePlayButton();
+        });
 
-            window.Auralis.bridge.on('playback:progress', (data) => {
-                this.progress = data.position;
-                this.duration = data.duration;
-                this.updateProgressUI();
-            });
+        window.Auralis.bridge.on('playback:track', (track) => {
+            this.currentTrack = track;
+            this.duration = track.duration_secs || 0;
+            this.progress = 0;
+            this.isLiked = Boolean(track.is_favorite);
+            this.updateLikeUI();
+            this.updateProgressUI();
+            this.updatePlayButton();
+            this.updateFullScreenMetadata();
+            if (this.queuePanel && this.queuePanel.classList.contains('open')) {
+                this.renderQueuePanel();
+            }
+        });
 
-            window.Auralis.bridge.on('playback:queue', () => {
-                if (this.queuePanel && this.queuePanel.classList.contains('open')) {
-                    this.renderQueuePanel();
-                }
-            });
-        }
+        window.Auralis.bridge.on('playback:progress', (data) => {
+            this.progress = data.position;
+            this.duration = data.duration;
+            this.updateProgressUI();
+        });
+
+        window.Auralis.bridge.on('playback:queue', () => {
+            if (this.queuePanel && this.queuePanel.classList.contains('open')) {
+                this.renderQueuePanel();
+            }
+        });
     }
 
     cacheElements() {
