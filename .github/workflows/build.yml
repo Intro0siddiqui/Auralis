@@ -191,7 +191,7 @@ jobs:
             pkg-config
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "2.11.5" 2>/dev/null || npm install -g @tauri-apps/cli@2.11.5
+        run: cargo install tauri-cli --version "2.11.4" 2>/dev/null || npm install -g @tauri-apps/cli@2.11.4
 
       - name: Init Android project
         run: cargo tauri android init || npx @tauri-apps/cli android init || true
