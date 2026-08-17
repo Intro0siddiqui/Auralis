@@ -97,28 +97,92 @@ export const coreMethods = {
             console.warn('Tauri bridge event listener setup:', e);
         }
 
+        this.initGlobalErrorHandlers();
         this.initKeyboardHandler();
         this.bindHTMXEvents();
         this.ensureFileInput();
         this.refreshCurrentView();
     },
 
-    ensureFileInput() {
-        // Guarantee a real <input type="file"> is in the DOM so that
-        // <label for="global-audio-import-input"> fires the change event
-        // on Android 16 WebView without triggering synthetic .click().
-        if (!document || typeof document.getElementById !== 'function' || typeof document.createElement !== 'function') return;
-        if (!document.getElementById('global-audio-import-input')) {
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.id = 'global-audio-import-input';
-            input.accept = 'audio/*';
-            input.multiple = true;
-            input.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0.01;clip-path:inset(50%);z-index:-1;';
-            input.addEventListener('change', (e) => this.handleAudioImport(e.target));
-            if (document.body && typeof document.body.appendChild === 'function') {
-                document.body.appendChild(input);
+    initGlobalErrorHandlers() {
+        if (window._globalErrorHandlersBound) return;
+        window._globalErrorHandlersBound = true;
+
+        window.addEventListener('error', (event) => {
+            const msg = event.message || 'JavaScript execution error';
+            console.error('Captured window error:', event);
+            if (typeof this.showToast === 'function') {
+                this.showToast(`Error: ${msg}`, 'error');
             }
+            if (typeof this.appendScanLog === 'function') {
+                this.appendScanLog(`❌ JS Error: ${msg} (${event.filename || 'app'}:${event.lineno || '0'})`);
+            }
+        });
+
+        window.addEventListener('unhandledrejection', (event) => {
+            const reason = event.reason?.message || event.reason || 'Unhandled Promise Error';
+            console.error('Captured unhandled rejection:', event.reason);
+            if (typeof this.showToast === 'function') {
+                this.showToast(`Error: ${reason}`, 'error');
+            }
+            if (typeof this.appendScanLog === 'function') {
+                this.appendScanLog(`❌ Promise Rejection: ${reason}`);
+            }
+        });
+    },
+
+    ensureFileInput() {
+        // Guarantee clean <input type="file"> elements exist in the DOM with direct event listeners
+        // for Android 16 WebView / Scoped Storage compatibility without clipped/z-index issues.
+        if (!document || typeof document.getElementById !== 'function' || typeof document.createElement !== 'function') return;
+
+        let audioInput = document.getElementById('global-audio-import-input');
+        if (!audioInput) {
+            audioInput = document.createElement('input');
+            audioInput.type = 'file';
+            audioInput.id = 'global-audio-import-input';
+            audioInput.accept = 'audio/*';
+            audioInput.multiple = true;
+            audioInput.style.display = 'none';
+            if (document.body && typeof document.body.appendChild === 'function') {
+                document.body.appendChild(audioInput);
+            }
+        }
+        if (audioInput && !audioInput.dataset.bound) {
+            audioInput.dataset.bound = 'true';
+            audioInput.addEventListener('change', (e) => this.handleAudioImport(e.target));
+        }
+
+        let folderInput = document.getElementById('global-folder-scan-input');
+        if (!folderInput) {
+            folderInput = document.createElement('input');
+            folderInput.type = 'file';
+            folderInput.id = 'global-folder-scan-input';
+            folderInput.webkitdirectory = true;
+            folderInput.setAttribute('directory', '');
+            folderInput.multiple = true;
+            folderInput.style.display = 'none';
+            if (document.body && typeof document.body.appendChild === 'function') {
+                document.body.appendChild(folderInput);
+            }
+        }
+        if (folderInput && !folderInput.dataset.bound) {
+            folderInput.dataset.bound = 'true';
+            folderInput.addEventListener('change', (e) => this.handleFolderScan(e.target));
+        }
+
+        // Global fallback listener on document for change events on file inputs
+        if (document.body && !document.body.dataset.audioImportFallbackBound) {
+            document.body.dataset.audioImportFallbackBound = 'true';
+            document.addEventListener('change', (e) => {
+                const target = e.target;
+                if (!target) return;
+                if (target.id === 'global-audio-import-input') {
+                    this.handleAudioImport(target);
+                } else if (target.id === 'global-folder-scan-input') {
+                    this.handleFolderScan(target);
+                }
+            });
         }
     },
 

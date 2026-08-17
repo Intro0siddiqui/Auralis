@@ -63,6 +63,12 @@ pub trait TrackRepository: Send + Sync {
     /// Get total track count
     async fn count(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>>;
 
+    /// Get track count matching the same filters as `find_all`
+    async fn count_filtered(
+        &self,
+        filter: TrackFilter,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>>;
+
     /// Get total duration of all tracks
     async fn total_duration(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>>;
 

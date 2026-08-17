@@ -49,34 +49,28 @@ export const scanUiMethods = {
         if (!toast) {
             toast = document.createElement('div');
             toast.id = 'scan-progress-toast';
-            toast.className = 'toast toast-info glass';
-            toast.style.cssText = `
-                position: fixed; top: calc(20px + env(safe-area-inset-top, 0px)); right: 20px; z-index: 1000;
-                padding: 12px 20px; border-radius: 12px; background: rgba(11, 17, 24, 0.94);
-                color: var(--text-1); border: 1px solid var(--glass-border); box-shadow: var(--shadow-lg);
-                font-size: var(--text-sm); font-weight: 500; min-width: 240px; display: flex; flex-direction: column; gap: 6px;
-                transition: opacity 300ms ease;
-            `;
+            toast.className = 'toast toast-info toast-scan';
             container.appendChild(toast);
         }
 
         const fileName = file ? file.split(/[\\/]/).pop() : (payload.subtitle || 'Scanning...');
         const countText = total ? `${current} / ${total}` : `${current} files`;
         const pctText = percentage !== null ? ` (${percentage}%)` : '';
+        const pctVal = percentage !== null ? Math.min(100, Math.max(0, percentage)) : 100;
 
+        toast.classList.remove('toast-out');
         toast.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-weight: 600;">Scanning audio...</span>
-                <span style="color: var(--accent); font-size: var(--text-xs); font-weight: 600;">${countText}${pctText}</span>
+            <div class="toast-scan-header">
+                <span class="toast-scan-title">Scanning audio...</span>
+                <span class="toast-scan-count">${countText}${pctText}</span>
             </div>
-            <div style="font-size: var(--text-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px;">
+            <div class="toast-scan-filename">
                 ${this.escapeHtml(fileName)}
             </div>
-            <div class="progress-track neu-inset" style="width: 100%; height: 4px; margin-top: 2px;">
-                <div class="progress-fill" style="width: ${percentage !== null ? percentage : 100}%; background: var(--accent); height: 100%; transition: width 0.2s ease;"></div>
+            <div class="progress-track neu-inset toast-scan-track">
+                <div class="progress-fill toast-scan-fill" style="width: ${pctVal}%;"></div>
             </div>
         `;
-        toast.style.opacity = '1';
     },
 
     appendScanLog(msg) {
@@ -91,15 +85,15 @@ export const scanUiMethods = {
         if (content) {
             const line = document.createElement('div');
             const time = new Date().toLocaleTimeString();
-            line.style.cssText = 'white-space: pre-wrap; word-break: break-all; margin-bottom: 2px;';
+            line.className = 'scan-log-line';
             if (msg.includes('❌') || msg.includes('Error') || msg.includes('failed')) {
-                line.style.color = '#ef4444';
+                line.classList.add('scan-log-error');
             } else if (msg.includes('⚠️') || msg.includes('Warning')) {
-                line.style.color = '#f59e0b';
+                line.classList.add('scan-log-warning');
             } else if (msg.includes('✅') || msg.includes('🎉')) {
-                line.style.color = '#10b981';
+                line.classList.add('scan-log-success');
             } else if (msg.includes('🎵') || msg.includes('📂')) {
-                line.style.color = '#38bdf8';
+                line.classList.add('scan-log-info');
             }
             line.textContent = `[${time}] ${msg}`;
             content.appendChild(line);
@@ -145,7 +139,7 @@ export const scanUiMethods = {
 
         const toast = document.getElementById('scan-progress-toast');
         if (toast) {
-            toast.style.opacity = '0';
+            toast.classList.add('toast-out');
             setTimeout(() => {
                 if (toast && toast.parentElement) toast.remove();
             }, 300);
@@ -159,7 +153,7 @@ export const scanUiMethods = {
         }
         const toast = document.getElementById('scan-progress-toast');
         if (toast) {
-            toast.style.opacity = '0';
+            toast.classList.add('toast-out');
             setTimeout(() => {
                 if (toast && toast.parentElement) toast.remove();
             }, 300);

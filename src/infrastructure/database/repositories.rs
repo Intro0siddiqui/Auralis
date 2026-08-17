@@ -59,6 +59,43 @@ impl SqliteTrackRepository {
     }
 }
 
+/// Build the `WHERE` clause and ordered param bindings shared by `find_all`
+/// and `count_filtered`. Returns the SQL fragment (starting with `WHERE`) and
+/// the params to bind in the same order.
+fn track_filter_where(filter: &TrackFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut sql = String::from("WHERE 1=1");
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(search) = &filter.search {
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
+        let pattern = format!("%{}%", search);
+        params_vec.push(Box::new(pattern.clone()));
+        params_vec.push(Box::new(pattern.clone()));
+        params_vec.push(Box::new(pattern));
+    }
+
+    if let Some(artist) = &filter.artist {
+        sql.push_str(" AND artist LIKE ?");
+        params_vec.push(Box::new(format!("%{}%", artist)));
+    }
+
+    if let Some(album) = &filter.album {
+        sql.push_str(" AND album LIKE ?");
+        params_vec.push(Box::new(format!("%{}%", album)));
+    }
+
+    if filter.downloaded_only {
+        sql.push_str(" AND is_downloaded = 1");
+    }
+
+    if let Some(fav) = filter.is_favorite {
+        sql.push_str(" AND is_favorite = ?");
+        params_vec.push(Box::new(if fav { 1 } else { 0 }));
+    }
+
+    (sql, params_vec)
+}
+
 #[async_trait]
 impl TrackRepository for SqliteTrackRepository {
     async fn find_all(
@@ -70,35 +107,9 @@ impl TrackRepository for SqliteTrackRepository {
             .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        let mut sql = String::from("SELECT * FROM tracks WHERE 1=1");
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-        if let Some(search) = &filter.search {
-            sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
-            let pattern = format!("%{}%", search);
-            params_vec.push(Box::new(pattern.clone()));
-            params_vec.push(Box::new(pattern.clone()));
-            params_vec.push(Box::new(pattern));
-        }
-
-        if let Some(artist) = &filter.artist {
-            sql.push_str(" AND artist LIKE ?");
-            params_vec.push(Box::new(format!("%{}%", artist)));
-        }
-
-        if let Some(album) = &filter.album {
-            sql.push_str(" AND album LIKE ?");
-            params_vec.push(Box::new(format!("%{}%", album)));
-        }
-
-        if filter.downloaded_only {
-            sql.push_str(" AND is_downloaded = 1");
-        }
-
-        if let Some(fav) = filter.is_favorite {
-            sql.push_str(" AND is_favorite = ?");
-            params_vec.push(Box::new(if fav { 1 } else { 0 }));
-        }
+        let (where_sql, params_vec) = track_filter_where(&filter);
+        let mut sql = String::from("SELECT * FROM tracks ");
+        sql.push_str(&where_sql);
 
         let order_field = match filter.sort_by.unwrap_or(TrackSortField::DateAdded) {
             TrackSortField::Title => "title",
@@ -135,6 +146,24 @@ impl TrackRepository for SqliteTrackRepository {
             .collect();
 
         Ok(tracks)
+    }
+
+    async fn count_filtered(
+        &self,
+        filter: TrackFilter,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let (where_sql, params_vec) = track_filter_where(&filter);
+        let sql = format!("SELECT COUNT(*) FROM tracks {where_sql}");
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let count: i64 = conn.query_row(&sql, params_refs.as_slice(), |r| r.get(0))?;
+        Ok(count.max(0) as u64)
     }
 
     async fn find_by_id(

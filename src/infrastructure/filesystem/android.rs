@@ -55,20 +55,31 @@ impl AndroidScanner {
         target_dir: &Path,
         track_repo: &Arc<dyn TrackRepository>,
     ) -> Result<Track, ScannerError> {
+        debug!(name = %name, bytes_len = bytes.len(), target_dir = %target_dir.display(), "Ingesting audio buffer into sandboxed storage");
+
         std::fs::create_dir_all(target_dir).map_err(|e| {
+            error!(dir = %target_dir.display(), error = %e, "Failed to create sandboxed destination directory");
             ScannerError::IoError(format!(
-                "Failed to create sandboxed destination directory: {e}"
+                "Failed to create sandboxed destination directory {}: {e}",
+                target_dir.display()
             ))
         })?;
 
         let file_path = target_dir.join(name);
         std::fs::write(&file_path, bytes).map_err(|e| {
-            ScannerError::IoError(format!("Failed to write audio buffer to sandbox: {e}"))
+            error!(file = %file_path.display(), bytes = bytes.len(), error = %e, "Failed to write audio buffer to sandbox");
+            ScannerError::IoError(format!(
+                "Failed to write audio buffer to sandbox {}: {e}",
+                file_path.display()
+            ))
         })?;
 
         // Extract metadata using lofty; fallback gracefully if metadata is missing/corrupt
         let mut track = match MetadataExtractor::extract(&file_path) {
-            Ok(t) => t,
+            Ok(t) => {
+                debug!(file = %file_path.display(), title = %t.title, "Metadata extracted successfully from audio buffer");
+                t
+            }
             Err(e) => {
                 warn!(
                     file = %file_path.display(),
@@ -93,7 +104,10 @@ impl AndroidScanner {
         let existing = track_repo
             .find_by_path(&path_str)
             .await
-            .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+            .map_err(|e| {
+                error!(path = %path_str, error = %e, "Database query failed during ingest_buffer");
+                ScannerError::RepositoryError(e.to_string())
+            })?;
 
         if let Some(existing_track) = existing {
             let mut updated_track = track;
@@ -107,7 +121,10 @@ impl AndroidScanner {
             track_repo
                 .update(&updated_track)
                 .await
-                .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+                .map_err(|e| {
+                    error!(id = %updated_track.id, error = %e, "Failed to update track in database during buffer ingestion");
+                    ScannerError::RepositoryError(e.to_string())
+                })?;
 
             info!(id = %updated_track.id, title = %updated_track.title, "Updated existing audio buffer track in library");
             Ok(updated_track)
@@ -115,7 +132,10 @@ impl AndroidScanner {
             track_repo
                 .insert(&track)
                 .await
-                .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+                .map_err(|e| {
+                    error!(id = %track.id, error = %e, "Failed to insert track into database during buffer ingestion");
+                    ScannerError::RepositoryError(e.to_string())
+                })?;
 
             info!(id = %track.id, title = %track.title, "Ingested audio buffer into library");
             Ok(track)

@@ -1,10 +1,10 @@
 /*
  * youtube.js resolver
  * -------------------
- * Thin wrapper around the `youtube.js` library (loaded on demand from a CDN as
- * an ES module). It turns a user-facing URL (YouTube video/playlist, or a
- * direct audio file link) into a resolved object the Rust `download_audio`
- * command can stream directly:
+ * Thin wrapper around the vendored `youtubei.js` library (ui/vendor/, loaded
+ * on demand as an ES module — no CDN dependency). It turns a user-facing URL
+ * (YouTube video/playlist, or a direct audio file link) into a resolved object
+ * the Rust `download_audio` command can stream directly:
  *
  *   { kind: 'track', stream_url, title, ext, total_bytes, thumbnail, platform }
  *   { kind: 'playlist', items: [ { url, title }, ... ] }
@@ -15,20 +15,20 @@
 
 class YouTubeResolver {
     constructor() {
-        this._module = null;
+        this._modulePromise = null;
         this._clients = {};
     }
 
-    async _module() {
-        if (!this._module) {
-            this._module = await import('https://esm.sh/youtube.js@latest');
+    async _loadModule() {
+        if (!this._modulePromise) {
+            this._modulePromise = import('./vendor/youtubei.esm.mjs');
         }
-        return this._module;
+        return this._modulePromise;
     }
 
     async _client(opts = {}) {
-        const mod = await this._module();
-        const YouTube = mod.YouTube || (mod.default && mod.default.YouTube);
+        const mod = await this._loadModule();
+        const YouTube = mod.default || mod.YouTube || (mod.default && mod.default.YouTube);
         if (!YouTube) throw new Error('youtube.js failed to expose YouTube');
 
         const key = [opts.cookie || '', opts.poToken || ''].join('|');

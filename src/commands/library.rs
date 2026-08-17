@@ -43,7 +43,7 @@ pub async fn get_tracks(
         format!("Failed to fetch tracks: {e}")
     })?;
 
-    let total = tracks.len();
+    let total = repo.count_filtered(filter.clone()).await.unwrap_or(0) as usize;
 
     Ok(TracksPage {
         tracks,
@@ -324,21 +324,31 @@ pub async fn import_audio_file(
     data: Option<Vec<u8>>,
     data_base64: Option<String>,
 ) -> Result<Track, String> {
+    tracing::info!(name = %name, has_data = data.is_some(), has_b64 = data_base64.is_some(), "Importing audio file");
     let bytes = match (data, data_base64) {
         (Some(b), _) => b,
         (_, Some(b64)) => {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD
                 .decode(b64.trim())
-                .map_err(|e| format!("Invalid base64 payload: {e}"))?
+                .map_err(|e| {
+                    tracing::error!(error = %e, name = %name, "Invalid base64 payload for audio file");
+                    format!("Invalid base64 payload for {name}: {e}")
+                })?
         }
-        (None, None) => return Err("No audio data provided".to_string()),
+        (None, None) => {
+            tracing::error!(name = %name, "No audio data provided for import");
+            return Err(format!("No audio data provided for {name}"));
+        }
     };
 
     let app_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {e}"))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to get app data dir");
+            format!("Failed to get app data dir: {e}")
+        })?;
     let music_dir = app_dir.join("music");
 
     let repo = track_repo(&db);
@@ -346,8 +356,12 @@ pub async fn import_audio_file(
     let track = android_scanner
         .ingest_buffer(&name, &bytes, &music_dir, &repo)
         .await
-        .map_err(|e| format!("Failed to ingest audio track: {e}"))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, name = %name, "Failed to ingest audio track");
+            format!("Failed to ingest audio track {name}: {e}")
+        })?;
 
+    tracing::info!(id = %track.id, title = %track.title, artist = ?track.artist, "Successfully imported audio track");
     let _ = app.emit("library:track_imported", &track);
     Ok(track)
 }

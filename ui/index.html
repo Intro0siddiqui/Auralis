@@ -17,10 +17,10 @@
     <link rel="stylesheet" href="styles/responsive.css">
     
     <!-- HTMX for dynamic content -->
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="vendor/htmx.min.js"></script>
     
     <!-- Lucide Icons -->
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script src="vendor/lucide.min.js"></script>
 </head>
 <body>
     <div class="app-shell">
@@ -139,8 +139,8 @@
     <div id="overlay-root"></div>
     
     <!-- Global Audio File & Directory Inputs (Android 16 & Scoped Storage compatible) -->
-    <input type="file" id="global-audio-import-input" multiple accept="audio/*" style="position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0.01; clip-path: inset(50%); z-index: -1;" onchange="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.handleAudioImport(this)">
-    <input type="file" id="global-folder-scan-input" webkitdirectory directory multiple style="position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0.01; clip-path: inset(50%); z-index: -1;" onchange="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.handleFolderScan(this)">
+    <input type="file" id="global-audio-import-input" multiple accept="audio/*" style="display: none;">
+    <input type="file" id="global-folder-scan-input" webkitdirectory directory multiple style="display: none;">
     
     <!-- Toast & Diagnostic Notification Container -->
     <div id="toast-container"></div>

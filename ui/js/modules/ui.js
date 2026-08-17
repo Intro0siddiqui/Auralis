@@ -97,23 +97,26 @@ export const uiMethods = {
         return `<img src="${src}" alt="${safeAlt}" onerror="if(!this.dataset.fb){this.dataset.fb='1';window.Auralis.bridge.embedArt(this, ${jsonPath})}">`;
     },
 
-    showToast(message, type = 'info') {
+    showToast(message, type = 'info', duration = 3500) {
         const container = document.getElementById('toast-container') || document.body;
         if (!container || !document.createElement) return;
         const toast = document.createElement('div');
-        toast.className = `toast toast-${type} glass`;
-        toast.style.cssText = `
-            position: fixed; top: calc(20px + env(safe-area-inset-top, 0px)); right: 20px; z-index: 1000;
-            padding: 12px 20px; border-radius: 12px; background: rgba(11, 17, 24, 0.94);
-            color: var(--text-1); border: 1px solid var(--glass-border); box-shadow: var(--shadow-lg);
-            font-size: var(--text-sm); font-weight: 500;
-        `;
+        toast.className = `toast toast-${type}`;
         toast.textContent = message;
         container.appendChild(toast);
-        setTimeout(() => {
-            toast.style.opacity = '0';
-            toast.style.transition = 'opacity 300ms ease';
-            setTimeout(() => toast.remove(), 300);
-        }, 3500);
+
+        const dismiss = () => {
+            if (toast.classList.contains('toast-out')) return;
+            toast.classList.add('toast-out');
+            toast.addEventListener('animationend', () => {
+                if (toast.parentElement) toast.remove();
+            }, { once: true });
+            setTimeout(() => {
+                if (toast.parentElement) toast.remove();
+            }, 400);
+        };
+
+        setTimeout(dismiss, duration);
+        return toast;
     }
 };

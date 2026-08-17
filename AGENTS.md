@@ -36,7 +36,7 @@ src/
 
 ### Frontend (Soft Glass Audio)
 
-The frontend lives in `ui/` and uses **HTMX 2.0** for SPA-like navigation:
+The frontend lives in `ui/` and uses **HTMX 1.9** for SPA-like navigation (bundled locally, no CDN at runtime):
 
 ```
 ui/
@@ -47,8 +47,11 @@ ui/
 │   ├── components.css  # .glass, .glass-weak, .glass-strong, .neu, .neu-inset, .neu-glass, .card, .track-row
 │   └── responsive.css  # Mobile/tablet/desktop breakpoints + safe-area insets (notches/bars)
 ├── js/
-│   ├── bridge.js       # Dynamic data bridge (get_tracks, scan, play, downloads, HTMX swap routing)
-│   └── player.js       # Progress bar, seeking, MediaSession API, hardware keys, keyboard shortcuts
+│   ├── bridge.js       # Module entry — composes js/modules/* onto Bridge.prototype, exposes window.Auralis.bridge
+│   ├── modules/        # ES modules: core, library, views, scan-ui, player, downloads, ui (bridge methods)
+│   ├── player.js       # PlayerController: progress bar, seeking, MediaSession API, hardware keys, keyboard shortcuts
+│   └── youtube.js      # YouTubeResolver: vendored youtubei.js wrapper (getInfo/search/getPlaylist → resolved objects)
+├── vendor/             # Locally bundled third-party assets (htmx, lucide, youtubei.js esm + node shims)
 ├── partials/           # HTMX fragments served by the Rust backend
 │   ├── nav.html, home.html, library.html, albums.html
 │   ├── artists.html, playlists.html, player-full.html

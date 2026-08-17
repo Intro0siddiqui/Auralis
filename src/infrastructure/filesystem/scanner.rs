@@ -165,6 +165,13 @@ mod tests {
             Ok(self.tracks.lock().unwrap().clone())
         }
 
+        async fn count_filtered(
+            &self,
+            _filter: TrackFilter,
+        ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.tracks.lock().unwrap().len() as u64)
+        }
+
         async fn find_by_id(
             &self,
             id: uuid::Uuid,

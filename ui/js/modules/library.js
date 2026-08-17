@@ -96,7 +96,13 @@ export const libraryMethods = {
     },
 
     async handleFolderScan(input) {
-        if (!input || !input.files || input.files.length === 0) return;
+        if (!input || !input.files || input.files.length === 0) {
+            this.appendScanLog('ℹ️ Folder picker closed without selection');
+            return;
+        }
+        if (input._scanning) return;
+        input._scanning = true;
+
         const allFiles = Array.from(input.files);
         this.appendScanLog(`📱 SAF picker returned ${allFiles.length} raw files`);
         const audioExtensions = ['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.wma'];
@@ -108,6 +114,7 @@ export const libraryMethods = {
         if (audioFiles.length === 0) {
             this.appendScanLog('⚠️ No supported audio format files found in selected directory');
             this.showToast('No audio files found in selected folder.', 'info');
+            input._scanning = false;
             input.value = '';
             return;
         }
@@ -123,59 +130,86 @@ export const libraryMethods = {
         });
 
         let importedCount = 0;
-        for (let i = 0; i < audioFiles.length; i++) {
-            const file = audioFiles[i];
-            const pct = Math.round(((i + 1) / audioFiles.length) * 100);
-            this.updateScanProgressUI({
-                title: `Importing (${i + 1}/${audioFiles.length})`,
-                subtitle: file.name,
-                current: i + 1,
-                total: audioFiles.length,
-                percentage: pct
-            });
+        const errors = [];
 
-            try {
-                this.appendScanLog(`⏳ Reading: ${file.name} (${Math.round(file.size / 1024)} KB)`);
-                const base64Data = await new Promise((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                        const result = String(reader.result || '');
-                        const commaIdx = result.indexOf(',');
-                        resolve(commaIdx !== -1 ? result.substring(commaIdx + 1) : result);
-                    };
-                    reader.onerror = (e) => reject(e);
-                    reader.readAsDataURL(file);
+        try {
+            for (let i = 0; i < audioFiles.length; i++) {
+                const file = audioFiles[i];
+                const pct = Math.round(((i + 1) / audioFiles.length) * 100);
+                this.updateScanProgressUI({
+                    title: `Importing (${i + 1}/${audioFiles.length})`,
+                    subtitle: file.name,
+                    current: i + 1,
+                    total: audioFiles.length,
+                    percentage: pct
                 });
 
-                const result = await this.invoke('import_audio_file', {
-                    name: file.name,
-                    data_base64: base64Data
-                });
-                if (result) {
-                    importedCount++;
-                    this.appendScanLog(`✅ Imported: ${result.artist || 'Unknown'} - ${result.title || file.name}`);
-                    this.handleTrackImported(result);
+                try {
+                    const sizeKb = Math.round(file.size / 1024);
+                    this.appendScanLog(`⏳ Reading: ${file.name} (${sizeKb} KB)`);
+                    const base64Data = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            try {
+                                const result = String(reader.result || '');
+                                const commaIdx = result.indexOf(',');
+                                resolve(commaIdx !== -1 ? result.substring(commaIdx + 1) : result);
+                            } catch (e) {
+                                reject(e);
+                            }
+                        };
+                        reader.onerror = (e) => reject(new Error(`FileReader error: ${reader.error ? reader.error.message : e}`));
+                        reader.onabort = () => reject(new Error('FileReader aborted'));
+                        reader.readAsDataURL(file);
+                    });
+
+                    const result = await this.invoke('import_audio_file', {
+                        name: file.name,
+                        data_base64: base64Data
+                    });
+                    if (result) {
+                        importedCount++;
+                        this.appendScanLog(`✅ Imported into SQLite: ${result.artist || 'Unknown'} - ${result.title || file.name}`);
+                        this.handleTrackImported(result);
+                    } else {
+                        throw new Error('No track returned from backend');
+                    }
+                } catch (err) {
+                    const errMsg = (err && (err.message || String(err))) || 'Unknown error';
+                    errors.push(`${file.name}: ${errMsg}`);
+                    this.appendScanLog(`❌ Failed to import ${file.name}: ${errMsg}`);
+                    console.error(`Failed to scan file ${file.name}:`, err);
                 }
-            } catch (err) {
-                this.appendScanLog(`❌ Failed to import ${file.name}: ${err}`);
-                console.error(`Failed to scan file ${file.name}:`, err);
             }
+        } finally {
+            input._scanning = false;
+            input.value = '';
         }
 
-        input.value = '';
-        this.finishScanProgressUI({ tracks_added: importedCount, errors: [] });
+        this.finishScanProgressUI({ tracks_added: importedCount, errors });
 
         if (importedCount > 0) {
             this.showToast(`Scan complete: ${importedCount} track(s) added to library!`, 'success');
+            this.appendScanLog(`🎉 Folder scan complete: ${importedCount} added. Reloading UI...`);
         } else {
             this.showToast('No new audio tracks could be imported.', 'warning');
         }
-        await this.loadLibraryView();
-        this.refreshCurrentView();
+        try {
+            await this.loadLibraryView();
+            this.refreshCurrentView();
+        } catch (reloadErr) {
+            console.error('Error reloading library view after folder scan:', reloadErr);
+        }
     },
 
     async handleAudioImport(input) {
-        if (!input || !input.files || input.files.length === 0) return;
+        if (!input || !input.files || input.files.length === 0) {
+            this.appendScanLog('ℹ️ Audio import picker closed without file selection');
+            return;
+        }
+        if (input._importing) return;
+        input._importing = true;
+
         const files = Array.from(input.files);
         this.appendScanLog(`📥 Selected ${files.length} audio file(s) for direct import`);
         this.showToast(`Importing ${files.length} audio file(s)...`, 'info');
@@ -188,56 +222,83 @@ export const libraryMethods = {
         });
 
         let successCount = 0;
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            const pct = Math.round(((i + 1) / files.length) * 100);
-            this.updateScanProgressUI({
-                title: `Importing (${i + 1}/${files.length})`,
-                subtitle: file.name,
-                current: i + 1,
-                total: files.length,
-                percentage: pct
-            });
+        const errors = [];
 
-            try {
-                this.appendScanLog(`⏳ Processing buffer: ${file.name}`);
-                const base64Data = await new Promise((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                        const result = String(reader.result || '');
-                        const commaIdx = result.indexOf(',');
-                        resolve(commaIdx !== -1 ? result.substring(commaIdx + 1) : result);
-                    };
-                    reader.onerror = (e) => reject(e);
-                    reader.readAsDataURL(file);
+        try {
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const pct = Math.round(((i + 1) / files.length) * 100);
+                this.updateScanProgressUI({
+                    title: `Importing (${i + 1}/${files.length})`,
+                    subtitle: file.name,
+                    current: i + 1,
+                    total: files.length,
+                    percentage: pct
                 });
 
-                const result = await this.invoke('import_audio_file', {
-                    name: file.name,
-                    data_base64: base64Data,
-                    dataBase64: base64Data
-                });
-                if (result) {
-                    successCount++;
-                    this.appendScanLog(`✅ Successfully ingested: ${result.artist} - ${result.title}`);
-                    this.handleTrackImported(result);
+                try {
+                    const sizeKb = Math.round(file.size / 1024);
+                    this.appendScanLog(`⏳ Reading bytes: ${file.name} (${sizeKb} KB)`);
+                    const base64Data = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            try {
+                                const result = String(reader.result || '');
+                                const commaIdx = result.indexOf(',');
+                                const b64 = commaIdx !== -1 ? result.substring(commaIdx + 1) : result;
+                                resolve(b64);
+                            } catch (e) {
+                                reject(e);
+                            }
+                        };
+                        reader.onerror = (e) => reject(new Error(`FileReader error: ${reader.error ? reader.error.message : e}`));
+                        reader.onabort = () => reject(new Error('FileReader operation aborted'));
+                        reader.readAsDataURL(file);
+                    });
+
+                    this.appendScanLog(`📡 Sending buffer to Tauri backend: ${file.name} (${base64Data.length} chars base64)`);
+                    const result = await this.invoke('import_audio_file', {
+                        name: file.name,
+                        data_base64: base64Data
+                    });
+
+                    if (result) {
+                        successCount++;
+                        const trackTitle = result.title || file.name;
+                        const trackArtist = result.artist || 'Unknown Artist';
+                        this.appendScanLog(`✅ SQLite inserted: "${trackTitle}" by ${trackArtist} (id: ${result.id})`);
+                        this.handleTrackImported(result);
+                    } else {
+                        throw new Error('No track returned from backend');
+                    }
+                } catch (err) {
+                    const errMsg = (err && (err.message || String(err))) || 'Unknown error';
+                    errors.push(`${file.name}: ${errMsg}`);
+                    this.appendScanLog(`❌ Ingestion failed for ${file.name}: ${errMsg}`);
+                    console.error(`Failed to import ${file.name}:`, err);
                 }
-            } catch (err) {
-                this.appendScanLog(`❌ Ingestion failed for ${file.name}: ${err}`);
-                console.error(`Failed to import ${file.name}:`, err);
             }
+        } finally {
+            input._importing = false;
+            input.value = '';
         }
 
-        input.value = '';
-        this.finishScanProgressUI({ tracks_added: successCount, errors: [] });
+        this.finishScanProgressUI({ tracks_added: successCount, errors });
 
         if (successCount > 0) {
             this.showToast(`Successfully imported ${successCount} track(s)!`, 'success');
+            this.appendScanLog(`🎉 Import session completed: ${successCount} track(s) added, ${errors.length} error(s). Reloading UI...`);
         } else {
-            this.showToast('Import failed. Please verify the audio files.', 'error');
+            this.showToast('Import failed. Check scan logs for details.', 'error');
+            this.appendScanLog(`⚠️ Import session finished with 0 tracks imported (${errors.length} error(s))`);
         }
-        await this.loadLibraryView();
-        this.refreshCurrentView();
+
+        try {
+            await this.loadLibraryView();
+            this.refreshCurrentView();
+        } catch (reloadErr) {
+            console.error('Error reloading library view after import:', reloadErr);
+        }
     },
 
     handleTrackImported(track) {
