@@ -90,7 +90,24 @@ class Bridge {
 
         this.initKeyboardHandler();
         this.bindHTMXEvents();
+        this.ensureFileInput();
         this.refreshCurrentView();
+    }
+
+    ensureFileInput() {
+        // Guarantee a real <input type="file"> is in the DOM so that
+        // <label for="global-audio-import-input"> fires the change event
+        // on Android 16 WebView without triggering synthetic .click().
+        if (!document.getElementById('global-audio-import-input')) {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.id = 'global-audio-import-input';
+            input.accept = 'audio/*';
+            input.multiple = true;
+            input.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0.01;clip-path:inset(50%);z-index:-1;';
+            input.addEventListener('change', (e) => this.handleAudioImport(e.target));
+            document.body.appendChild(input);
+        }
     }
 
     async invoke(command, args = {}) {
@@ -122,6 +139,7 @@ class Bridge {
     bindHTMXEvents() {
         document.body.addEventListener('htmx:afterSwap', () => {
             if (window.lucide) window.lucide.createIcons();
+            this.ensureFileInput();
             this.refreshCurrentView();
         });
     }
@@ -194,13 +212,15 @@ class Bridge {
     }
 
     async triggerAudioImport() {
-        this.appendScanLog('📥 Opening system audio file picker...');
-        const input = document.getElementById('global-audio-import-input') || document.getElementById('audio-import-input');
+        this.appendScanLog('📥 Opening audio file picker...');
+        // Ensure input exists (also called from init, but re-check after HTMX swaps)
+        this.ensureFileInput();
+        const input = document.getElementById('global-audio-import-input');
         if (input) {
             input.click();
             return;
         }
-
+        // Desktop-only fallback: native Tauri dialog (returns POSIX paths, not content:// URIs)
         try {
             this.showToast('Select audio files to import...', 'info');
             const summary = await this.invoke('pick_audio_files_and_import');
@@ -211,17 +231,25 @@ class Bridge {
                 this.showToast(`Import complete: ${added} added, ${updated} updated`, 'success');
                 await this.loadLibraryView();
                 this.refreshCurrentView();
-            } else if (summary === null && this.tauriAvailable) {
+            } else if (summary === null) {
                 this.appendScanLog('ℹ️ Audio picker was cancelled');
             }
         } catch (err) {
-            this.appendScanLog(`⚠️ Native audio picker notice: ${err}`);
-            console.log('Native audio picker fallback:', err);
+            this.appendScanLog(`⚠️ Audio picker error: ${err}`);
+            console.warn('pick_audio_files_and_import error:', err);
         }
     }
 
     async triggerFolderScan() {
-        this.appendScanLog('📂 Requesting music storage selection...');
+        this.appendScanLog('📂 Requesting music storage scan...');
+        // On mobile: DOM file input is the only reliable path
+        this.ensureFileInput();
+        const input = document.getElementById('global-audio-import-input');
+        if (input) {
+            input.click();
+            return;
+        }
+        // Desktop-only: native folder dialog
         try {
             const summary = await this.invoke('pick_folder_and_scan');
             if (summary !== undefined && summary !== null) {
@@ -231,17 +259,12 @@ class Bridge {
                 this.showToast(`Scan complete: ${added} added, ${updated} updated`, 'success');
                 await this.loadLibraryView();
                 this.refreshCurrentView();
-                return;
-            } else if (summary === null && this.tauriAvailable) {
+            } else if (summary === null) {
                 this.appendScanLog('ℹ️ Folder picker was cancelled');
-                return;
             }
         } catch (err) {
-            console.log('Native folder dialog notice:', err);
+            console.warn('pick_folder_and_scan error:', err);
         }
-
-        // Fallback to direct audio file picker
-        await this.triggerAudioImport();
     }
 
     async handleFolderScan(input) {

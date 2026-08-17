@@ -370,7 +370,7 @@ pub async fn set_track_favorite(
 }
 
 /// Open native OS folder picker dialog (Windows Explorer / macOS Finder / Linux) and scan selected directory.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn pick_folder_and_scan(
     app: tauri::AppHandle,
     db: State<'_, Database>,
@@ -404,125 +404,135 @@ pub async fn pick_folder_and_scan(
 
     #[cfg(not(desktop))]
     {
-        // On Android / mobile, folder browsing is restricted by Scoped Storage; fallback to native multi-file audio picker
-        pick_audio_files_and_import(app, db).await
+        let _ = (app, db);
+        Err("Native folder dialog is only available on desktop platforms.".to_string())
     }
 }
 
-/// Open native OS file picker dialog (Android SAF media picker, macOS Finder, Windows Explorer, Linux)
+/// Open native OS file picker dialog (macOS Finder, Windows Explorer, Linux)
 /// and import selected audio files directly into the library.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn pick_audio_files_and_import(
     app: tauri::AppHandle,
     db: State<'_, Database>,
 ) -> Result<Option<ScanSummary>, String> {
-    use tauri_plugin_dialog::DialogExt;
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_dialog::DialogExt;
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .add_filter(
-            "Audio Files",
-            &["mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma"],
-        )
-        .pick_files(move |file_paths| {
-            let _ = tx.send(file_paths);
-        });
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .file()
+            .add_filter(
+                "Audio Files",
+                &["mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma"],
+            )
+            .pick_files(move |file_paths| {
+                let _ = tx.send(file_paths);
+            });
 
-    let file_paths = rx
-        .await
-        .map_err(|e| format!("Audio file picker channel closed: {e}"))?;
+        let file_paths = rx
+            .await
+            .map_err(|e| format!("Audio file picker channel closed: {e}"))?;
 
-    match file_paths {
-        Some(paths) if !paths.is_empty() => {
-            let app_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("Failed to get app data dir: {e}"))?;
-            let music_dir = app_dir.join("music");
-            let repo = track_repo(&db);
-            let android_scanner = crate::infrastructure::filesystem::AndroidScanner::new();
+        match file_paths {
+            Some(paths) if !paths.is_empty() => {
+                let app_dir = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(|e| format!("Failed to get app data dir: {e}"))?;
+                let music_dir = app_dir.join("music");
+                let repo = track_repo(&db);
+                let android_scanner = crate::infrastructure::filesystem::AndroidScanner::new();
 
-            let mut summary = ScanSummary {
-                tracks_added: 0,
-                tracks_updated: 0,
-                tracks_removed: 0,
-                errors: Vec::new(),
-            };
-
-            let total = paths.len();
-            for (idx, file_path) in paths.into_iter().enumerate() {
-                let Ok(path_buf) = file_path.into_path() else {
-                    summary
-                        .errors
-                        .push("Failed to resolve file path".to_string());
-                    continue;
+                let mut summary = ScanSummary {
+                    tracks_added: 0,
+                    tracks_updated: 0,
+                    tracks_removed: 0,
+                    errors: Vec::new(),
                 };
 
-                let file_name = path_buf
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "audio_track.mp3".to_string());
+                let total = paths.len();
+                for (idx, file_path) in paths.into_iter().enumerate() {
+                    let Ok(path_buf) = file_path.into_path() else {
+                        summary
+                            .errors
+                            .push("Failed to resolve file path".to_string());
+                        continue;
+                    };
 
-                let _ = app.emit(
-                    "library:scan_log",
-                    format!("📥 Ingesting ({}/{}): {}", idx + 1, total, file_name),
-                );
+                    let file_name = path_buf
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "audio_track.mp3".to_string());
 
-                match std::fs::read(&path_buf) {
-                    Ok(bytes) => {
-                        match android_scanner
-                            .ingest_buffer(&file_name, &bytes, &music_dir, &repo)
-                            .await
-                        {
-                            Ok(track) => {
-                                summary.tracks_added += 1;
+                    let _ = app.emit(
+                        "library:scan_log",
+                        format!("📥 Ingesting ({}/{}): {}", idx + 1, total, file_name),
+                    );
+
+                    match std::fs::read(&path_buf) {
+                        Ok(bytes) => {
+                            match android_scanner
+                                .ingest_buffer(&file_name, &bytes, &music_dir, &repo)
+                                .await
+                            {
+                                Ok(track) => {
+                                    summary.tracks_added += 1;
+                                    let _ = app.emit("library:track_imported", &track);
+                                }
+                                Err(e) => {
+                                    summary.errors.push(format!("{file_name}: {e}"));
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            let path_str = path_buf.to_string_lossy().to_string();
+                            let format = crate::infrastructure::filesystem::scanner::detect_format(
+                                &path_buf,
+                            )
+                            .unwrap_or(crate::domain::models::AudioFormat::Mp3);
+                            let mut track =
+                                match crate::infrastructure::filesystem::MetadataExtractor::extract(
+                                    &path_buf,
+                                ) {
+                                    Ok(t) => t,
+                                    Err(_) => crate::domain::models::Track::new(
+                                        file_name.clone(),
+                                        path_str.clone(),
+                                        0,
+                                        format,
+                                    ),
+                                };
+                            if track.title.trim().is_empty() || track.title == "Unknown" {
+                                track.title = file_name.clone();
+                            }
+                            if let Ok(existing) = repo.find_by_path(&path_str).await {
+                                if let Some(ext) = existing {
+                                    track.id = ext.id;
+                                    let _ = repo.update(&track).await;
+                                    summary.tracks_updated += 1;
+                                } else {
+                                    let _ = repo.insert(&track).await;
+                                    summary.tracks_added += 1;
+                                }
                                 let _ = app.emit("library:track_imported", &track);
                             }
-                            Err(e) => {
-                                summary.errors.push(format!("{file_name}: {e}"));
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        let path_str = path_buf.to_string_lossy().to_string();
-                        let format =
-                            crate::infrastructure::filesystem::scanner::detect_format(&path_buf)
-                                .unwrap_or(crate::domain::models::AudioFormat::Mp3);
-                        let mut track =
-                            match crate::infrastructure::filesystem::MetadataExtractor::extract(
-                                &path_buf,
-                            ) {
-                                Ok(t) => t,
-                                Err(_) => crate::domain::models::Track::new(
-                                    file_name.clone(),
-                                    path_str.clone(),
-                                    0,
-                                    format,
-                                ),
-                            };
-                        if track.title.trim().is_empty() || track.title == "Unknown" {
-                            track.title = file_name.clone();
-                        }
-                        if let Ok(existing) = repo.find_by_path(&path_str).await {
-                            if let Some(ext) = existing {
-                                track.id = ext.id;
-                                let _ = repo.update(&track).await;
-                                summary.tracks_updated += 1;
-                            } else {
-                                let _ = repo.insert(&track).await;
-                                summary.tracks_added += 1;
-                            }
-                            let _ = app.emit("library:track_imported", &track);
                         }
                     }
                 }
-            }
 
-            let _ = app.emit("library:scan_complete", &summary);
-            Ok(Some(summary))
+                let _ = app.emit("library:scan_complete", &summary);
+                Ok(Some(summary))
+            }
+            _ => Ok(None),
         }
-        _ => Ok(None),
+    }
+
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, db);
+        Err("Native dialog is disabled on mobile; please use the web file picker.".to_string())
     }
 }
 
