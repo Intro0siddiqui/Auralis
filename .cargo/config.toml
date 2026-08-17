@@ -4,7 +4,7 @@
 # the Android linker cannot resolve those symbols at app startup and the app
 # crashes with UnsatisfiedLinkError on loadLibrary.
 [target.aarch64-linux-android]
-rustflags = ["-C", "link-arg=-lc++_shared"]
+rustflags = ["-C", "link-arg=-lc++_shared", "-C", "link-arg=-Wl,-z,max-page-size=16384"]
 
 [target.armv7-linux-androideabi]
 rustflags = ["-C", "link-arg=-lc++_shared"]
@@ -13,7 +13,7 @@ rustflags = ["-C", "link-arg=-lc++_shared"]
 rustflags = ["-C", "link-arg=-lc++_shared"]
 
 [target.x86_64-linux-android]
-rustflags = ["-C", "link-arg=-lc++_shared"]
+rustflags = ["-C", "link-arg=-lc++_shared", "-C", "link-arg=-Wl,-z,max-page-size=16384"]
 
 [env]
 PKG_CONFIG_PATH = "/usr/lib/pkgconfig:/usr/share/pkgconfig"
