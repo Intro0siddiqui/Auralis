@@ -4,7 +4,7 @@
  * Thin wrapper around the vendored `youtubei.js` library (ui/vendor/, loaded
  * on demand as an ES module — no CDN dependency). It turns a user-facing URL
  * (YouTube video/playlist, or a direct audio file link) into a resolved object
- * the Rust `download_audio` command can stream directly:
+ * the Rust `start_download` command can stream directly:
  *
  *   { kind: 'track', stream_url, title, ext, total_bytes, thumbnail, platform }
  *   { kind: 'playlist', items: [ { url, title }, ... ] }
@@ -28,18 +28,43 @@ class YouTubeResolver {
 
     async _client(opts = {}) {
         const mod = await this._loadModule();
-        const YouTube = mod.default || mod.YouTube || (mod.default && mod.default.YouTube);
-        if (!YouTube) throw new Error('youtube.js failed to expose YouTube');
+        const { Platform } = mod;
+        const Ctor = mod.default || mod.Innertube || mod.YouTube;
+        if (!Ctor) throw new Error('youtube.js failed to expose Innertube/YouTube');
+
+        // Ensure Platform evaluation is configured for signature deciphering
+        if (Platform && typeof Platform.load === 'function' && Platform.shim) {
+            Platform.load({
+                ...Platform.shim,
+                eval: async (data, env) => {
+                    const fn = new Function(...Object.keys(env || {}), data.output);
+                    return fn(...Object.values(env || {}));
+                }
+            });
+        }
 
         const key = [opts.cookie || '', opts.poToken || ''].join('|');
         if (!this._clients[key]) {
-            const cfg = {};
+            const cfg = {
+                generate_session_locally: true,
+                retrieve_player: true,
+            };
             if (opts.cookie) cfg.cookie = opts.cookie;
             if (opts.poToken) cfg.poToken = opts.poToken;
+
             try {
-                this._clients[key] = new YouTube(cfg);
-            } catch (_) {
-                this._clients[key] = new YouTube();
+                if (typeof Ctor.create === 'function') {
+                    this._clients[key] = await Ctor.create(cfg);
+                } else {
+                    this._clients[key] = new Ctor(cfg);
+                }
+            } catch (err) {
+                console.warn('Failed to initialize Innertube with options, falling back to default create:', err);
+                if (typeof Ctor.create === 'function') {
+                    this._clients[key] = await Ctor.create();
+                } else {
+                    this._clients[key] = new Ctor();
+                }
             }
         }
         return this._clients[key];
@@ -50,15 +75,15 @@ class YouTubeResolver {
     }
 
     extFromMime(mime) {
-        if (!mime) return 'webm';
+        if (!mime) return 'm4a';
         const m = String(mime).toLowerCase();
-        if (m.includes('webm') || m.includes('opus')) return 'webm';
         if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) return 'm4a';
+        if (m.includes('webm') || m.includes('opus')) return 'webm';
         if (m.includes('ogg')) return 'ogg';
         if (m.includes('wav')) return 'wav';
         if (m.includes('flac')) return 'flac';
         if (m.includes('mpeg') || m.includes('mp3')) return 'mp3';
-        return 'webm';
+        return 'm4a';
     }
 
     extFromUrl(url) {
@@ -70,8 +95,11 @@ class YouTubeResolver {
         if (!thumb) return null;
         if (typeof thumb === 'string') return thumb;
         try {
+            if (Array.isArray(thumb) && thumb.length) {
+                return thumb[thumb.length - 1]?.url || thumb[0]?.url || null;
+            }
             if (Array.isArray(thumb.contents) && thumb.contents.length) {
-                return thumb.contents[0].url || null;
+                return thumb.contents[thumb.contents.length - 1]?.url || thumb.contents[0]?.url || null;
             }
             if (thumb.url) return thumb.url;
         } catch (_) {}
@@ -90,6 +118,12 @@ class YouTubeResolver {
 
     isPlaylistUrl(url) {
         return /[?&]list=([^&]+)/.test(url) && !/watch\?/.test(url);
+    }
+
+    extractVideoId(rawUrl) {
+        const url = (rawUrl || '').trim();
+        const idMatch = url.match(/(?:v=|youtu\.be\/|shorts\/|embed\/|^)([a-zA-Z0-9_-]{11})/);
+        return idMatch ? idMatch[1] : url;
     }
 
     async resolve(rawUrl, opts = {}) {
@@ -114,7 +148,35 @@ class YouTubeResolver {
         }
 
         const client = await this._client(opts);
-        const info = await client.getInfo(url);
+        const videoId = this.extractVideoId(url);
+
+        let info = null;
+        let lastErr = null;
+
+        // Attempt multiple client contexts (IOS, Music, Default) for maximum availability
+        const clientAttempts = [
+            async () => client.getInfo(videoId, { client: 'IOS' }),
+            async () => client.music ? client.music.getInfo(videoId) : null,
+            async () => client.getInfo(videoId, { client: 'ANDROID' }),
+            async () => client.getInfo(videoId),
+        ];
+
+        for (const attempt of clientAttempts) {
+            try {
+                const res = await attempt();
+                if (res && (res.streaming_data || res.basic_info)) {
+                    info = res;
+                    break;
+                }
+            } catch (e) {
+                lastErr = e;
+            }
+        }
+
+        if (!info) {
+            throw new Error(`Failed to retrieve video stream: ${lastErr?.message || 'Video unavailable'}`);
+        }
+
         const bi = info.basic_info || {};
         const sd = info.streaming_data || {};
 
@@ -122,28 +184,63 @@ class YouTubeResolver {
         const quality = opts.quality || 'best';
         let fmt = null;
 
-        if (typeof sd.chooseFormat === 'function') {
-            // Prefer an mp4 (m4a/aac) stream so downloaded files stay playable
-            // by the in-app rodio backend (no opus/webm decoder). When the user
-            // pins a container, honour it first and fall back to any audio.
+        if (typeof info.chooseFormat === 'function') {
             const attempts = container ? [container, null] : ['mp4', null];
             for (const c of attempts) {
                 if (fmt) break;
                 const attempt = { type: 'audio', quality };
                 if (c) attempt.format = c;
                 try {
-                    const cand = sd.chooseFormat(attempt);
-                    if (cand && cand.url) fmt = cand;
+                    const cand = info.chooseFormat(attempt);
+                    if (cand && (cand.url || cand.signature_cipher || cand.cipher)) fmt = cand;
                 } catch (_) {}
             }
         }
-        if (!fmt && Array.isArray(sd.adaptive_formats)) {
+
+        if (!fmt) {
             fmt =
-                sd.adaptive_formats.find(
-                    (f) => f && f.type && String(f.type).startsWith('audio')
-                ) || sd.adaptive_formats[0];
+                sd.adaptive_formats?.find((f) => f && f.has_audio && !f.has_video) ||
+                sd.formats?.find((f) => f && f.has_audio) ||
+                sd.adaptive_formats?.[0] ||
+                sd.formats?.[0];
         }
-        if (!fmt || !fmt.url) throw new Error('No audio stream found for this video');
+
+        if (!fmt) throw new Error('No audio stream found for this video');
+
+        let streamUrl = fmt.url;
+        if (!streamUrl && typeof fmt.decipher === 'function' && client.session?.player) {
+            try {
+                streamUrl = await fmt.decipher(client.session.player);
+            } catch (decErr) {
+                console.warn('Decipher attempt failed on format:', decErr);
+            }
+        }
+
+        if (!streamUrl) {
+            // Fallback: iterate over all available formats looking for any decipherable audio stream
+            const allCandidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
+            for (const candidate of allCandidates) {
+                if (candidate && candidate.has_audio) {
+                    if (candidate.url) {
+                        streamUrl = candidate.url;
+                        fmt = candidate;
+                        break;
+                    }
+                    if (typeof candidate.decipher === 'function' && client.session?.player) {
+                        try {
+                            const deciphered = await candidate.decipher(client.session.player);
+                            if (deciphered) {
+                                streamUrl = deciphered;
+                                fmt = candidate;
+                                break;
+                            }
+                        } catch (_) {}
+                    }
+                }
+            }
+        }
+
+        if (!streamUrl) throw new Error('Unable to extract playable audio URL');
 
         const ext = this.extFromMime(fmt.mime_type);
         const title = String(bi.title || 'YouTube Audio').trim() || 'YouTube Audio';
@@ -153,7 +250,7 @@ class YouTubeResolver {
 
         return {
             kind: 'track',
-            stream_url: fmt.url,
+            stream_url: streamUrl,
             title,
             ext,
             total_bytes: total,
@@ -167,7 +264,17 @@ class YouTubeResolver {
         const client = await this._client(opts);
         const match = url.match(/[?&]list=([^&]+)/);
         if (!match) throw new Error('Not a playlist URL');
-        const playlist = await client.getPlaylist(match[1]);
+        const playlistId = match[1];
+
+        let playlist = null;
+        try {
+            playlist = await client.getPlaylist(playlistId);
+        } catch (_) {
+            if (client.music) {
+                playlist = await client.music.getPlaylist(playlistId);
+            }
+        }
+        if (!playlist) throw new Error('Playlist not found');
 
         const source = playlist.videos || playlist.contents || [];
         const items = [];
@@ -192,17 +299,27 @@ class YouTubeResolver {
         const q = (query || '').trim();
         if (!q) return [];
         const client = await this._client(opts);
-        const res = await client.search(q);
+        
+        let res = null;
+        try {
+            res = await client.search(q);
+        } catch (_) {
+            if (client.music) {
+                res = await client.music.search(q);
+            }
+        }
+        if (!res) return [];
 
         const raw = res.results || res.contents || [];
         const out = [];
         for (const r of raw) {
-            const isVideo = r && (r.type === 'video' || r.type === 'reel');
-            if (!isVideo || !r.id) continue;
+            const isVideo = r && (r.type === 'video' || r.type === 'reel' || r.type === 'MusicResponsiveListItem' || r.type === 'MusicTwoRowItem');
+            const id = r.id || r.videoId;
+            if (!id) continue;
             out.push({
-                id: r.id,
+                id,
                 title: String(r.title || 'Unknown').trim() || 'Unknown',
-                url: `https://www.youtube.com/watch?v=${r.id}`,
+                url: `https://www.youtube.com/watch?v=${id}`,
                 channel: (r.author && r.author.name) ? String(r.author.name) : '',
             });
             if (out.length >= 10) break;
