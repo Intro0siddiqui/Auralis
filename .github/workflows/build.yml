@@ -223,70 +223,11 @@ jobs:
             cat "$MANIFEST"
           fi
 
-          # Create real MediaPlaybackService Kotlin implementation
+          # Install MediaPlaybackService Kotlin implementation from the repo
           PKG_DIR="gen/android/app/src/main/java/com/auralis/v2"
           mkdir -p "$PKG_DIR"
-          cat << 'EOF' > "$PKG_DIR/MediaPlaybackService.kt"
-          package com.auralis.v2
-
-          import android.app.Notification
-          import android.app.NotificationChannel
-          import android.app.NotificationManager
-          import android.app.Service
-          import android.content.Intent
-          import android.os.Build
-          import android.os.IBinder
-
-          class MediaPlaybackService : Service() {
-              companion object {
-                  const val CHANNEL_ID = "auralis_playback_channel"
-                  const val NOTIFICATION_ID = 101
-              }
-
-              override fun onCreate() {
-                  super.onCreate()
-                  createNotificationChannel()
-              }
-
-              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                  val notification = buildNotification()
-                  startForeground(NOTIFICATION_ID, notification)
-                  return START_STICKY
-              }
-
-              override fun onBind(intent: Intent?): IBinder? = null
-
-              private fun createNotificationChannel() {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      val channel = NotificationChannel(
-                          CHANNEL_ID,
-                          "Audio Playback",
-                          NotificationManager.IMPORTANCE_LOW
-                      ).apply {
-                          description = "Keeps audio playback active in background"
-                      }
-                      val manager = getSystemService(NotificationManager::class.java)
-                      manager?.createNotificationChannel(channel)
-                  }
-              }
-
-              private fun buildNotification(): Notification {
-                  val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      Notification.Builder(this, CHANNEL_ID)
-                  } else {
-                      @Suppress("DEPRECATION")
-                      Notification.Builder(this)
-                  }
-                  return builder
-                      .setContentTitle("Auralis Music Player")
-                      .setContentText("Background playback active")
-                      .setSmallIcon(android.R.drawable.ic_media_play)
-                      .setOngoing(true)
-                      .build()
-              }
-          }
-          EOF
-          echo "Created MediaPlaybackService.kt in $PKG_DIR"
+          cp scripts/android/MediaPlaybackService.kt "$PKG_DIR/MediaPlaybackService.kt"
+          echo "Installed MediaPlaybackService.kt from repo into $PKG_DIR"
 
       - name: Configure Android SDK versions
         run: |
@@ -376,7 +317,33 @@ jobs:
           unzip -l "$APK_TARGET" | grep -E "libauralis_lib\.so|libauralis\.so" || { echo "libauralis native library missing in APK!"; exit 1; }
           unzip -l "$APK_TARGET" | grep "libc++_shared.so" || { echo "libc++_shared.so missing in APK!"; exit 1; }
           unzip -l "$APK_TARGET" | grep -E "AndroidManifest\.xml" || { echo "AndroidManifest.xml missing in APK!"; exit 1; }
-          echo "Android APK structure, native audio engine, and scanner assets verified successfully!"
+          echo "Checking 16KB page-size alignment (required for Android 15+ / Play 2026)..."
+          ZALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
+          if [ -z "$ZALIGN" ]; then
+            echo "zipalign not found!"
+            exit 1
+          fi
+          if ! "$ZALIGN" -c -P 16 "$APK_TARGET" > /dev/null 2>&1; then
+            echo "FAIL: APK is not 16KB-page aligned (zipalign -c -P 16). Bump AGP/NDK or enable useLegacyPackaging=false."
+            exit 1
+          fi
+          TMP_DIR=$(mktemp -d)
+          unzip -q "$APK_TARGET" "lib/arm64-v8a/*.so" -d "$TMP_DIR"
+          READELF="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          if [ ! -x "$READELF" ]; then
+            echo "llvm-readelf not found at $READELF"
+            exit 1
+          fi
+          for so in "$TMP_DIR"/lib/arm64-v8a/*.so; do
+            BAD=$("$READELF" -lW "$so" | awk '$1=="LOAD" && $NF != "0x4000" {print $NF}')
+            if [ -n "$BAD" ]; then
+              echo "FAIL: $(basename "$so") has non-16KB LOAD alignments: $BAD"
+              exit 1
+            fi
+            echo "OK: $(basename "$so") all LOAD segments 16KB-aligned"
+          done
+          rm -rf "$TMP_DIR"
+          echo "Android APK structure, native audio engine, 16KB alignment, and scanner assets verified successfully!"
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/')

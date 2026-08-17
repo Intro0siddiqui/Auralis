@@ -2,6 +2,7 @@
 //!
 //! Handles audio playback and media downloading.
 
+pub mod background_service;
 pub mod downloader;
 pub mod player;
 

@@ -266,6 +266,7 @@ impl AuralisApp {
 
         let player = Arc::new(AudioPlayer::new()?);
         commands::playback::spawn_playback_watcher(app_handle.clone(), player.clone());
+        infrastructure::media::background_service::attach(player.clone(), app_handle.clone());
         app_handle.manage(player);
 
         Ok(())

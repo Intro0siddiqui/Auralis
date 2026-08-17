@@ -304,7 +304,7 @@ logcat -b crash -d | grep -iE "AndroidRuntime|FATAL|abort|auralis|libauralis|sig
 
 ---
 
-## 9. Current Status (2026-08-15, v2.0.31)
+## 9. Current Status (2026-08-17, v2.1.13)
 
 The app is feature-complete on the core set and ships signed APKs via CI tag
 builds. The Android launch crashes documented in §4 are all resolved. Recent
@@ -319,12 +319,32 @@ milestones from `git log`:
   Android 16.
 - **v2.0.30 / v2.0.31** — CI Android APK binary-verification step; custom
   metallic obsidian logo, Android mipmaps, and neumorphic Settings UI.
+- **v2.1.x** — CDN deps vendored locally (htmx 1.9, lucide, youtubei.js v18 +
+  node shims); `get_tracks` pagination-total fix (`count_filtered`); CSP
+  trimmed to local-only `script-src`.
+- **v2.1.9 → v2.1.13** — **playback engine fixed**: real seek (restart +
+  offset accounting), real position tracking with `playback:progress` events
+  (was a fake JS timer), auto-advance on track end (repeat/shuffle now
+  trigger), watcher task in `commands/playback.rs`. CI: NDK r27
+  (27.2.12479018), pinned `tauri-cli` 2.11.5, real `MediaPlaybackService.kt`
+  generated at build time, 16KB alignment **enforced** in CI (`zipalign -P 16`
+  + `llvm-readelf` LOAD checks), 64MB import guard on Android base64 ingest.
+- **v2.1.13+** — **background playback wired end-to-end**: Rust drives a
+  foreground `MediaPlaybackService` over JNI (`background_service.rs` +
+  `scripts/android/MediaPlaybackService.kt` — moved out of the CI heredoc into
+  the repo). Track metadata/state pushed on every playback change;
+  notification + lockscreen MediaSession buttons (play/pause/next/prev/seek)
+  route back into Rust via the `NativeBridge` JNI export and re-dispatch
+  through the same commands as the UI — the frontend stays in sync via the
+  existing `playback:*` events. Desktop: compile-time no-op.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,
-  rodio/cpal/oboe playback, **real libp2p P2P sync** (request-response,
-  best-effort), pure-Rust `rusty_ytdl` downloads with optional `yt-dlp` fallback,
-  playlists (incl. smart-criteria model), settings, and the Soft-Glass/Neu UI.
+  rodio/cpal/oboe playback with **working seek + auto-advance** (event-driven
+  progress via `playback:progress`), **real libp2p P2P sync** (request-response,
+  best-effort), pure-Rust `rusty_ytdl` downloads with optional `yt-dlp`
+  fallback, playlists (incl. smart-criteria model), settings, and the
+  Soft-Glass/Neu UI.
 
 ### Known gaps (non-blocking)
 - Real binary/APK builds only happen in CI — this host cannot link Tauri
@@ -352,10 +372,10 @@ Audited 2026-08-15 against Android and Tauri distribution guidelines. The
 ### Android (the strict 2026 target — developer.android.com)
 | Requirement | Status | Evidence / Notes |
 |---|---|---|
-| **16 KB page alignment** (Play-mandatory since 2025-11-01 for API 35+) | ✅ Met | `build.rs` sets `-Wl,-z,max-page-size=16384` + `common-page-size=16384`. Verify APK with `zipalign -c -P 16` in CI. |
-| **Target API level** (new/updated apps must target **API 36 by 2026-08-31**; ≥35 now) | ⚠️ Verify | Set by Tauri's `cargo tauri android init` template, not in repo. Tauri ≥2.5 templates use `targetSdk 36` + edge-to-edge (PR #13780); older templates default lower and trigger "built for an older Android" warnings (#10712). **Pin Tauri/CLI ≥2.5 or set `targetSdk=36` in `gen/android/app/build.gradle.kts`.** |
-| **Foreground service *type* for media playback** (Android 14+: must declare `android:foregroundServiceType="mediaPlayback"` on a `<service>`, plus the permission) | ❌ Not met | `build.yml` injects `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_MEDIA_PLAYBACK` **permissions**, but no `<service ... android:foregroundServiceType="mediaPlayback">` exists in the tree. Foreground/visible playback works (no FGS needed); **true background playback (screen off) is not implemented to spec.** Needs a service (e.g. `tauri-plugin-background-service` with `mediaPlayback` type) + the manifest `<service>` declaration. |
-| **Scoped storage / media access** | ✅ Met (with caveat) | `READ_MEDIA_AUDIO` + SAF/media-picker (`android.rs`) is the sanctioned path. **Caveat:** `MANAGE_EXTERNAL_STORAGE` is also injected (with `tools:ignore`) — it is a *restricted* Play permission; prefer dropping it and relying on SAF/MediaStore to avoid Play rejection. |
+| **16 KB page alignment** (Play-mandatory since 2025-11-01 for API 35+) | ✅ Met + enforced | `build.rs` sets `-Wl,-z,max-page-size=16384` + `common-page-size=16384`; NDK r27 (27.2.12479018) builds 16KB-aligned libs; CI verify step runs `zipalign -c -P 16` on the APK and `llvm-readelf` LOAD-segment checks (p_align == 0x4000) on every `.so` — a misaligned build fails CI. |
+| **Target API level** (new/updated apps must target **API 36 by 2026-08-31**; ≥35 now) | ✅ Met | CI explicitly seds `compileSdk`/`targetSdk` to **36** in `gen/android/app/build.gradle.kts` (build.yml) + tauri-cli pinned to 2.11.5. |
+| **Foreground service *type* for media playback** (Android 14+: must declare `android:foregroundServiceType="mediaPlayback"` on a `<service>`, plus the permission) | ✅ Met | Manifest `<service android:name=".MediaPlaybackService" android:foregroundServiceType="mediaPlayback">` + `scripts/android/MediaPlaybackService.kt` (notification channel, `startForeground`, MediaSession). Rust starts/updates/stops the service on every playback change (JNI); media buttons are routed back into Rust (`NativeBridge`) and re-dispatched through the playback commands. **Known limitation:** media buttons are dropped if the app's activity is destroyed (audio itself keeps playing — the process lives). |
+| **Scoped storage / media access** | ✅ Met | `READ_MEDIA_AUDIO` + SAF/media-picker (`android.rs`) is the sanctioned path; `READ/WRITE_EXTERNAL_STORAGE` are capped with `maxSdkVersion` (32/29). `MANAGE_EXTERNAL_STORAGE` is **no longer injected**. |
 | **Edge-to-edge** (Android 15/16) | ✅ Likely | UI uses safe-area insets (`tokens.css`); satisfied if on Tauri ≥2.5 template. |
 | **Background network (Android 15)** | ⚠️ Note | libp2p sync may hit background-network restrictions if it runs while the app is backgrounded. |
 
@@ -367,12 +387,14 @@ Audited 2026-08-15 against Android and Tauri distribution guidelines. The
 | **Linux** | `.deb` packaging | ✅ Met | `deb` target with `libwebkit2gtk-4.1-0`/`libgtk-3-0` deps; no signature gating. |
 
 ### Bottom line
-- **Android native correctness**: 16 KB alignment ✅, scoped storage ✅, but
-  **background media-playback foreground service is missing** and **targetSdk
-  must be verified ≥36**.
+- **Android native correctness**: 16 KB alignment ✅ (now CI-enforced), targetSdk 36 ✅ (CI-set), scoped storage ✅, background playback ✅ (foreground service + MediaSession wired end-to-end; media-button routing dropped only when the activity is destroyed).
 - **Release distribution**: Android APK is signed (auto keystore — fine for
   sideload, not Play upload-key), but **macOS/Windows artifacts are unsigned**
   and will warn/block on end-user machines. These are CI/cert gaps, not code.
+- **Code-level**: playback engine is now correct (seek, progress events,
+  auto-advance, background service). Remaining code items: smart-playlist
+  presets, sync pairing handshake TODO (`sync_service.rs`), and the 64MB
+  Android import cap (deliberate memory guard).
 
 ---
 

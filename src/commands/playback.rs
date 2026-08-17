@@ -5,6 +5,7 @@
 use crate::domain::models::{NowPlaying, RepeatMode, Track};
 use crate::infrastructure::database::repositories::{parse_datetime, parse_format};
 use crate::infrastructure::database::Database;
+use crate::infrastructure::media::background_service;
 use crate::infrastructure::media::AudioPlayer;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -86,10 +87,12 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                     Ok(Some(track)) => {
                         emit_track_changed(&app, &player).await;
                         emit_state_changed(&app, &player).await;
+                        background_service::push_now_playing(&player).await;
                         debug!(track_id = %track.id, "Auto-advanced to next track");
                     }
                     Ok(None) => {
                         emit_state_changed(&app, &player).await;
+                        background_service::stop_service();
                         info!("Queue exhausted; playback stopped");
                     }
                     Err(e) => {
@@ -141,6 +144,7 @@ pub async fn play(
 
     emit_track_changed(&app, &player).await;
     emit_state_changed(&app, &player).await;
+    background_service::push_now_playing(&player).await;
 
     debug!(%track_id, "Playback started");
     Ok(now_playing)
@@ -157,6 +161,7 @@ pub async fn pause(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<(),
         .map_err(|e| format!("Pause error: {e}"))?;
 
     emit_state_changed(&app, &player).await;
+    background_service::push_now_playing(&player).await;
 
     debug!("Playback paused");
     Ok(())
@@ -173,6 +178,7 @@ pub async fn resume(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<()
         .map_err(|e| format!("Resume error: {e}"))?;
 
     emit_state_changed(&app, &player).await;
+    background_service::push_now_playing(&player).await;
 
     debug!("Playback resumed");
     Ok(())
@@ -189,6 +195,7 @@ pub async fn stop(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<(), 
         .map_err(|e| format!("Stop error: {e}"))?;
 
     emit_state_changed(&app, &player).await;
+    background_service::stop_service();
 
     debug!("Playback stopped");
     Ok(())
@@ -211,6 +218,7 @@ pub async fn next_track(
         Some(t) => {
             emit_track_changed(&app, &player).await;
             emit_state_changed(&app, &player).await;
+            background_service::push_now_playing(&player).await;
             let now_playing = build_now_playing(&player, &t).await;
             debug!(%t.id, "Now playing next track");
             Ok(Some(now_playing))
@@ -239,6 +247,7 @@ pub async fn previous_track(
         Some(t) => {
             emit_track_changed(&app, &player).await;
             emit_state_changed(&app, &player).await;
+            background_service::push_now_playing(&player).await;
             let now_playing = build_now_playing(&player, &t).await;
             debug!(%t.id, "Now playing previous track");
             Ok(Some(now_playing))
@@ -264,6 +273,8 @@ pub async fn seek(request: SeekRequest, player: State<'_, AudioPlayer>) -> Resul
         .seek(position)
         .await
         .map_err(|e| format!("Seek error: {e}"))?;
+
+    background_service::push_now_playing(&player).await;
 
     debug!(position_secs = request.position_secs, "Seek completed");
     Ok(())

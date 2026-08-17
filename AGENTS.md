@@ -8,7 +8,7 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development** — Core architecture is in place and most features are implemented. Remaining work is primarily around polish and a few partial features (built-in smart-playlist presets). For the verified 2026 platform-compliance status (16 KB alignment ✅, but the Android background-media foreground-service *type* and macOS/Windows signing are current gaps), see `PROJECT.md` §11.
+**Current State: Active Development** — Core architecture is in place and most features are implemented. Background playback is now **wired end-to-end** (foreground `MediaPlaybackService` + MediaSession on Android, notification/lockscreen controls routed back into Rust via JNI; see `infrastructure/media/background_service.rs` + `scripts/android/MediaPlaybackService.kt`). Remaining work is primarily polish and a few partial features (built-in smart-playlist presets; macOS/Windows signing remain CI/cert gaps). For the verified 2026 platform-compliance status (16 KB alignment ✅ **and enforced in CI**, targetSdk 36 ✅, background media service ✅ with a documented activity-dead limitation), see `PROJECT.md` §11.
 
 ---
 
@@ -52,6 +52,8 @@ ui/
 │   ├── player.js       # PlayerController: progress bar, seeking, MediaSession API, hardware keys, keyboard shortcuts
 │   └── youtube.js      # YouTubeResolver: vendored youtubei.js wrapper (getInfo/search/getPlaylist → resolved objects)
 ├── vendor/             # Locally bundled third-party assets (htmx, lucide, youtubei.js esm + node shims)
+
+**Playback events**: Rust emits `playback:state_changed` / `playback:track_changed` / `playback:queue_updated` / `playback:progress`; `js/modules/core.js` re-emits them to the frontend as `playback:state` / `playback:track` / `playback:queue` / `playback:progress`. The progress bar is **event-driven** (no fake timer) — `PlayerController` snaps optimistically on seek and is corrected by the 250ms progress events.
 ├── partials/           # HTMX fragments served by the Rust backend
 │   ├── nav.html, home.html, library.html, albums.html
 │   ├── artists.html, playlists.html, player-full.html
@@ -89,7 +91,8 @@ ui/
 
 | Task | Status |
 |------|--------|
-| Audio player (`infrastructure/media/player.rs`) | ✅ rodio with queue, shuffle, repeat, seek |
+| Audio player (`infrastructure/media/player.rs`) | ✅ rodio with queue, shuffle, repeat, seek. Seek = restart + `seek_offset` accounting (rodio 0.17 has no source seek); real position tracked in `AudioPlayer`; **auto-advance watcher** (`spawn_playback_watcher` in `commands/playback.rs`) advances the queue on track end and emits `playback:progress` every 250ms |
+| Background playback (`infrastructure/media/background_service.rs` + `scripts/android/MediaPlaybackService.kt`) | ✅ Android: JNI-driven foreground service (notification + MediaSession). Rust pushes track metadata/state on every playback change; notification/lockscreen buttons route back through `Java_com_auralis_v2_NativeBridge_command` into the same commands as the UI, so the frontend stays in sync via `playback:*` events. No-op on desktop |
 | Playback commands (`commands/playback.rs`) | ✅ All commands wired to AudioPlayer |
 
 ### Phase 3: Downloads — ✅ COMPLETE
@@ -142,14 +145,17 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 - `bundle.targets` is `["deb", "app", "dmg", "msi", "nsis"]` (no `"all"`).
 - `identifier` is `com.auralis.v2` (was `com.auralis.app`).
-- `version` is `2.0.31` and must stay in sync with `Cargo.toml` + `Cargo.lock`.
+- `version` is `2.1.13` and must stay in sync with `Cargo.toml` + `Cargo.lock`.
+- CSP is trimmed to local-only `script-src 'self' 'unsafe-inline'` (no CDN hosts, no `unsafe-eval`) — all third-party JS is vendored under `ui/vendor/`.
 
 ### 4.3 Android CI Optimization (`.github/workflows/build.yml`) — ⚠️ PARTIAL
 
 - The APK is built for **`aarch64` only** (`cargo tauri android build --apk --target aarch64`); `x86_64-linux-android` was not added.
 - `cargo tauri android init` is still run (guarded with `|| true`) before the build — not removed, but harmless.
+- NDK is pinned to **`27.2.12479018` (r27)** — 16KB-page-size capable; `compileSdk`/`targetSdk` are sed'd to **36** in `build.gradle.kts`; `tauri-cli` pinned to **2.11.5**.
 - `libc++_shared.so` is bundled for the `arm64-v8a` ABI via `.cargo/config.toml` (`-lc++_shared`) and copied into `jniLibs` during CI.
-- Android permissions (`READ_MEDIA_AUDIO`, `READ/WRITE_EXTERNAL_STORAGE`, `MANAGE_EXTERNAL_STORAGE`, foreground-service media) are injected into `AndroidManifest.xml` at build time.
+- Android permissions (`READ_MEDIA_AUDIO`, `READ/WRITE_EXTERNAL_STORAGE` capped at maxSdk 32/29, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `WAKE_LOCK`) plus the **real `MediaPlaybackService`** (`scripts/android/MediaPlaybackService.kt`, copied into the generated project) and its `<service android:foregroundServiceType="mediaPlayback">` declaration are injected at build time. Rust starts/updates/stops the service over JNI (`background_service.rs`); media buttons are routed back into Rust via `NativeBridge` and re-dispatched through the normal playback commands.
+- CI **enforces 16KB alignment**: `zipalign -c -P 16` on the APK + `llvm-readelf` LOAD-segment check (p_align == 0x4000) on every `.so` in the APK — a misaligned build fails CI.
 
 **Verify**: CI produces a single `aarch64` APK. Add `x86_64` only if emulator testing is needed.
 
@@ -213,7 +219,7 @@ The CI workflow (`.github/workflows/build.yml`) runs on every push/PR to `main` 
 | `build-linux` | Compiles release binary, packages tar.gz |
 | `build-macos` | Compiles + bundles `.dmg` (x86_64 + aarch64) |
 | `build-windows` | Compiles MSVC target, bundles `.msi` / `.exe` |
-| `build-android` | Builds signed `aarch64` APK (auto-generates keystore, injects Android permissions, bundles `libc++_shared.so`) |
+| `build-android` | Builds signed `aarch64` APK (auto-generates keystore, sets targetSdk 36, injects Android permissions + `MediaPlaybackService.kt`, bundles `libc++_shared.so`, **verifies 16KB alignment** via `zipalign -P 16` + `llvm-readelf`) |
 | `test` | Runs `cargo test --all-features` (+ `cargo test --test integration` on the OS matrix) |
 | `lint` | Runs `cargo fmt --check` + `cargo clippy --all-targets --all-features` |
 | `release` | Creates GitHub Release from all `release-*` artifacts (tags only; `needs` the build/test/lint jobs) |

@@ -145,6 +145,9 @@ export const libraryMethods = {
                 });
 
                 try {
+                    if (file.size > 64 * 1024 * 1024) {
+                        throw new Error(`File too large (${Math.round(file.size / 1048576)} MB > 64 MB) — skipped to avoid memory issues on Android`);
+                    }
                     const sizeKb = Math.round(file.size / 1024);
                     this.appendScanLog(`⏳ Reading: ${file.name} (${sizeKb} KB)`);
                     const base64Data = await new Promise((resolve, reject) => {
@@ -237,6 +240,9 @@ export const libraryMethods = {
                 });
 
                 try {
+                    if (file.size > 64 * 1024 * 1024) {
+                        throw new Error(`File too large (${Math.round(file.size / 1048576)} MB > 64 MB) — skipped to avoid memory issues on Android`);
+                    }
                     const sizeKb = Math.round(file.size / 1024);
                     this.appendScanLog(`⏳ Reading bytes: ${file.name} (${sizeKb} KB)`);
                     const base64Data = await new Promise((resolve, reject) => {
