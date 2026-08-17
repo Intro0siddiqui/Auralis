@@ -298,7 +298,7 @@ jobs:
           fi
 
           echo "Running 16 KB zipalign on $APK_PATH"
-          "$ZALIGN" -f -p -P 16 4 "$APK_PATH" "$RUNNER_TEMP/aligned.apk"
+          "$ZALIGN" -f -P 16 4 "$APK_PATH" "$RUNNER_TEMP/aligned.apk"
 
           echo "Signing aligned APK with apksigner"
           "$APKSIGNER" sign \
@@ -330,8 +330,8 @@ jobs:
             exit 1
           fi
           if ! "$ZALIGN" -c -P 16 4 "$APK_TARGET" > /dev/null 2>&1; then
-            echo "WARN: APK was aligned with -p -P 16, re-verifying alignment directly..."
-            "$ZALIGN" -c -v -P 16 4 "$APK_TARGET" || true
+            echo "Checking zipalign verification details:"
+            "$ZALIGN" -c -v -P 16 4 "$APK_TARGET" || exit 1
           fi
           TMP_DIR=$(mktemp -d)
           unzip -q "$APK_TARGET" "lib/arm64-v8a/*.so" -d "$TMP_DIR"
