@@ -133,11 +133,21 @@ class MediaPlaybackService : Service() {
     private fun setupMediaSession() {
         val session = MediaSession(this, "AuralisPlayback")
         session.setCallback(object : MediaSession.Callback() {
-            override fun onPlay() = NativeBridge.command("play")
-            override fun onPause() = NativeBridge.command("pause")
-            override fun onSkipToNext() = NativeBridge.command("next")
-            override fun onSkipToPrevious() = NativeBridge.command("previous")
-            override fun onSeekTo(pos: Long) = NativeBridge.command("seek:${pos / 1000}")
+            override fun onPlay() {
+                NativeBridge.command("play")
+            }
+            override fun onPause() {
+                NativeBridge.command("pause")
+            }
+            override fun onSkipToNext() {
+                NativeBridge.command("next")
+            }
+            override fun onSkipToPrevious() {
+                NativeBridge.command("previous")
+            }
+            override fun onSeekTo(pos: Long) {
+                NativeBridge.command("seek:${pos / 1000}")
+            }
         })
         session.setFlags(
             MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
