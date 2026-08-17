@@ -41,6 +41,7 @@ pub mod templates;
 // ============================================================================
 // Main Application Builder
 // ============================================================================
+use std::sync::Arc;
 use tauri::Manager;
 use tracing::info;
 
@@ -259,11 +260,12 @@ impl AuralisApp {
         Ok(())
     }
 
-    /// Initialize the audio player
+    /// Initialize the audio player and spawn the playback watcher
     fn init_audio_player(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         info!("Initializing audio player");
 
-        let player = AudioPlayer::new()?;
+        let player = Arc::new(AudioPlayer::new()?);
+        commands::playback::spawn_playback_watcher(app_handle.clone(), player.clone());
         app_handle.manage(player);
 
         Ok(())

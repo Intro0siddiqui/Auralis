@@ -342,13 +342,10 @@ pub async fn import_audio_file(
         }
     };
 
-    let app_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to get app data dir");
-            format!("Failed to get app data dir: {e}")
-        })?;
+    let app_dir = app.path().app_data_dir().map_err(|e| {
+        tracing::error!(error = %e, "Failed to get app data dir");
+        format!("Failed to get app data dir: {e}")
+    })?;
     let music_dir = app_dir.join("music");
 
     let repo = track_repo(&db);

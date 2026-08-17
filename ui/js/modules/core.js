@@ -46,6 +46,10 @@ export const coreMethods = {
                     this.emit('playback:queue', event.payload);
                 });
 
+                await tauriListen('playback:progress', (event) => {
+                    this.emit('playback:progress', event.payload);
+                });
+
                 await tauriListen('download:progress', (event) => {
                     this.emit('download:progress', event.payload);
                     this.updateDownloadProgressUI(event.payload);

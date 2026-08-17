@@ -101,13 +101,10 @@ impl AndroidScanner {
         }
 
         let path_str = file_path.to_string_lossy().to_string();
-        let existing = track_repo
-            .find_by_path(&path_str)
-            .await
-            .map_err(|e| {
-                error!(path = %path_str, error = %e, "Database query failed during ingest_buffer");
-                ScannerError::RepositoryError(e.to_string())
-            })?;
+        let existing = track_repo.find_by_path(&path_str).await.map_err(|e| {
+            error!(path = %path_str, error = %e, "Database query failed during ingest_buffer");
+            ScannerError::RepositoryError(e.to_string())
+        })?;
 
         if let Some(existing_track) = existing {
             let mut updated_track = track;

@@ -7,9 +7,10 @@ use crate::infrastructure::database::repositories::{parse_datetime, parse_format
 use crate::infrastructure::database::Database;
 use crate::infrastructure::media::AudioPlayer;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Playback queue state
@@ -23,6 +24,82 @@ pub struct PlaybackQueue {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SeekRequest {
     pub position_secs: u32,
+}
+
+/// Serialized `playback:progress` payload: current position and total
+/// duration in seconds (fractional), matching the frontend listener at
+/// `ui/js/player.js` (`data.position` / `data.duration`).
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaybackProgress {
+    pub position: f64,
+    pub duration: f64,
+}
+
+/// Polling interval of the playback watcher.
+#[allow(dead_code)]
+const WATCHER_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Minimum session age before an empty sink is treated as a finished track.
+///
+/// Guards against the race where a freshly appended source has not started
+/// producing samples yet (and would briefly look "empty"), and against
+/// files that decode to nothing.
+#[allow(dead_code)]
+const TRACK_END_GUARD: Duration = Duration::from_millis(1500);
+
+/// Spawn a background task that:
+///
+/// - emits `playback:progress` every [`WATCHER_INTERVAL`] while a track is
+///   loaded, and
+/// - auto-advances the queue (honoring repeat/shuffle) when the current
+///   track finishes, emitting `playback:track_changed` + `playback:state_changed`.
+#[allow(dead_code)]
+pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(WATCHER_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut was_playing = false;
+        loop {
+            interval.tick().await;
+
+            if player.get_current_track().await.is_some() {
+                let progress = PlaybackProgress {
+                    position: player.current_position().await.as_secs_f64(),
+                    duration: player.duration().await.as_secs_f64(),
+                };
+                let _ = app.emit("playback:progress", &progress);
+            }
+
+            let is_playing = player.is_playing().await;
+            let track_just_ended = was_playing
+                && !is_playing
+                && player.is_sink_empty().await
+                && player
+                    .play_started_elapsed()
+                    .await
+                    .is_some_and(|elapsed| elapsed > TRACK_END_GUARD);
+            was_playing = is_playing;
+
+            if track_just_ended {
+                info!("Current track ended; advancing playback");
+                match player.next().await {
+                    Ok(Some(track)) => {
+                        emit_track_changed(&app, &player).await;
+                        emit_state_changed(&app, &player).await;
+                        debug!(track_id = %track.id, "Auto-advanced to next track");
+                    }
+                    Ok(None) => {
+                        emit_state_changed(&app, &player).await;
+                        info!("Queue exhausted; playback stopped");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Auto-advance failed");
+                        emit_state_changed(&app, &player).await;
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Start playback of a track (optionally via a queue index).
@@ -404,7 +481,7 @@ async fn build_queue(player: &AudioPlayer) -> PlaybackQueue {
 }
 
 /// Notify the frontend of a playback-state change (play/pause/stop/seek).
-async fn emit_state_changed(app: &AppHandle, player: &AudioPlayer) {
+pub(crate) async fn emit_state_changed(app: &AppHandle, player: &AudioPlayer) {
     if let Some(track) = player.get_current_track().await {
         let now_playing = build_now_playing(player, &track).await;
         let _ = app.emit("playback:state_changed", &now_playing);
@@ -412,7 +489,7 @@ async fn emit_state_changed(app: &AppHandle, player: &AudioPlayer) {
 }
 
 /// Notify the frontend that the currently playing track changed.
-async fn emit_track_changed(app: &AppHandle, player: &AudioPlayer) {
+pub(crate) async fn emit_track_changed(app: &AppHandle, player: &AudioPlayer) {
     if let Some(track) = player.get_current_track().await {
         let _ = app.emit("playback:track_changed", &track);
     }

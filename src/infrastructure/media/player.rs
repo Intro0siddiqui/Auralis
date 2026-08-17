@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
@@ -24,7 +24,18 @@ pub struct AudioPlayer {
     current_index: Arc<RwLock<Option<usize>>>,
     repeat_mode: Arc<RwLock<RepeatMode>>,
     shuffle_enabled: Arc<RwLock<bool>>,
-    position: Arc<RwLock<Duration>>,
+    /// Target position to skip to when the current playback session was
+    /// started by a seek (rodio 0.17 has no `Sink::try_seek`).
+    seek_offset: Arc<RwLock<Duration>>,
+    /// Playback time accumulated before the current play session (frozen
+    /// while paused).
+    played: Arc<RwLock<Duration>>,
+    /// `Some` while the sink is actively playing; used to compute the live
+    /// position.
+    play_anchor: Arc<RwLock<Option<Instant>>>,
+    /// When the current playback session started; used by the auto-advance
+    /// watcher to distinguish a finished track from an empty/failed source.
+    play_started_at: Arc<RwLock<Option<Instant>>>,
     track_duration: Arc<RwLock<Duration>>,
 }
 
@@ -59,7 +70,10 @@ impl AudioPlayer {
             current_index: Arc::new(RwLock::new(None)),
             repeat_mode: Arc::new(RwLock::new(RepeatMode::Off)),
             shuffle_enabled: Arc::new(RwLock::new(false)),
-            position: Arc::new(RwLock::new(Duration::ZERO)),
+            seek_offset: Arc::new(RwLock::new(Duration::ZERO)),
+            played: Arc::new(RwLock::new(Duration::ZERO)),
+            play_anchor: Arc::new(RwLock::new(None)),
+            play_started_at: Arc::new(RwLock::new(None)),
             track_duration: Arc::new(RwLock::new(Duration::ZERO)),
         })
     }
@@ -98,16 +112,13 @@ impl AudioPlayer {
         sink.set_volume(vol);
         sink.append(source);
 
-        // Store sink and reset position
+        // Store sink and reset playback accounting
         {
             let mut current = self.sink.write().await;
             *current = Some(sink);
         }
 
-        {
-            let mut pos = self.position.write().await;
-            *pos = Duration::ZERO;
-        }
+        self.mark_playing().await;
 
         debug!(path = %path, "Playback started");
         Ok(())
@@ -139,6 +150,18 @@ impl AudioPlayer {
         if let Some(s) = sink.as_ref() {
             s.pause();
         }
+        drop(sink);
+
+        // Fold the live elapsed time into `played` so the position freezes.
+        let elapsed = match *self.play_anchor.read().await {
+            Some(anchor) => anchor.elapsed(),
+            None => Duration::ZERO,
+        };
+        if !elapsed.is_zero() {
+            let mut played = self.played.write().await;
+            *played += elapsed;
+        }
+        *self.play_anchor.write().await = None;
         Ok(())
     }
 
@@ -148,6 +171,7 @@ impl AudioPlayer {
         let sink = self.sink.read().await;
         if let Some(s) = sink.as_ref() {
             s.play();
+            *self.play_anchor.write().await = Some(Instant::now());
         }
         Ok(())
     }
@@ -159,16 +183,19 @@ impl AudioPlayer {
         if let Some(s) = sink.take() {
             s.stop();
         }
-        {
-            let mut pos = self.position.write().await;
-            *pos = Duration::ZERO;
-        }
+        drop(sink);
+        *self.seek_offset.write().await = Duration::ZERO;
+        *self.played.write().await = Duration::ZERO;
+        *self.play_anchor.write().await = None;
+        *self.play_started_at.write().await = None;
         Ok(())
     }
 
     /// Seek to a position within the current track.
-    /// Note: rodio doesn't support true seeking, so this stores the target
-    /// position and restarts playback from the beginning with a skip offset.
+    ///
+    /// rodio 0.17 has no `Sink::try_seek`, so seeking restarts playback from
+    /// the beginning and the target is stored as the seek offset, which
+    /// [`AudioPlayer::current_position`] adds to the real elapsed time.
     pub async fn seek(&self, position: Duration) -> Result<(), PlayerError> {
         debug!(?position, "Seeking to position");
 
@@ -188,17 +215,16 @@ impl AudioPlayer {
             track.file_path.clone()
         };
 
-        // Store the seek position
-        {
-            let mut pos = self.position.write().await;
-            *pos = position;
-        }
-
-        // Since rodio doesn't support seeking, we restart playback from the
-        // beginning (position is tracked externally as the skip offset).
+        // Restart playback from the beginning, then store the target as the
+        // seek offset. The offset must be set AFTER `play()` because a fresh
+        // playback session resets it.
         self.play(&path).await?;
+        *self.seek_offset.write().await = position;
 
-        info!(?position, "Seek completed (position tracked externally)");
+        info!(
+            ?position,
+            "Seek completed (position tracked via seek offset)"
+        );
         Ok(())
     }
 
@@ -309,7 +335,41 @@ impl AudioPlayer {
 
     /// Get current position
     pub async fn current_position(&self) -> Duration {
-        *self.position.read().await
+        let offset = *self.seek_offset.read().await;
+        let played = *self.played.read().await;
+        let live = match *self.play_anchor.read().await {
+            Some(anchor) => anchor.elapsed(),
+            None => Duration::ZERO,
+        };
+        let total = offset + played + live;
+        let duration = *self.track_duration.read().await;
+        if duration.is_zero() {
+            total
+        } else {
+            total.min(duration)
+        }
+    }
+
+    /// Returns `true` when the sink has no queued sources (the current track
+    /// finished or playback was stopped).
+    pub async fn is_sink_empty(&self) -> bool {
+        let sink = self.sink.read().await;
+        sink.as_ref().map(|s| s.empty()).unwrap_or(true)
+    }
+
+    /// Returns the elapsed time since the current playback session started,
+    /// or `None` when no session is active.
+    pub async fn play_started_elapsed(&self) -> Option<Duration> {
+        (*self.play_started_at.read().await).map(|started| started.elapsed())
+    }
+
+    /// Reset playback accounting and stamp the start of a new playback session.
+    async fn mark_playing(&self) {
+        let now = Instant::now();
+        *self.seek_offset.write().await = Duration::ZERO;
+        *self.played.write().await = Duration::ZERO;
+        *self.play_anchor.write().await = Some(now);
+        *self.play_started_at.write().await = Some(now);
     }
 
     /// Get track duration
@@ -408,13 +468,6 @@ impl AudioPlayer {
     pub async fn set_shuffle(&self, enabled: bool) {
         let mut shuffle = self.shuffle_enabled.write().await;
         *shuffle = enabled;
-    }
-
-    /// Update position (called periodically to track playback progress)
-    pub async fn tick_position(&self, delta: Duration) {
-        let mut pos = self.position.write().await;
-        let duration = *self.track_duration.read().await;
-        *pos = (*pos + delta).min(duration);
     }
 }
 

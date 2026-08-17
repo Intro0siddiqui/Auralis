@@ -746,20 +746,12 @@ class PlayerController {
     }
 
     startTimeTracking() {
-        this.stopTimeTracking();
-        this.progressInterval = setInterval(() => {
-            if (this.isPlaying && this.progress < this.duration) {
-                this.progress += 1;
-                this.updateProgressUI();
-            }
-        }, 1000);
+        // No-op: the real playback position is driven by `playback:progress`
+        // events emitted from the Rust playback watcher.
     }
 
     stopTimeTracking() {
-        if (this.progressInterval) {
-            clearInterval(this.progressInterval);
-            this.progressInterval = null;
-        }
+        // No-op: retained for call-site compatibility.
     }
 
     formatTime(secs) {
