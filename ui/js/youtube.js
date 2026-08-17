@@ -21,7 +21,7 @@ class YouTubeResolver {
 
     async _loadModule() {
         if (!this._modulePromise) {
-            this._modulePromise = import('./vendor/youtubei.esm.mjs');
+            this._modulePromise = import('../vendor/youtubei.esm.mjs').catch(() => import('./vendor/youtubei.esm.mjs'));
         }
         return this._modulePromise;
     }
