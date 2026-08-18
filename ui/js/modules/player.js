@@ -7,7 +7,7 @@ export const playerMethods = {
     async playTrack(trackId) {
         if (!trackId) return;
         try {
-            const nowPlaying = await this.invoke('play', { trackId });
+            const nowPlaying = await this.invoke('play', { track_id: trackId, trackId });
             if (nowPlaying && nowPlaying.track) {
                 this.updatePlayerBar(nowPlaying.track);
             } else {

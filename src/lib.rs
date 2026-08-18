@@ -265,9 +265,11 @@ impl AuralisApp {
     fn init_audio_player(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         info!("Initializing audio player");
 
-        let player = Arc::new(AudioPlayer::new()?);
-        commands::playback::spawn_playback_watcher(app_handle.clone(), player.clone());
-        infrastructure::media::background_service::attach(player.clone(), app_handle.clone());
+        let player = AudioPlayer::new()?;
+        let player_arc = Arc::new(player.clone());
+        commands::playback::spawn_playback_watcher(app_handle.clone(), player_arc.clone());
+        infrastructure::media::background_service::attach(player_arc.clone(), app_handle.clone());
+        app_handle.manage(player_arc);
         app_handle.manage(player);
 
         Ok(())

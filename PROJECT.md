@@ -337,8 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
-- **v2.1.20** — **Android audio lazy-init & YouTube WebView CORS bypass**:
-  `AudioPlayer::new()` is now infallible and lazily opens `OutputStream` on first `play()` with 3×500ms retries so Tauri `manage(player)` never fails on Android boot. Added native `http_fetch` command in Rust (`commands/downloads.rs`) and bridged `ui/js/youtube.js` `Platform.load({ fetch: nativeFetch })` to route Innertube requests through `reqwest`, bypassing Android WebView CORS restrictions completely.
+- **v2.1.21** — **Tauri State Type-Alignment Fix for AudioPlayer**:
+  Resolved type-mismatch in `src/lib.rs` where `app_handle.manage(Arc::new(player))` was registering `Arc<AudioPlayer>` instead of `AudioPlayer`, causing commands with `State<'_, AudioPlayer>` (`seek`, `play`, `pause`, `resume`) to fail with "state not managed for field 'player'". Derived `Clone` on `AudioPlayer` and registered `AudioPlayer` directly in Tauri managed state.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,

@@ -31,6 +31,7 @@ unsafe impl Send for OutputStreamHolder {}
 unsafe impl Sync for OutputStreamHolder {}
 
 /// Audio player using rodio
+#[derive(Clone)]
 pub struct AudioPlayer {
     /// Lazily-opened persistent audio output stream.
     ///
