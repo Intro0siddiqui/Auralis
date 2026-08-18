@@ -303,4 +303,3 @@ pub async fn http_fetch(request: HttpFetchRequest) -> Result<HttpFetchResponse, 
         body,
     })
 }
-
