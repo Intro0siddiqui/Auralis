@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "2.1.21"
+version = "2.1.22"
 edition = "2021"
 authors = ["Auralis Team"]
 description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
@@ -75,10 +75,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 base64 = "0.22"
 
 # Audio playback
-# rodio 0.17 supports aac/mp3/flac/wav via its symphonia backends (no opus/webm
-# decoder). The youtube.js resolver therefore prefers an mp4 (m4a/aac) audio
-# stream so downloaded files stay playable in-app.
-rodio = { version = "0.17", default-features = false, features = ["symphonia-aac", "symphonia-mp3", "symphonia-flac", "symphonia-wav"] }
+# rodio 0.17 supports aac/mp3/flac/wav/ogg/vorbis via its symphonia backends.
+# The youtube.js resolver prefers an mp4 (m4a/aac) audio stream so downloaded files stay playable in-app.
+rodio = { version = "0.17", default-features = false, features = ["symphonia-aac", "symphonia-mp3", "symphonia-flac", "symphonia-wav", "symphonia-vorbis"] }
 
 # Audio metadata
 lofty = "0.21"

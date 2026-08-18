@@ -337,8 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
-- **v2.1.21** — **Tauri State Type-Alignment Fix for AudioPlayer**:
-  Resolved type-mismatch in `src/lib.rs` where `app_handle.manage(Arc::new(player))` was registering `Arc<AudioPlayer>` instead of `AudioPlayer`, causing commands with `State<'_, AudioPlayer>` (`seek`, `play`, `pause`, `resume`) to fail with "state not managed for field 'player'". Derived `Clone` on `AudioPlayer` and registered `AudioPlayer` directly in Tauri managed state.
+- **v2.1.22** — **Android Audio Focus & Vorbis Codec Expansion**:
+  Added `symphonia-vorbis` feature to `rodio` in `Cargo.toml` to decode OGG/Vorbis tracks natively. Added `AudioFocusRequest` (`AUDIOFOCUS_GAIN`) handling in `MediaPlaybackService.kt` to ensure Android grants exclusive high-priority audio routing when playback starts. Configured automated headless Android emulator E2E YouTube download test in CI (`test-android-e2e`).
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,
