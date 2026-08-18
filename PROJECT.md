@@ -337,6 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
+- **v2.1.20** — **Android audio lazy-init & YouTube WebView CORS bypass**:
+  `AudioPlayer::new()` is now infallible and lazily opens `OutputStream` on first `play()` with 3×500ms retries so Tauri `manage(player)` never fails on Android boot. Added native `http_fetch` command in Rust (`commands/downloads.rs`) and bridged `ui/js/youtube.js` `Platform.load({ fetch: nativeFetch })` to route Innertube requests through `reqwest`, bypassing Android WebView CORS restrictions completely.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,

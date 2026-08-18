@@ -9,14 +9,38 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::domain::models::{RepeatMode, Track};
 
+/// Holds the lazily-opened audio output stream.
+///
+/// `OutputStream` is `!Send`/`!Sync` on some platforms (it wraps a
+/// platform-specific audio handle). It is only ever created on the thread
+/// that first calls `play()` and accessed inside short synchronous mutex
+/// sections — never moved between threads while alive.
+struct OutputStreamHolder {
+    stream: Option<(OutputStream, OutputStreamHandle)>,
+}
+
+// SAFETY: every access to the held `OutputStream` happens inside a short
+// synchronous `Mutex` section (never across an `await`), and the stream is
+// only ever stored/read on the thread that opened it. The `OutputStreamHandle`
+// handed out to callers is `Send + Sync`.
+unsafe impl Send for OutputStreamHolder {}
+unsafe impl Sync for OutputStreamHolder {}
+
 /// Audio player using rodio
 pub struct AudioPlayer {
-    _stream: OutputStream,
-    _stream_handle: OutputStreamHandle,
+    /// Lazily-opened persistent audio output stream.
+    ///
+    /// `None` until the first `play()` — the device is opened on demand (with
+    /// retries) instead of during application setup, because on Android the
+    /// AAudio/oboe stream is not always available that early. If setup failed
+    /// to open the device, `AudioPlayer::new()` used to error out and the
+    /// player never got registered in Tauri state, breaking every playback
+    /// command with "state not managed for field 'player'".
+    output: Arc<std::sync::Mutex<OutputStreamHolder>>,
     sink: Arc<RwLock<Option<Sink>>>,
     volume: Arc<RwLock<f32>>,
     current_track: Arc<RwLock<Option<Track>>>,
@@ -39,30 +63,25 @@ pub struct AudioPlayer {
     track_duration: Arc<RwLock<Duration>>,
 }
 
-// SAFETY: `OutputStream` is `!Send` by default because it wraps a platform-specific
-// audio handle (cpal Stream) that is not safe to move between threads. However, in
-// `AudioPlayer` we never access `_stream` directly after construction — it is only
-// stored to keep the audio device alive. All actual playback operations go through
-// the `Sink` (which IS `Send + Sync`) and the `OutputStreamHandle` (also `Send + Sync`),
-// both of which are properly synchronized via the `Arc<RwLock<...>>` fields. Each
-// `play()` call also creates a fresh, local `OutputStream` that lives only for the
-// duration of that function. Therefore, the `AudioPlayer` is safe to share across
-// threads even though it contains a non-`Send` type.
+// SAFETY: `AudioPlayer` is shared across threads via `Arc` in Tauri managed
+// state. All mutable fields are guarded by `Arc<RwLock<_>>` (tokio) or the
+// `Arc<Mutex<_>>` holding the output stream, which is only ever touched inside
+// short synchronous sections (never across an await). The `OutputStream` is
+// stored behind the mutex and never moved between threads.
 unsafe impl Send for AudioPlayer {}
 unsafe impl Sync for AudioPlayer {}
 
 impl AudioPlayer {
-    /// Create a new audio player
+    /// Create a new audio player.
+    ///
+    /// Infallible in practice: the audio output device is **not** opened here
+    /// (it can be briefly unavailable on Android during startup); it is opened
+    /// lazily on the first `play()` via [`AudioPlayer::output_stream_handle`].
     pub fn new() -> Result<Self, PlayerError> {
-        info!("Initializing audio player");
+        info!("Initializing audio player (output stream opened lazily)");
 
-        let (stream, stream_handle) =
-            OutputStream::try_default().map_err(|e| PlayerError::InitError(e.to_string()))?;
-
-        info!("Audio player initialized");
         Ok(Self {
-            _stream: stream,
-            _stream_handle: stream_handle,
+            output: Arc::new(std::sync::Mutex::new(OutputStreamHolder { stream: None })),
             sink: Arc::new(RwLock::new(None)),
             volume: Arc::new(RwLock::new(0.8)),
             current_track: Arc::new(RwLock::new(None)),
@@ -76,6 +95,51 @@ impl AudioPlayer {
             play_started_at: Arc::new(RwLock::new(None)),
             track_duration: Arc::new(RwLock::new(Duration::ZERO)),
         })
+    }
+
+    /// Open the persistent audio output stream on first use.
+    ///
+    /// Returns the already-open handle when the stream exists, otherwise
+    /// attempts to open the default output device. The `OutputStream` itself
+    /// is kept alive inside the mutex (dropping it would stop the audio); the
+    /// returned handle is `Send + Sync` and safe to use across awaits. Never
+    /// holds the mutex across an await point.
+    fn output_stream_sync(&self) -> Result<OutputStreamHandle, PlayerError> {
+        let mut guard = self
+            .output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, handle)) = guard.stream.as_ref() {
+            return Ok(handle.clone());
+        }
+        let (stream, handle) =
+            OutputStream::try_default().map_err(|e| PlayerError::InitError(e.to_string()))?;
+        guard.stream = Some((stream, handle.clone()));
+        Ok(handle)
+    }
+
+    /// Lazily open the output stream with retries.
+    ///
+    /// On Android the audio HAL/AAudio stream may not be available yet during
+    /// early startup; retry a few times before giving up so a transient
+    /// failure cannot take down playback permanently.
+    async fn output_stream_handle(&self) -> Result<OutputStreamHandle, PlayerError> {
+        const MAX_ATTEMPTS: u32 = 3;
+        const RETRY_DELAY: Duration = Duration::from_millis(500);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.output_stream_sync() {
+                Ok(handle) => return Ok(handle),
+                Err(e) if attempt == MAX_ATTEMPTS => return Err(e),
+                Err(e) => {
+                    warn!(attempt, error = %e, "Audio output unavailable; retrying");
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+            }
+        }
+        Err(PlayerError::InitError(
+            "audio output unavailable".to_string(),
+        ))
     }
 
     /// Play an audio file by path
@@ -103,11 +167,13 @@ impl AudioPlayer {
         let reader = BufReader::new(file);
         let source = Decoder::new(reader).map_err(|e| PlayerError::DecodeError(e.to_string()))?;
 
-        // Reuse the persistent output stream handle. Creating a fresh local
-        // `OutputStream` here would hold a non-`Send` type across an await and
-        // make the returned future (and any Tauri command driving it) non-`Send`.
-        let sink = Sink::try_new(&self._stream_handle)
-            .map_err(|e| PlayerError::SinkError(e.to_string()))?;
+        // Reuse the persistent output stream handle. The stream is opened
+        // lazily here (never in `new()`) so a transient audio-device failure
+        // on Android cannot prevent the player from being registered in
+        // Tauri state.
+        let stream_handle = self.output_stream_handle().await?;
+        let sink =
+            Sink::try_new(&stream_handle).map_err(|e| PlayerError::SinkError(e.to_string()))?;
 
         sink.set_volume(vol);
         sink.append(source);

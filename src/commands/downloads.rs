@@ -8,6 +8,7 @@
 use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
 use crate::infrastructure::media::downloader::{Downloader, StreamDownload};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
 use tracing::{error, info};
 use uuid::Uuid;
@@ -212,3 +213,94 @@ pub async fn list_downloads(
 
     Ok(downloader.list_active().await)
 }
+
+/// Request payload for native HTTP fetch (bypasses browser CORS).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HttpFetchRequest {
+    pub url: String,
+    pub method: Option<String>,
+    pub headers: Option<HashMap<String, String>>,
+    pub body: Option<String>,
+}
+
+/// Response payload from native HTTP fetch.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HttpFetchResponse {
+    pub status: u16,
+    pub status_text: String,
+    pub headers: HashMap<String, String>,
+    pub body: String,
+}
+
+/// Native HTTP fetch command executed via reqwest without browser CORS restrictions.
+#[tauri::command]
+pub async fn http_fetch(request: HttpFetchRequest) -> Result<HttpFetchResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+    let method = match request
+        .method
+        .as_deref()
+        .unwrap_or("GET")
+        .to_uppercase()
+        .as_str()
+    {
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "DELETE" => reqwest::Method::DELETE,
+        "HEAD" => reqwest::Method::HEAD,
+        "OPTIONS" => reqwest::Method::OPTIONS,
+        _ => reqwest::Method::GET,
+    };
+
+    let mut req_builder = client.request(method, &request.url);
+
+    if let Some(headers) = request.headers {
+        for (k, v) in headers {
+            if let (Ok(name), Ok(val)) = (
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                reqwest::header::HeaderValue::from_str(&v),
+            ) {
+                req_builder = req_builder.header(name, val);
+            }
+        }
+    }
+
+    if let Some(body) = request.body {
+        req_builder = req_builder.body(body);
+    }
+
+    let response = req_builder
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request to {} failed: {e}", request.url))?;
+
+    let status = response.status().as_u16();
+    let status_text = response
+        .status()
+        .canonical_reason()
+        .unwrap_or("")
+        .to_string();
+
+    let mut resp_headers = HashMap::new();
+    for (k, v) in response.headers() {
+        if let Ok(v_str) = v.to_str() {
+            resp_headers.insert(k.as_str().to_string(), v_str.to_string());
+        }
+    }
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response body: {e}"))?;
+
+    Ok(HttpFetchResponse {
+        status,
+        status_text,
+        headers: resp_headers,
+        body,
+    })
+}
+

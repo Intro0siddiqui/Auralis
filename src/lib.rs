@@ -154,6 +154,7 @@ impl AuralisApp {
                 commands::downloads::cancel_download,
                 commands::downloads::get_download_progress,
                 commands::downloads::list_downloads,
+                commands::downloads::http_fetch,
                 // Playlist commands
                 commands::playlists::get_playlists,
                 commands::playlists::get_playlist,

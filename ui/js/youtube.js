@@ -4,7 +4,7 @@
  * Thin wrapper around the vendored `youtubei.js` library (ui/vendor/, loaded
  * on demand as an ES module — no CDN dependency). It turns a user-facing URL
  * (YouTube video/playlist, or a direct audio file link) into a resolved object
- * the Rust `start_download` command can stream directly:
+ * the Rust `download_audio` command can stream directly:
  *
  *   { kind: 'track', stream_url, title, ext, total_bytes, thumbnail, platform }
  *   { kind: 'playlist', items: [ { url, title }, ... ] }
@@ -12,6 +12,71 @@
  * Resolution (InnerTube/signature handling) stays in JS; the Rust side only
  * fetches bytes, so no yt-dlp / ffmpeg sidecars are required.
  */
+
+/**
+ * Native HTTP fetch bridge that delegates requests to Rust's reqwest client
+ * when running inside Tauri, completely bypassing Android WebView CORS restrictions.
+ */
+async function nativeFetch(input, init = {}) {
+    let url = typeof input === 'string' ? input : (input?.url || String(input));
+    let method = init?.method || input?.method || 'GET';
+    const headers = {};
+
+    if (input?.headers) {
+        if (typeof input.headers.forEach === 'function') {
+            input.headers.forEach((v, k) => { headers[k] = v; });
+        } else if (typeof input.headers === 'object') {
+            Object.assign(headers, input.headers);
+        }
+    }
+
+    if (init?.headers) {
+        if (typeof init.headers.forEach === 'function') {
+            init.headers.forEach((v, k) => { headers[k] = v; });
+        } else if (Array.isArray(init.headers)) {
+            for (const [k, v] of init.headers) headers[k] = v;
+        } else if (typeof init.headers === 'object') {
+            Object.assign(headers, init.headers);
+        }
+    }
+
+    let body = null;
+    const rawBody = init?.body !== undefined ? init.body : input?.body;
+    if (rawBody !== undefined && rawBody !== null) {
+        if (typeof rawBody === 'string') {
+            body = rawBody;
+        } else if (rawBody instanceof Uint8Array || rawBody instanceof ArrayBuffer) {
+            body = new TextDecoder().decode(rawBody);
+        } else if (typeof rawBody === 'object') {
+            try { body = JSON.stringify(rawBody); } catch (_) { body = String(rawBody); }
+        } else {
+            body = String(rawBody);
+        }
+    }
+
+    try {
+        const invoke =
+            window.__TAURI__?.core?.invoke ||
+            window.__TAURI__?.invoke ||
+            window.Auralis?.bridge?.invoke;
+
+        if (typeof invoke === 'function') {
+            const resp = await invoke('http_fetch', {
+                request: { url, method, headers, body }
+            });
+
+            return new Response(resp.body, {
+                status: resp.status,
+                statusText: resp.status_text,
+                headers: new Headers(resp.headers),
+            });
+        }
+    } catch (err) {
+        console.warn('Native http_fetch failed or unavailable, falling back to window.fetch:', err);
+    }
+
+    return window.fetch(input, init);
+}
 
 class YouTubeResolver {
     constructor() {
@@ -32,10 +97,11 @@ class YouTubeResolver {
         const Ctor = mod.default || mod.Innertube || mod.YouTube;
         if (!Ctor) throw new Error('youtube.js failed to expose Innertube/YouTube');
 
-        // Ensure Platform evaluation is configured for signature deciphering
+        // Ensure Platform evaluation & native network fetching are configured
         if (Platform && typeof Platform.load === 'function' && Platform.shim) {
             Platform.load({
                 ...Platform.shim,
+                fetch: nativeFetch,
                 eval: async (data, env) => {
                     const fn = new Function(...Object.keys(env || {}), data.output);
                     return fn(...Object.values(env || {}));
@@ -310,17 +376,18 @@ class YouTubeResolver {
         }
         if (!res) return [];
 
-        const raw = res.results || res.contents || [];
+        const raw = res.videos || res.results || res.contents || [];
         const out = [];
         for (const r of raw) {
-            const isVideo = r && (r.type === 'video' || r.type === 'reel' || r.type === 'MusicResponsiveListItem' || r.type === 'MusicTwoRowItem');
             const id = r.id || r.videoId;
             if (!id) continue;
+            const title = typeof r.title === 'string' ? r.title : (r.title?.text || String(r.title || 'Unknown'));
+            const author = typeof r.author === 'string' ? r.author : (r.author?.name || (r.artists && r.artists[0]?.name) || '');
             out.push({
                 id,
-                title: String(r.title || 'Unknown').trim() || 'Unknown',
+                title: String(title).trim() || 'Unknown',
                 url: `https://www.youtube.com/watch?v=${id}`,
-                channel: (r.author && r.author.name) ? String(r.author.name) : '',
+                channel: String(author).trim(),
             });
             if (out.length >= 10) break;
         }
