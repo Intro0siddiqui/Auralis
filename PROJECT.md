@@ -337,8 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
-- **v2.1.23** — **Audio Focus, Vorbis Codec & Robust CI Release Pipeline**:
-  Added `symphonia-vorbis` to decode OGG/Vorbis tracks natively. Wired `AudioFocusRequest` (`AUDIOFOCUS_GAIN`) in `MediaPlaybackService.kt`. Streamlined CI release job dependencies and tuned headless Android emulator configuration with `target: default`, `api-level: 33` on Apple Silicon runner.
+- **v2.1.24** — **Fast Android CI Pipeline & Native Codec Stack**:
+  Optimized Android CI workflow dependencies by removing unneeded desktop GTK/WebKit packages to ensure rapid, non-blocking apt installs. Includes full native Vorbis and AAC decoding, JNI MediaSession audio focus (`AUDIOFOCUS_GAIN`), and automated headless Android E2E download testing.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,

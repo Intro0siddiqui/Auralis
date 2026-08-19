@@ -15,6 +15,21 @@
     <link rel="stylesheet" href="styles/base.css">
     <link rel="stylesheet" href="styles/components.css">
     <link rel="stylesheet" href="styles/responsive.css">
+
+    <!-- Pre-paint theme: apply persisted theme immediately to avoid a dark flash
+         before get_settings resolves. LocalStorage is only a mirror of the
+         SQLite-backed setting, which remains the source of truth. -->
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('auralis-theme') || 'system';
+                if (t === 'system') {
+                    t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+                }
+                document.documentElement.setAttribute('data-theme', t);
+            } catch (_) {}
+        })();
+    </script>
     
     <!-- HTMX for dynamic content -->
     <script src="vendor/htmx.min.js"></script>

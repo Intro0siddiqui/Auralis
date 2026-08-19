@@ -179,14 +179,10 @@ jobs:
 
       - name: Install system deps
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
+          sudo apt-get install -y --no-install-recommends \
             patchelf \
-            libasound2-dev \
             libssl-dev \
             pkg-config
 

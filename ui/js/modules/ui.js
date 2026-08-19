@@ -43,6 +43,9 @@ export const uiMethods = {
         if (document.documentElement && typeof document.documentElement.setAttribute === 'function') {
             document.documentElement.setAttribute('data-theme', activeTheme);
         }
+        try {
+            localStorage.setItem('auralis-theme', themeStr);
+        } catch (_) {}
         const metaThemeColor = document.querySelector ? document.querySelector('meta[name="theme-color"]') : null;
         if (metaThemeColor && typeof metaThemeColor.setAttribute === 'function') {
             metaThemeColor.setAttribute('content', activeTheme === 'light' ? '#f0f4f8' : '#070b10');
