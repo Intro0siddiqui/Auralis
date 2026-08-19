@@ -55,6 +55,7 @@ impl SqliteTrackRepository {
                 .unwrap_or_default()
                 .unwrap_or(0)
                 != 0,
+            mtime: row.get(22)?, // ADDED: Assumes i64 or DateTime<Utc> based on your Track struct
         })
     }
 }
@@ -268,8 +269,8 @@ impl TrackRepository for SqliteTrackRepository {
                 id, title, artist, album, album_artist, genre, year,
                 track_number, disc_number, duration_secs, file_path,
                 file_size, format, bitrate, sample_rate, album_art_path,
-                date_added, last_played, play_count, is_downloaded, source_url, is_favorite
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                date_added, last_played, play_count, is_downloaded, source_url, is_favorite, mtime
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             params![
                 track.id.to_string(),
                 track.title,
@@ -293,6 +294,7 @@ impl TrackRepository for SqliteTrackRepository {
                 track.is_downloaded as i32,
                 track.source_url,
                 track.is_favorite as i32,
+                track.mtime, // ADDED
             ],
         )?;
         Ok(())
@@ -309,7 +311,7 @@ impl TrackRepository for SqliteTrackRepository {
                 track_number = ?, disc_number = ?, duration_secs = ?, file_path = ?,
                 file_size = ?, format = ?, bitrate = ?, sample_rate = ?, album_art_path = ?,
                 date_added = ?, last_played = ?, play_count = ?, is_downloaded = ?, source_url = ?,
-                is_favorite = ?
+                is_favorite = ?, mtime = ?
             WHERE id = ?"#,
             params![
                 track.title,
@@ -333,6 +335,7 @@ impl TrackRepository for SqliteTrackRepository {
                 track.is_downloaded as i32,
                 track.source_url,
                 track.is_favorite as i32,
+                track.mtime, // ADDED
                 track.id.to_string(),
             ],
         )?;
