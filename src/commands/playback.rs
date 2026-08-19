@@ -36,9 +36,21 @@ pub struct PlaybackProgress {
     pub duration: f64,
 }
 
-/// Polling interval of the playback watcher.
+/// Polling interval of the playback watcher while playing.
+///
+/// 250 ms is the only cadence the frontend needs — the progress bar is
+/// event-driven and snaps optimistically on seek, so finer ticks would only
+/// burn battery on Android with no visible benefit.
 #[allow(dead_code)]
 const WATCHER_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Polling interval while paused or idle.
+///
+/// The watcher has nothing to report then (`state_changed` events already
+/// carry the frozen position), so it just sleeps — keeping the app at ~1
+/// wakeup per 2 s instead of 4 per second when the user isn't listening.
+#[allow(dead_code)]
+const IDLE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Minimum session age before an empty sink is treated as a finished track.
 ///
@@ -50,8 +62,9 @@ const TRACK_END_GUARD: Duration = Duration::from_millis(1500);
 
 /// Spawn a background task that:
 ///
-/// - emits `playback:progress` every [`WATCHER_INTERVAL`] while a track is
-///   loaded, and
+/// - emits `playback:progress` every [`WATCHER_INTERVAL`] **while playing**
+///   (paused/idle sessions slow to [`IDLE_INTERVAL`] and emit nothing — the
+///   pause/seek commands already report the frozen position), and
 /// - auto-advances the queue (honoring repeat/shuffle) when the current
 ///   track finishes, emitting `playback:track_changed` + `playback:state_changed`.
 #[allow(dead_code)]
@@ -63,7 +76,9 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
         loop {
             interval.tick().await;
 
-            if player.get_current_track().await.is_some() {
+            let is_playing = player.is_playing().await;
+
+            if is_playing {
                 let progress = PlaybackProgress {
                     position: player.current_position().await.as_secs_f64(),
                     duration: player.duration().await.as_secs_f64(),
@@ -71,7 +86,6 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                 let _ = app.emit("playback:progress", &progress);
             }
 
-            let is_playing = player.is_playing().await;
             let track_just_ended = was_playing
                 && !is_playing
                 && player.is_sink_empty().await
@@ -101,6 +115,15 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                     }
                 }
             }
+
+            // Adaptive cadence: poll fast only while audio is actually
+            // playing; slow to a heartbeat otherwise to save battery.
+            let next = if is_playing {
+                WATCHER_INTERVAL
+            } else {
+                IDLE_INTERVAL
+            };
+            interval.reset_after(next);
         }
     });
 }

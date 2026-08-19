@@ -337,8 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
-- **v2.1.24** — **Fast Android CI Pipeline & Native Codec Stack**:
-  Optimized Android CI workflow dependencies by removing unneeded desktop GTK/WebKit packages to ensure rapid, non-blocking apt installs. Includes full native Vorbis and AAC decoding, JNI MediaSession audio focus (`AUDIOFOCUS_GAIN`), and automated headless Android E2E download testing.
+- **v2.1.25** — **Player Transport IPC & ARM64 KVM CI Runner**:
+  Routed all frontend player controls (play/pause/next/previous) through `window.Auralis.bridge.invoke` (fixing silent drops from deprecated Tauri internals). Switched Android emulator CI test to `ubuntu-24.04-arm` with native ARM64 KVM hardware acceleration for sub-minute test execution. Included adaptive cadence in `spawn_playback_watcher` and progress sync.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,

@@ -88,7 +88,8 @@ impl Database {
                     play_count INTEGER NOT NULL DEFAULT 0,
                     is_downloaded INTEGER NOT NULL DEFAULT 0,
                     source_url TEXT,
-                    is_favorite INTEGER NOT NULL DEFAULT 0
+                    is_favorite INTEGER NOT NULL DEFAULT 0,
+                    mtime INTEGER NOT NULL DEFAULT 0
                 );
 
                 -- Playlists table
@@ -147,6 +148,8 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
                 CREATE INDEX IF NOT EXISTS idx_tracks_date_added ON tracks(date_added);
                 CREATE INDEX IF NOT EXISTS idx_tracks_play_count ON tracks(play_count);
+                CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
+                CREATE INDEX IF NOT EXISTS idx_tracks_last_played ON tracks(last_played);
                 CREATE INDEX IF NOT EXISTS idx_playlist_tracks_position ON playlist_tracks(playlist_id, position);
                 CREATE INDEX IF NOT EXISTS idx_sync_changes_applied ON sync_changes(applied);
                 "#,
@@ -157,6 +160,11 @@ impl Database {
         // Ensure is_favorite column exists in case database was already created
         let _ = connection.execute(
             "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        // Ensure mtime column exists in case database was already created
+        let _ = connection.execute(
+            "ALTER TABLE tracks ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0",
             [],
         );
         Ok(())

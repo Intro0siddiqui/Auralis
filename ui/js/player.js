@@ -29,6 +29,10 @@ class PlayerController {
 
         window.Auralis.bridge.on('playback:state', (state) => {
             this.isPlaying = state.is_playing;
+            if (state.position_secs !== undefined && !state.is_playing) {
+                this.progress = state.position_secs;
+                this.updateProgressUI();
+            }
             this.updatePlayButton();
         });
 
@@ -393,8 +397,13 @@ class PlayerController {
         this.isPlaying = true;
         this.updatePlayButton();
         this.startTimeTracking();
-        if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('resume').catch(() => {});
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.invoke('resume').catch((err) => {
+                console.warn('Resume failed, checking if current track can be played:', err);
+                if (this.currentTrack && this.currentTrack.id) {
+                    window.Auralis.bridge.playTrack(this.currentTrack.id);
+                }
+            });
         }
     }
 
@@ -402,20 +411,26 @@ class PlayerController {
         this.isPlaying = false;
         this.updatePlayButton();
         this.stopTimeTracking();
-        if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('pause').catch(() => {});
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.invoke('pause').catch((err) => {
+                console.warn('Pause failed:', err);
+            });
         }
     }
 
     next() {
-        if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('next_track').catch(() => {});
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.invoke('next_track').catch((err) => {
+                console.warn('Next track failed:', err);
+            });
         }
     }
 
     previous() {
-        if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('previous_track').catch(() => {});
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.invoke('previous_track').catch((err) => {
+                console.warn('Previous track failed:', err);
+            });
         }
     }
 

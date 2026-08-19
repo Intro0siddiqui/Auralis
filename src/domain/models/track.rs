@@ -163,6 +163,12 @@ pub struct Track {
     /// Whether this track is marked as a favorite
     #[serde(default)]
     pub is_favorite: bool,
+
+    /// Last modification time of the source file (unix seconds).
+    ///
+    /// Used by the incremental scanner to skip unchanged files without
+    /// re-parsing their metadata.
+    pub mtime: i64,
 }
 
 impl Track {
@@ -191,6 +197,7 @@ impl Track {
             is_downloaded: false,
             source_url: None,
             is_favorite: false,
+            mtime: 0,
         }
     }
 
