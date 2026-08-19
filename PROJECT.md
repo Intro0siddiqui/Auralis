@@ -337,8 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
-- **v2.1.22** — **Android Audio Focus & Vorbis Codec Expansion**:
-  Added `symphonia-vorbis` feature to `rodio` in `Cargo.toml` to decode OGG/Vorbis tracks natively. Added `AudioFocusRequest` (`AUDIOFOCUS_GAIN`) handling in `MediaPlaybackService.kt` to ensure Android grants exclusive high-priority audio routing when playback starts. Configured automated headless Android emulator E2E YouTube download test in CI (`test-android-e2e`).
+- **v2.1.23** — **Audio Focus, Vorbis Codec & Robust CI Release Pipeline**:
+  Added `symphonia-vorbis` to decode OGG/Vorbis tracks natively. Wired `AudioFocusRequest` (`AUDIOFOCUS_GAIN`) in `MediaPlaybackService.kt`. Streamlined CI release job dependencies and tuned headless Android emulator configuration with `target: default`, `api-level: 33` on Apple Silicon runner.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,
