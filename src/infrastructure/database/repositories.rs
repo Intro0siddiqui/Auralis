@@ -55,7 +55,7 @@ impl SqliteTrackRepository {
                 .unwrap_or_default()
                 .unwrap_or(0)
                 != 0,
-            mtime: row.get(22)?, // ADDED: Assumes i64 or DateTime<Utc> based on your Track struct
+            mtime: row.get::<_, Option<i64>>(22)?.unwrap_or(0),
         })
     }
 }
@@ -294,7 +294,7 @@ impl TrackRepository for SqliteTrackRepository {
                 track.is_downloaded as i32,
                 track.source_url,
                 track.is_favorite as i32,
-                track.mtime, // ADDED
+                track.mtime,
             ],
         )?;
         Ok(())
@@ -335,7 +335,7 @@ impl TrackRepository for SqliteTrackRepository {
                 track.is_downloaded as i32,
                 track.source_url,
                 track.is_favorite as i32,
-                track.mtime, // ADDED
+                track.mtime,
                 track.id.to_string(),
             ],
         )?;
@@ -969,5 +969,4 @@ mod tests {
 
         let _ = std::fs::remove_file(&db_path);
     }
-  }
 }
