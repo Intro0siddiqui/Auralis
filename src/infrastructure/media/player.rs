@@ -2,7 +2,7 @@
 //!
 //! Audio playback using rodio (0.22+).
 
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+use rodio::{Decoder, DeviceSinkBuilder, Mixer, MixerDeviceSink, Player};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::Arc;
@@ -14,10 +14,11 @@ use crate::domain::models::{RepeatMode, Track};
 
 /// Holds the lazily-opened audio output stream.
 struct OutputStreamHolder {
-    stream: Option<(OutputStream, OutputStreamHandle)>,
+    // We keep the MixerDeviceSink alive here. Dropping it stops the audio output.
+    stream: Option<MixerDeviceSink>,
 }
 
-// SAFETY: every access to the held `OutputStream` happens inside a short
+// SAFETY: every access to the held `MixerDeviceSink` happens inside a short
 // synchronous `Mutex` section (never across an `await`), and the stream is
 // only ever stored/read on the thread that opened it.
 unsafe impl Send for OutputStreamHolder {}
@@ -27,7 +28,7 @@ unsafe impl Sync for OutputStreamHolder {}
 #[derive(Clone)]
 pub struct AudioPlayer {
     output: Arc<std::sync::Mutex<OutputStreamHolder>>,
-    sink: Arc<RwLock<Option<Sink>>>,
+    sink: Arc<RwLock<Option<Player>>>,
     volume: Arc<RwLock<f32>>,
     current_track: Arc<RwLock<Option<Track>>>,
     queue: Arc<RwLock<Vec<Track>>>,
@@ -65,23 +66,25 @@ impl AudioPlayer {
         })
     }
 
-    fn output_stream_sync(&self) -> Result<OutputStreamHandle, PlayerError> {
+    fn output_stream_sync(&self) -> Result<Mixer, PlayerError> {
         let mut guard = self.output.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((_, handle)) = guard.stream.as_ref() {
-            return Ok(handle.clone());
+        if let Some(device_sink) = guard.stream.as_ref() {
+            // Clone the Mixer reference so it can be sent across async boundaries
+            return Ok(device_sink.mixer().clone());
         }
-        let (stream, handle) =
-            OutputStream::try_default().map_err(|e| PlayerError::InitError(e.to_string()))?;
-        guard.stream = Some((stream, handle.clone()));
-        Ok(handle)
+        let device_sink = DeviceSinkBuilder::open_default_sink()
+            .map_err(|e| PlayerError::InitError(e.to_string()))?;
+        let mixer = device_sink.mixer().clone();
+        guard.stream = Some(device_sink);
+        Ok(mixer)
     }
 
-    async fn output_stream_handle(&self) -> Result<OutputStreamHandle, PlayerError> {
+    async fn output_stream_handle(&self) -> Result<Mixer, PlayerError> {
         const MAX_ATTEMPTS: u32 = 3;
         const RETRY_DELAY: Duration = Duration::from_millis(500);
         for attempt in 1..=MAX_ATTEMPTS {
             match self.output_stream_sync() {
-                Ok(handle) => return Ok(handle),
+                Ok(mixer) => return Ok(mixer),
                 Err(e) if attempt == MAX_ATTEMPTS => return Err(e),
                 Err(e) => {
                     warn!(attempt, error = %e, "Audio output unavailable; retrying");
@@ -101,14 +104,13 @@ impl AudioPlayer {
         let source = Decoder::new(BufReader::new(file))
             .map_err(|e| PlayerError::DecodeError(e.to_string()))?;
 
-        let stream_handle = self.output_stream_handle().await?;
-        let sink = Sink::try_new(&stream_handle)
-            .map_err(|e| PlayerError::SinkError(e.to_string()))?;
+        let mixer = self.output_stream_handle().await?;
+        let player = Player::connect_new(&mixer);
 
-        sink.set_volume(vol);
-        sink.append(source);
+        player.set_volume(vol);
+        player.append(source);
 
-        *self.sink.write().await = Some(sink);
+        *self.sink.write().await = Some(player);
         self.mark_playing().await;
 
         debug!(path = %path, "Playback started");
@@ -167,8 +169,8 @@ impl AudioPlayer {
         }
 
         let sink_guard = self.sink.read().await;
-        if let Some(sink) = sink_guard.as_ref() {
-            sink.try_seek(position)
+        if let Some(player) = sink_guard.as_ref() {
+            player.try_seek(position)
                 .map_err(|e| PlayerError::StateError(format!("Seek failed: {e}")))?;
 
             // Reset time tracking to the new position
@@ -316,7 +318,7 @@ impl AudioPlayer {
 pub enum PlayerError {
     #[error("Initialization error: {0}")]
     InitError(String),
-    #[error("Sink error: {0}")]
+    #[error("Player error: {0}")]
     SinkError(String),
     #[error("File error: {0}")]
     FileError(String),
