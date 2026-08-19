@@ -74,10 +74,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 base64 = "0.22"
 
 # Audio playback
-# rodio 0.17 supports aac/mp3/flac/wav/ogg/vorbis via its symphonia backends.
-# The youtube.js resolver prefers an mp4 (m4a/aac) audio stream so downloaded files stay playable in-app.
-rodio = { version = "0.22.2", default-features = false, features = ["symphonia-aac", "symphonia-mp3", "symphonia-flac", "symphonia-wav", "symphonia-vorbis"] }
-
+# rodio 0.22 uses high-level format features that handle both the codec 
+# and the container parser (e.g., isomp4 for m4a).
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "flac", "vorbis", "wav"] }
 # Audio metadata
 lofty = "0.21"
 
