@@ -2,7 +2,7 @@
 //!
 //! Audio playback using rodio (0.22+).
 
-use rodio::{Decoder, DeviceSinkBuilder, Mixer, MixerDeviceSink, Player};
+use rodio::{mixer::Mixer, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::Arc;
@@ -129,7 +129,12 @@ impl AudioPlayer {
         if let Some(s) = self.sink.read().await.as_ref() {
             s.pause();
         }
-        let elapsed = self.play_anchor.read().await.map(|a| a.elapsed()).unwrap_or_default();
+        let elapsed = self
+            .play_anchor
+            .read()
+            .await
+            .map(|a| a.elapsed())
+            .unwrap_or_default();
         if !elapsed.is_zero() {
             *self.played.write().await += elapsed;
         }
@@ -170,7 +175,8 @@ impl AudioPlayer {
 
         let sink_guard = self.sink.read().await;
         if let Some(player) = sink_guard.as_ref() {
-            player.try_seek(position)
+            player
+                .try_seek(position)
                 .map_err(|e| PlayerError::StateError(format!("Seek failed: {e}")))?;
 
             // Reset time tracking to the new position
@@ -196,7 +202,9 @@ impl AudioPlayer {
 
     pub async fn next(&self) -> Result<Option<Track>, PlayerError> {
         let queue = self.queue.read().await;
-        if queue.is_empty() { return Ok(None); }
+        if queue.is_empty() {
+            return Ok(None);
+        }
 
         let current_idx = *self.current_index.read().await;
         let repeat = *self.repeat_mode.read().await;
@@ -218,13 +226,19 @@ impl AudioPlayer {
                 self.play_track(track.clone()).await?;
                 Ok(Some(track))
             }
-            None => { drop(queue); self.stop().await?; Ok(None) }
+            None => {
+                drop(queue);
+                self.stop().await?;
+                Ok(None)
+            }
         }
     }
 
     pub async fn previous(&self) -> Result<Option<Track>, PlayerError> {
         let queue = self.queue.read().await;
-        if queue.is_empty() { return Ok(None); }
+        if queue.is_empty() {
+            return Ok(None);
+        }
 
         let current_idx = *self.current_index.read().await;
         let repeat = *self.repeat_mode.read().await;
@@ -250,21 +264,38 @@ impl AudioPlayer {
     }
 
     pub async fn is_playing(&self) -> bool {
-        self.sink.read().await.as_ref()
+        self.sink
+            .read()
+            .await
+            .as_ref()
             .map(|s| !s.is_paused() && !s.empty())
             .unwrap_or(false)
     }
 
     pub async fn current_position(&self) -> Duration {
         let played = *self.played.read().await;
-        let live = self.play_anchor.read().await.map(|a| a.elapsed()).unwrap_or_default();
+        let live = self
+            .play_anchor
+            .read()
+            .await
+            .map(|a| a.elapsed())
+            .unwrap_or_default();
         let total = played + live;
         let duration = *self.track_duration.read().await;
-        if duration.is_zero() { total } else { total.min(duration) }
+        if duration.is_zero() {
+            total
+        } else {
+            total.min(duration)
+        }
     }
 
     pub async fn is_sink_empty(&self) -> bool {
-        self.sink.read().await.as_ref().map(|s| s.empty()).unwrap_or(true)
+        self.sink
+            .read()
+            .await
+            .as_ref()
+            .map(|s| s.empty())
+            .unwrap_or(true)
     }
 
     pub async fn play_started_elapsed(&self) -> Option<Duration> {
@@ -278,12 +309,24 @@ impl AudioPlayer {
         *self.play_started_at.write().await = Some(now);
     }
 
-    pub async fn duration(&self) -> Duration { *self.track_duration.read().await }
-    pub async fn get_volume(&self) -> f32 { *self.volume.read().await }
-    pub async fn get_current_track(&self) -> Option<Track> { self.current_track.read().await.clone() }
-    pub async fn get_queue(&self) -> Vec<Track> { self.queue.read().await.clone() }
-    pub async fn set_queue(&self, tracks: Vec<Track>) { *self.queue.write().await = tracks; }
-    pub async fn add_to_queue(&self, track: Track) { self.queue.write().await.push(track); }
+    pub async fn duration(&self) -> Duration {
+        *self.track_duration.read().await
+    }
+    pub async fn get_volume(&self) -> f32 {
+        *self.volume.read().await
+    }
+    pub async fn get_current_track(&self) -> Option<Track> {
+        self.current_track.read().await.clone()
+    }
+    pub async fn get_queue(&self) -> Vec<Track> {
+        self.queue.read().await.clone()
+    }
+    pub async fn set_queue(&self, tracks: Vec<Track>) {
+        *self.queue.write().await = tracks;
+    }
+    pub async fn add_to_queue(&self, track: Track) {
+        self.queue.write().await.push(track);
+    }
 
     pub async fn remove_from_queue(&self, index: usize) -> Result<Track, PlayerError> {
         let mut queue = self.queue.write().await;
@@ -295,7 +338,11 @@ impl AudioPlayer {
             if index < current {
                 *self.current_index.write().await = Some(current - 1);
             } else if index == current {
-                *self.current_index.write().await = if current < queue.len() { Some(current) } else { None };
+                *self.current_index.write().await = if current < queue.len() {
+                    Some(current)
+                } else {
+                    None
+                };
             }
         }
         Ok(track)
@@ -306,12 +353,24 @@ impl AudioPlayer {
         *self.current_index.write().await = None;
     }
 
-    pub async fn get_current_index(&self) -> Option<usize> { *self.current_index.read().await }
-    pub async fn set_current_index(&self, index: Option<usize>) { *self.current_index.write().await = index; }
-    pub async fn get_repeat_mode(&self) -> RepeatMode { *self.repeat_mode.read().await }
-    pub async fn set_repeat_mode(&self, mode: RepeatMode) { *self.repeat_mode.write().await = mode; }
-    pub async fn get_shuffle(&self) -> bool { *self.shuffle_enabled.read().await }
-    pub async fn set_shuffle(&self, enabled: bool) { *self.shuffle_enabled.write().await = enabled; }
+    pub async fn get_current_index(&self) -> Option<usize> {
+        *self.current_index.read().await
+    }
+    pub async fn set_current_index(&self, index: Option<usize>) {
+        *self.current_index.write().await = index;
+    }
+    pub async fn get_repeat_mode(&self) -> RepeatMode {
+        *self.repeat_mode.read().await
+    }
+    pub async fn set_repeat_mode(&self, mode: RepeatMode) {
+        *self.repeat_mode.write().await = mode;
+    }
+    pub async fn get_shuffle(&self) -> bool {
+        *self.shuffle_enabled.read().await
+    }
+    pub async fn set_shuffle(&self, enabled: bool) {
+        *self.shuffle_enabled.write().await = enabled;
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
