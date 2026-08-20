@@ -58,6 +58,7 @@ async function nativeFetch(input, init = {}) {
         const invoke =
             window.__TAURI__?.core?.invoke ||
             window.__TAURI__?.invoke ||
+            window.__TAURI_INTERNALS__?.invoke ||
             window.Auralis?.bridge?.invoke;
 
         if (typeof invoke === 'function') {
