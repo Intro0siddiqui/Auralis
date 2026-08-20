@@ -132,7 +132,7 @@ jobs:
           SYSROOT_LIB_X64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/26"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_ARM64"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_X64"
-          cargo tauri android build --apk --target aarch64,x86_64
+          cargo tauri android build --apk --target aarch64 x86_64
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
