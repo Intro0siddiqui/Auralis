@@ -1,0 +1,168 @@
+name: Android E2E Test (Single Job)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-android:
+    name: Android Build & E2E Download Test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: |
+          sdkmanager --install "ndk;27.2.12479018"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/27.2.12479018" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
+
+      - name: Setup Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/build.gradle*') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install system deps
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            patchelf \
+            libssl-dev \
+            pkg-config
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "2.11.4" 2>/dev/null || npm install -g @tauri-apps/cli@2.11.4
+
+      - name: Init Android project
+        run: cargo tauri android init || npx @tauri-apps/cli android init || true
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+
+      - name: Apply Custom Auralis App Icons
+        run: |
+          RES_DIR="gen/android/app/src/main/res"
+          if [ -d "icons/android" ] && [ -d "$RES_DIR" ]; then
+            echo "Copying custom Auralis mipmap icons to $RES_DIR"
+            cp -r icons/android/* "$RES_DIR/"
+            echo "Custom launcher icons applied successfully!"
+          fi
+
+      - name: Inject Android Audio & Storage Permissions and MediaPlaybackService
+        run: |
+          MANIFEST="gen/android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            echo "Injecting storage and media permissions into AndroidManifest.xml"
+            if ! grep -q 'xmlns:tools' "$MANIFEST"; then
+              sed -i 's|<manifest|<manifest xmlns:tools="http://schemas.android.com/tools"|' "$MANIFEST"
+            fi
+            sed -i '/<manifest[^>]*>/a \    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />' "$MANIFEST"
+            sed -i 's|<application|<application android:requestLegacyExternalStorage="true"|' "$MANIFEST"
+            sed -i '/<\/application>/i \        <service android:name=".MediaPlaybackService" android:foregroundServiceType="mediaPlayback" android:exported="false"/>' "$MANIFEST"
+            echo "Updated AndroidManifest.xml:"
+            cat "$MANIFEST"
+          fi
+
+          PKG_DIR="gen/android/app/src/main/java/com/auralis/v2"
+          mkdir -p "$PKG_DIR"
+          cp scripts/android/MediaPlaybackService.kt "$PKG_DIR/MediaPlaybackService.kt"
+          echo "Installed MediaPlaybackService.kt from repo into $PKG_DIR"
+
+      - name: Configure Android SDK versions
+        run: |
+          for f in $(find gen/android -name "build.gradle*" 2>/dev/null); do
+            if [ -f "$f" ]; then
+              echo "Setting compileSdk and targetSdk to 36 and minSdk to 26 in $f"
+              sed -i -E 's/(compileSdk(Version)?(\.set\(|\s*=?\s*|\s*\(\s*))[0-9]+/\136/g' "$f"
+              sed -i -E 's/(targetSdk(Version)?(\.set\(|\s*=?\s*|\s*\(\s*))[0-9]+/\136/g' "$f"
+              sed -i -E 's/(minSdk(Version)?(\.set\(|\s*=?\s*|\s*\(\s*))[0-9]+/\126/g' "$f"
+              echo "Updated $f:"
+              cat "$f"
+            fi
+          done
+
+      - name: Bundle C++ runtime (libc++_shared.so)
+        run: |
+          NDK_SYSROOT="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
+          for spec in "aarch64-linux-android:arm64-v8a" "x86_64-linux-android:x86_64"; do
+            lib="${spec%%:*}"
+            abi="${spec##*:}"
+            src="$NDK_SYSROOT/$lib/libc++_shared.so"
+            if [ ! -f "$src" ]; then
+              echo "WARN: libc++_shared.so not found for $lib at $src"
+              continue
+            fi
+            dest="gen/android/app/src/main/jniLibs/$abi"
+            mkdir -p "$dest"
+            cp "$src" "$dest/"
+            echo "Bundled libc++_shared.so -> $dest"
+          done
+
+      - name: Build APK (Dual ABI)
+        run: |
+          SYSROOT_LIB_ARM64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/26"
+          SYSROOT_LIB_X64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/26"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_ARM64"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_X64"
+          cargo tauri android build --apk --target aarch64,x86_64
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+
+      - name: Locate Built Android APK
+        id: apk
+        run: |
+          APK_PATH=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            APK_PATH=$(find gen/android -name "*.apk" | head -1)
+          fi
+          echo "Found APK at: $APK_PATH"
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+
+      - name: Enable KVM Hardware Acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules || true
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
+          ls -l /dev/kvm || true
+
+      - name: Run E2E YouTube Download Test on Android Emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: bash scripts/android/run_emulator_test.sh "${{ steps.apk.outputs.apk_path }}"
