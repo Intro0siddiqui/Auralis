@@ -57,11 +57,13 @@ jobs:
             libssl-dev \
             pkg-config
 
-      - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli@2.11.4 || cargo install tauri-cli --version "2.11.4"
+      - name: Install dependencies & Tauri CLI
+        run: |
+          npm install
+          npm install -g @tauri-apps/cli@2.11.4
 
       - name: Init Android project
-        run: npx @tauri-apps/cli android init || cargo tauri android init || true
+        run: npx --yes @tauri-apps/cli@2.11.4 android init || true
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
@@ -140,7 +142,7 @@ jobs:
         run: |
           SYSROOT_LIB_X64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/26"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_X64"
-          npx tauri android build --apk --target x86_64 || cargo tauri android build --apk --target x86_64
+          npx --yes @tauri-apps/cli@2.11.4 android build --apk --target x86_64
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
