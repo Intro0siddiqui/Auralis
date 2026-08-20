@@ -5,7 +5,7 @@ on:
 
 jobs:
   test-android:
-    name: Android Build & E2E Download Test
+    name: Android Build & E2E Download Test (x86_64 KVM)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -13,7 +13,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, x86_64-linux-android
+          targets: x86_64-linux-android
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -112,7 +112,7 @@ jobs:
       - name: Bundle C++ runtime (libc++_shared.so)
         run: |
           NDK_SYSROOT="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
-          for spec in "aarch64-linux-android:arm64-v8a" "x86_64-linux-android:x86_64"; do
+          for spec in "x86_64-linux-android:x86_64"; do
             lib="${spec%%:*}"
             abi="${spec##*:}"
             src="$NDK_SYSROOT/$lib/libc++_shared.so"
@@ -126,27 +126,49 @@ jobs:
             echo "Bundled libc++_shared.so -> $dest"
           done
 
-      - name: Build APK (Dual ABI)
+      - name: Generate Keystore
         run: |
-          SYSROOT_LIB_ARM64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/26"
+          keytool -genkeypair -v \
+            -keystore $RUNNER_TEMP/auralis-test.jks \
+            -alias auralis \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass password -keypass password \
+            -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
+
+      - name: Build APK (x86_64 CI Test Target)
+        run: |
           SYSROOT_LIB_X64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/26"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_ARM64"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_X64"
-          cargo tauri android build --apk --target aarch64 x86_64
+          cargo tauri android build --apk --target x86_64
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
-      - name: Locate Built Android APK
-        id: apk
+      - name: Sign Test APK
+        id: sign
         run: |
-          APK_PATH=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
-          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-            APK_PATH=$(find gen/android -name "*.apk" | head -1)
+          RAW_APK=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
+          if [ -z "$RAW_APK" ]; then
+            RAW_APK=$(find gen/android -name "*.apk" | head -1)
           fi
-          echo "Found APK at: $APK_PATH"
-          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "Found raw APK: $RAW_APK"
+          ZALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
+          "$ZALIGN" -f -P 16 4 "$RAW_APK" "$RUNNER_TEMP/aligned.apk"
+          "$APKSIGNER" sign \
+            --ks "$RUNNER_TEMP/auralis-test.jks" \
+            --ks-key-alias auralis \
+            --ks-pass pass:password \
+            --key-pass pass:password \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "$RUNNER_TEMP/auralis-test-signed.apk" \
+            "$RUNNER_TEMP/aligned.apk"
+          "$APKSIGNER" verify --verbose "$RUNNER_TEMP/auralis-test-signed.apk"
+          echo "Signed APK created at: $RUNNER_TEMP/auralis-test-signed.apk"
+          echo "apk_path=$RUNNER_TEMP/auralis-test-signed.apk" >> $GITHUB_OUTPUT
 
       - name: Enable KVM Hardware Acceleration
         run: |
@@ -165,4 +187,4 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: bash scripts/android/run_emulator_test.sh "${{ steps.apk.outputs.apk_path }}"
+          script: bash scripts/android/run_emulator_test.sh "${{ steps.sign.outputs.apk_path }}"
