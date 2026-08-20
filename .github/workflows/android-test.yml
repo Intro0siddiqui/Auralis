@@ -58,10 +58,10 @@ jobs:
             pkg-config
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "2.11.4" 2>/dev/null || npm install -g @tauri-apps/cli@2.11.4
+        run: npm install -g @tauri-apps/cli@2.11.4 || cargo install tauri-cli --version "2.11.4"
 
       - name: Init Android project
-        run: cargo tauri android init || npx @tauri-apps/cli android init || true
+        run: npx @tauri-apps/cli android init || cargo tauri android init || true
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
@@ -94,7 +94,8 @@ jobs:
           PKG_DIR="gen/android/app/src/main/java/com/auralis/v2"
           mkdir -p "$PKG_DIR"
           cp scripts/android/MediaPlaybackService.kt "$PKG_DIR/MediaPlaybackService.kt"
-          echo "Installed MediaPlaybackService.kt from repo into $PKG_DIR"
+          cp scripts/android/MainActivity.kt "$PKG_DIR/MainActivity.kt"
+          echo "Installed MediaPlaybackService.kt and MainActivity.kt from repo into $PKG_DIR"
 
       - name: Configure Android SDK versions
         run: |

@@ -82,7 +82,7 @@ adb shell am start -W -n "$MAIN_ACTIVITY"
 echo "[5/6] Waiting for WebView DevTools socket..."
 DEVTOOLS_SOCKET=""
 for i in $(seq 1 35); do
-    SOCKET_LINE=$(adb shell "cat /proc/net/unix" 2>/dev/null | grep -E "webview_devtools_remote|devtools_remote" | head -n 1 | tr -d '\r')
+    SOCKET_LINE=$(adb shell "cat /proc/net/unix 2>/dev/null" | grep -E "webview_devtools_remote|devtools_remote" | head -n 1 | tr -d '\r' || true)
     if [ -n "$SOCKET_LINE" ]; then
         # Extract abstract socket name (strip leading @)
         DEVTOOLS_SOCKET=$(echo "$SOCKET_LINE" | awk '{print $NF}' | sed 's/^@//')
