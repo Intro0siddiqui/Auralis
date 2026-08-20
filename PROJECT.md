@@ -337,8 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
-- **v2.1.26** — **Rodio 0.22 Migration, Mtime Scanning & Code Format**:
-  Upgraded to Rodio 0.22+ with `MixerDeviceSink` and `Player` audio primitives, implemented incremental library mtime scanning, resolved database schema conflicts, and formatted all Rust codebases to pass zero-warning Clippy/fmt lint checks.
+- **v2.1.27** — **Android AAudio Linker Path & MinSdk 26 Configuration**:
+  Supplied the NDK API 26+ library search path (`-laaudio`) for Rodio 0.22 / CPAL 0.17 on Android, set `minSdk = 26` to match AAudio capabilities, and maintained 16KB page alignment and ARM64 KVM CI testing.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,
