@@ -168,6 +168,7 @@ pub struct Track {
     ///
     /// Used by the incremental scanner to skip unchanged files without
     /// re-parsing their metadata.
+    #[serde(default)]
     pub mtime: i64,
 }
 

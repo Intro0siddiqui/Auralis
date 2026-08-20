@@ -297,9 +297,31 @@ impl DesktopScanner {
             .await
             .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
 
-        let track = MetadataExtractor::extract(path).map_err(|e| {
+        // Incremental scan: if the file's mtime and size match what we last
+        // indexed, the metadata cannot have changed — skip the expensive
+        // re-parse entirely. Stat is O(1) and cheap compared to decoding
+        // the audio header on every scan.
+        let file_meta = std::fs::metadata(path)
+            .map_err(|e| ScannerError::MetadataError(format!("Failed to stat {path_str}: {e}")))?;
+        let mtime = file_meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let size = file_meta.len() as u64;
+
+        if let Some(existing_track) = existing.as_ref() {
+            if existing_track.mtime == mtime && existing_track.file_size == size {
+                debug!(path = %path_str, "File unchanged, skipping");
+                return Ok(ScanResult::Skipped);
+            }
+        }
+
+        let mut track = MetadataExtractor::extract(path).map_err(|e| {
             ScannerError::MetadataError(format!("Failed to extract metadata from {path_str}: {e}"))
         })?;
+        track.mtime = mtime;
 
         if let Some(existing_track) = existing {
             let mut updated_track = track;

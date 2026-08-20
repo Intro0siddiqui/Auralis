@@ -100,6 +100,15 @@ impl AndroidScanner {
             track.title = name.to_string();
         }
 
+        // Record the file's modification time so an incremental re-scan of
+        // the sandbox dir can skip this file without re-parsing metadata.
+        track.mtime = std::fs::metadata(&file_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
         let path_str = file_path.to_string_lossy().to_string();
         let existing = track_repo.find_by_path(&path_str).await.map_err(|e| {
             error!(path = %path_str, error = %e, "Database query failed during ingest_buffer");

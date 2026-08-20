@@ -337,8 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
-- **v2.1.25** — **Player Transport IPC & ARM64 KVM CI Runner**:
-  Routed all frontend player controls (play/pause/next/previous) through `window.Auralis.bridge.invoke` (fixing silent drops from deprecated Tauri internals). Switched Android emulator CI test to `ubuntu-24.04-arm` with native ARM64 KVM hardware acceleration for sub-minute test execution. Included adaptive cadence in `spawn_playback_watcher` and progress sync.
+- **v2.1.26** — **Rodio 0.22 Migration, Mtime Scanning & Code Format**:
+  Upgraded to Rodio 0.22+ with `MixerDeviceSink` and `Player` audio primitives, implemented incremental library mtime scanning, resolved database schema conflicts, and formatted all Rust codebases to pass zero-warning Clippy/fmt lint checks.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,

@@ -488,7 +488,10 @@ async fn lookup_track(
                     .unwrap_or_default()
                     .unwrap_or(0)
                     != 0,
-      mtime:row.get("mtime").unwrap_or(0),
+                mtime: row
+                    .get::<_, Option<i64>>(22)
+                    .unwrap_or_default()
+                    .unwrap_or(0),
             })
         })
         .map_err(|e| format!("Track lookup error: {e}"))?;
