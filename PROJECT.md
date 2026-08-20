@@ -337,8 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
-- **v2.1.27** — **Android AAudio Linker Path & MinSdk 26 Configuration**:
-  Supplied the NDK API 26+ library search path (`-laaudio`) for Rodio 0.22 / CPAL 0.17 on Android, set `minSdk = 26` to match AAudio capabilities, and maintained 16KB page alignment and ARM64 KVM CI testing.
+- **v2.1.28** — **Dynamic NDK Sysroot Linker & build.rs Search Paths**:
+  Added automated NDK sysroot directory discovery across host architectures and Android API levels in `build.rs`, resolved dynamic environment variable evaluation in CI, and ensured AAudio links reliably in Android release builds.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,

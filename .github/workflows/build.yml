@@ -192,7 +192,8 @@ jobs:
       - name: Init Android project
         run: cargo tauri android init || npx @tauri-apps/cli android init || true
         env:
-          NDK_HOME: ${{ env.NDK_HOME }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
       - name: Apply Custom Auralis App Icons
@@ -274,11 +275,16 @@ jobs:
             -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
 
       - name: Build APK
-        run: cargo tauri android build --apk --target aarch64
+        run: |
+          SYSROOT_LIB="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/26"
+          echo "Using NDK sysroot library path: $SYSROOT_LIB"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB"
+          export RUSTFLAGS="-L $SYSROOT_LIB"
+          cargo tauri android build --apk --target aarch64
         env:
-          NDK_HOME: ${{ env.NDK_HOME }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: "-L ${{ env.NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/26"
 
       - name: Sign APK
         if: startsWith(github.ref, 'refs/tags/')
