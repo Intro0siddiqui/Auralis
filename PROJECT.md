@@ -337,8 +337,8 @@ milestones from `git log`:
   route back into Rust via the `NativeBridge` JNI export and re-dispatch
   through the same commands as the UI — the frontend stays in sync via the
   existing `playback:*` events. Desktop: compile-time no-op.
-- **v2.1.28** — **Dynamic NDK Sysroot Linker & build.rs Search Paths**:
-  Added automated NDK sysroot directory discovery across host architectures and Android API levels in `build.rs`, resolved dynamic environment variable evaluation in CI, and ensured AAudio links reliably in Android release builds.
+- **v2.1.29** — **Google APIs ARM64 ABI Translation on KVM Runner**:
+  Configured `ubuntu-22.04` x86_64 KVM runner with `google_apis` API 33 image, enabling native ARM64-to-x86 ABI translation (`libndk_translation`) to run the production ARM64 APK in a hardware-accelerated emulator in ~35 seconds.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,
