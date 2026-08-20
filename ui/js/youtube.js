@@ -219,24 +219,51 @@ class YouTubeResolver {
         let info = null;
         let lastErr = null;
 
-        // Attempt multiple client contexts (IOS, Music, Default) for maximum availability
+        const hasAudioFormats = (r) => {
+            if (!r) return false;
+            if (typeof r.chooseFormat === 'function') {
+                try {
+                    const f = r.chooseFormat({ type: 'audio', quality: 'best' });
+                    if (f && (f.url || f.signature_cipher || f.cipher)) return true;
+                } catch (_) {}
+            }
+            const sd = r.streaming_data;
+            if (sd) {
+                if (sd.adaptive_formats?.some((f) => f && f.has_audio)) return true;
+                if (sd.formats?.some((f) => f && f.has_audio)) return true;
+            }
+            return false;
+        };
+
+        // Attempt multiple client contexts (Default/WEB, Android, Mobile Web, Music, iOS)
         const clientAttempts = [
-            async () => client.getInfo(videoId, { client: 'IOS' }),
-            async () => client.music ? client.music.getInfo(videoId) : null,
-            async () => client.getInfo(videoId, { client: 'ANDROID' }),
             async () => client.getInfo(videoId),
+            async () => client.getInfo(videoId, { client: 'ANDROID' }),
+            async () => client.getInfo(videoId, { client: 'MWEB' }),
+            async () => client.music ? client.music.getInfo(videoId) : null,
+            async () => client.getInfo(videoId, { client: 'IOS' }),
         ];
 
+        let fallbackInfo = null;
         for (const attempt of clientAttempts) {
             try {
                 const res = await attempt();
-                if (res && (res.streaming_data || res.basic_info)) {
-                    info = res;
-                    break;
+                if (res) {
+                    if (!fallbackInfo && (res.basic_info || res.streaming_data)) {
+                        fallbackInfo = res;
+                    }
+                    if (hasAudioFormats(res)) {
+                        info = res;
+                        break;
+                    }
                 }
             } catch (e) {
                 lastErr = e;
             }
+        }
+
+        if (!info) {
+            info = fallbackInfo;
         }
 
         if (!info) {

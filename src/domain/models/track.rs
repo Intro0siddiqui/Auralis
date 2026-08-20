@@ -226,6 +226,7 @@ impl Track {
 
 /// Filter criteria for querying tracks
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrackFilter {
     /// Search query across title, artist, and album (partial match)
     pub search: Option<String>,
