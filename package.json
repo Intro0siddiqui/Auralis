@@ -1,0 +1,11 @@
+{
+  "name": "auralis",
+  "version": "2.1.29",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}
