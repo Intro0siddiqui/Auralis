@@ -46,16 +46,29 @@ async function nativeFetch(input, init = {}) {
     if (init?.headers) extractHeaders(init.headers);
 
     let body = null;
-    const rawBody = init?.body !== undefined ? init.body : input?.body;
-    if (rawBody !== undefined && rawBody !== null) {
+    if (init?.body !== undefined && init?.body !== null) {
+        const rawBody = init.body;
         if (typeof rawBody === 'string') {
             body = rawBody;
         } else if (rawBody instanceof Uint8Array || rawBody instanceof ArrayBuffer) {
             body = new TextDecoder().decode(rawBody);
+        } else if (typeof rawBody === 'object' && typeof rawBody.text === 'function') {
+            try { body = await rawBody.text(); } catch (_) { body = String(rawBody); }
         } else if (typeof rawBody === 'object') {
             try { body = JSON.stringify(rawBody); } catch (_) { body = String(rawBody); }
         } else {
             body = String(rawBody);
+        }
+    } else if (input && typeof input.clone === 'function') {
+        try {
+            body = await input.clone().text();
+        } catch (_) {}
+    } else if (input?.body) {
+        const rawBody = input.body;
+        if (typeof rawBody === 'string') {
+            body = rawBody;
+        } else if (rawBody instanceof Uint8Array || rawBody instanceof ArrayBuffer) {
+            body = new TextDecoder().decode(rawBody);
         }
     }
 
