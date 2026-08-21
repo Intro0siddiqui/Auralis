@@ -236,6 +236,7 @@ pub struct HttpFetchResponse {
 #[tauri::command]
 pub async fn http_fetch(request: HttpFetchRequest) -> Result<HttpFetchResponse, String> {
     let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;

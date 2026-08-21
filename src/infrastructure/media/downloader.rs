@@ -195,6 +195,7 @@ impl Downloader {
         active: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
     ) -> Result<(), DownloaderError> {
         let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
             .timeout(Duration::from_secs(300))
             .build()
             .map_err(|e| DownloaderError::HttpError(format!("failed to build HTTP client: {e}")))?;

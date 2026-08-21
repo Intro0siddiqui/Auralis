@@ -73,7 +73,7 @@ async function nativeFetch(input, init = {}) {
             });
         }
     } catch (err) {
-        console.warn('Native http_fetch failed or unavailable, falling back to window.fetch:', err);
+        console.warn('[YouTubeResolver] Native http_fetch failed:', err?.message || err);
     }
 
     return window.fetch(input, init);
