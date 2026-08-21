@@ -270,6 +270,57 @@ class YouTubeResolver {
             info = fallbackInfo;
         }
 
+        if (!info && client.actions?.execute) {
+            for (const cl of ['IOS', 'ANDROID_VR', 'ANDROID', 'WEB']) {
+                try {
+                    const raw = await client.actions.execute('/player', { videoId, client: cl });
+                    const sd = raw?.data?.streamingData;
+                    if (sd && (sd.adaptiveFormats?.length || sd.formats?.length)) {
+                        const adapt = (sd.adaptiveFormats || []).map((f) => ({
+                            ...f,
+                            itag: f.itag,
+                            mime_type: f.mimeType,
+                            bitrate: f.bitrate,
+                            url: f.url,
+                            signature_cipher: f.signatureCipher || f.cipher,
+                            has_audio: Boolean(f.mimeType?.startsWith('audio/') || f.audioQuality),
+                            has_video: Boolean(f.mimeType?.startsWith('video/')),
+                            content_length: f.contentLength ? parseInt(f.contentLength, 10) : undefined,
+                        }));
+                        const fmts = (sd.formats || []).map((f) => ({
+                            ...f,
+                            itag: f.itag,
+                            mime_type: f.mimeType,
+                            bitrate: f.bitrate,
+                            url: f.url,
+                            signature_cipher: f.signatureCipher || f.cipher,
+                            has_audio: Boolean(f.mimeType?.startsWith('audio/') || f.audioQuality),
+                            has_video: Boolean(f.mimeType?.startsWith('video/')),
+                            content_length: f.contentLength ? parseInt(f.contentLength, 10) : undefined,
+                        }));
+                        const vd = raw.data?.videoDetails || {};
+                        info = {
+                            basic_info: {
+                                id: videoId,
+                                title: vd.title || 'YouTube Track',
+                                author: vd.author,
+                                channel_id: vd.channelId,
+                                duration: vd.lengthSeconds ? parseInt(vd.lengthSeconds, 10) : undefined,
+                                thumbnail: vd.thumbnail?.thumbnails || [],
+                            },
+                            streaming_data: {
+                                adaptive_formats: adapt,
+                                formats: fmts,
+                            },
+                        };
+                        break;
+                    }
+                } catch (e) {
+                    lastErr = e;
+                }
+            }
+        }
+
         if (!info) {
             try {
                 const bi = await client.getBasicInfo(videoId);
