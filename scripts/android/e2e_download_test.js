@@ -413,7 +413,7 @@ function buildInPageTestExpression(testUrl) {
         });
 
         // 4. Invoke download_audio command
-        log('Step 3/3: Invoking download_audio command in Rust backend...');
+        log('Step 3/4: Invoking download_audio command in Rust backend...');
         const downloadRequest = {
             url: resolved.stream_url,
             title: resolved.title || 'YouTube Test Track',
@@ -441,22 +441,117 @@ function buildInPageTestExpression(testUrl) {
             } catch (_) {}
         }, 3000);
 
+        let finalDownloadResult = null;
         try {
-            const finalResult = await downloadCompletionPromise;
+            finalDownloadResult = await downloadCompletionPromise;
             clearInterval(pollTimer);
-            log('E2E download test succeeded in WebView context!');
-            return {
-                success: true,
-                title: resolved.title,
-                ext: resolved.ext,
-                downloadId: downloadId,
-                finalResult
-            };
+            log('E2E download step succeeded!');
         } catch (err) {
             clearInterval(pollTimer);
-            errLog('E2E download test failed in WebView:', err?.message || err);
+            errLog('E2E download step failed:', err?.message || err);
             throw err;
         }
+
+        // 5. Audio Player Playback Test: trigger scan and verify playback
+        log('Step 4/4: Triggering audio library scan and verifying audio player playback...');
+        try {
+            await invoke('scan_library_paths');
+        } catch (scanErr) {
+            warn('scan_library_paths invocation notice:', scanErr?.message || scanErr);
+        }
+
+        // Retrieve tracks from database
+        let tracks = [];
+        for (let attempt = 1; attempt <= 15; attempt++) {
+            try {
+                const tracksPage = await invoke('get_tracks', { filter: null });
+                tracks = tracksPage?.tracks || (Array.isArray(tracksPage) ? tracksPage : []);
+                if (tracks.length > 0) break;
+            } catch (err) {
+                warn('get_tracks attempt ' + attempt + ' failed:', err?.message || err);
+            }
+            await new Promise(r => setTimeout(r, 1000));
+        }
+
+        log('Found ' + tracks.length + ' track(s) in library database.');
+        if (tracks.length === 0) {
+            throw new Error('No tracks found in library database after download and scan');
+        }
+
+        // Find downloaded track or fallback to first track
+        const targetTrack = tracks.find(t => t.file_path && finalDownloadResult?.output_path && t.file_path.includes(finalDownloadResult.output_path))
+            || tracks.find(t => t.title && resolved.title && t.title.toLowerCase().includes(resolved.title.toLowerCase().slice(0, 10)))
+            || tracks[0];
+
+        log('Target track for playback test:', JSON.stringify({
+            id: targetTrack.id,
+            title: targetTrack.title,
+            file_path: targetTrack.file_path
+        }));
+
+        // Listen for playback state changes
+        let playbackStatePayload = null;
+        if (tauriListen) {
+            tauriListen('playback:state_changed', (evt) => {
+                const p = evt.payload || evt;
+                log('playback:state_changed event received:', JSON.stringify(p));
+                playbackStatePayload = p;
+            }).catch(e => warn('Failed to attach playback:state_changed listener:', e));
+        }
+        if (window.Auralis?.bridge && typeof window.Auralis.bridge.on === 'function') {
+            window.Auralis.bridge.on('playback:state', (state) => {
+                log('Bridge playback:state event received:', JSON.stringify(state));
+                playbackStatePayload = state;
+            });
+        }
+
+        // Start playback via bridge or direct invoke
+        let nowPlayingResult = null;
+        if (window.Auralis?.bridge && typeof window.Auralis.bridge.playTrack === 'function') {
+            log('Invoking window.Auralis.bridge.playTrack...');
+            await window.Auralis.bridge.playTrack(targetTrack.id);
+        } else {
+            log('Invoking play command directly...');
+            nowPlayingResult = await invoke('play', { track_id: targetTrack.id, trackId: targetTrack.id });
+        }
+
+        // Verify that playback status changes to playing without error
+        let verifiedPlaying = false;
+        for (let poll = 0; poll < 10; poll++) {
+            const currentNowPlaying = await invoke('get_now_playing');
+            log('Current now_playing state poll ' + (poll + 1) + ':', JSON.stringify(currentNowPlaying));
+            if (currentNowPlaying && (currentNowPlaying.is_playing === true || currentNowPlaying.track?.id === targetTrack.id)) {
+                verifiedPlaying = true;
+                break;
+            }
+            if (playbackStatePayload && playbackStatePayload.is_playing) {
+                verifiedPlaying = true;
+                break;
+            }
+            if (nowPlayingResult && nowPlayingResult.is_playing) {
+                verifiedPlaying = true;
+                break;
+            }
+            await new Promise(r => setTimeout(r, 500));
+        }
+
+        if (!verifiedPlaying) {
+            throw new Error('Playback verification failed: track did not enter playing state');
+        }
+
+        log('Playback successfully verified! Stopping playback before test completion...');
+        try {
+            await invoke('stop');
+        } catch (_) {}
+
+        return {
+            success: true,
+            title: resolved.title,
+            ext: resolved.ext,
+            downloadId: downloadId,
+            playbackTrackId: targetTrack.id,
+            finalDownloadResult
+        };
     })()
     `;
 }
@@ -466,7 +561,7 @@ function buildInPageTestExpression(testUrl) {
  */
 async function run() {
     console.log('====================================================');
-    console.log('  Auralis Android YouTube Download E2E Test (CDP)   ');
+    console.log('  Auralis Android YouTube Download & Playback E2E   ');
     console.log('====================================================');
     console.log(`CDP Endpoint: http://${CDP_HOST}:${CDP_PORT}`);
     console.log(`Test YouTube URL: ${TEST_YOUTUBE_URL}`);

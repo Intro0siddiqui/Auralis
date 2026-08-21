@@ -237,10 +237,11 @@ class YouTubeResolver {
             return all.some((f) => isAudioFormat(f) && Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
         };
 
-        // Prioritize clients that provide direct unthrottled HTTPS URLs (IOS, ANDROID, TV, MWEB, WEB)
+        // Prioritize clients that provide direct unthrottled HTTPS URLs (ANDROID_VR, ANDROID, IOS, TV, MWEB, WEB)
         const clientAttempts = [
-            async () => client.getInfo(videoId, { client: 'IOS' }),
+            async () => client.getInfo(videoId, { client: 'ANDROID_VR' }),
             async () => client.getInfo(videoId, { client: 'ANDROID' }),
+            async () => client.getInfo(videoId, { client: 'IOS' }),
             async () => client.getInfo(videoId, { client: 'TV' }),
             async () => client.getInfo(videoId, { client: 'MWEB' }),
             async () => client.getInfo(videoId),
@@ -253,12 +254,12 @@ class YouTubeResolver {
                 if (res && res.streaming_data) {
                     const sd = res.streaming_data;
                     const candidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
-                    if (candidates.length > 0 && !fallbackInfo) {
-                        fallbackInfo = res;
-                    }
-                    if (hasDirectOrDecipherableAudio(res)) {
-                        info = res;
-                        break;
+                    if (candidates.length > 0) {
+                        if (!fallbackInfo) fallbackInfo = res;
+                        if (hasDirectOrDecipherableAudio(res)) {
+                            info = res;
+                            break;
+                        }
                     }
                 }
             } catch (e) {
@@ -268,6 +269,13 @@ class YouTubeResolver {
 
         if (!info) {
             info = fallbackInfo;
+        }
+
+        if (!info) {
+            try {
+                const bi = await client.getBasicInfo(videoId);
+                if (bi && bi.streaming_data) info = bi;
+            } catch (_) {}
         }
 
         if (!info) {
