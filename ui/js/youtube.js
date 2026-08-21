@@ -237,12 +237,12 @@ class YouTubeResolver {
             return all.some((f) => isAudioFormat(f) && Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
         };
 
-        // Prioritize clients that provide direct unthrottled HTTPS URLs (MWEB, IOS, ANDROID, Music, Web)
+        // Prioritize clients that provide direct unthrottled HTTPS URLs (IOS, ANDROID, TV, MWEB, WEB)
         const clientAttempts = [
-            async () => client.getInfo(videoId, { client: 'MWEB' }),
             async () => client.getInfo(videoId, { client: 'IOS' }),
             async () => client.getInfo(videoId, { client: 'ANDROID' }),
-            async () => client.music ? client.music.getInfo(videoId) : null,
+            async () => client.getInfo(videoId, { client: 'TV' }),
+            async () => client.getInfo(videoId, { client: 'MWEB' }),
             async () => client.getInfo(videoId),
         ];
 
@@ -250,8 +250,10 @@ class YouTubeResolver {
         for (const attempt of clientAttempts) {
             try {
                 const res = await attempt();
-                if (res) {
-                    if (!fallbackInfo && (res.basic_info || res.streaming_data)) {
+                if (res && res.streaming_data) {
+                    const sd = res.streaming_data;
+                    const candidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
+                    if (candidates.length > 0 && !fallbackInfo) {
                         fallbackInfo = res;
                     }
                     if (hasDirectOrDecipherableAudio(res)) {
