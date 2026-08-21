@@ -27,7 +27,15 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: "true"
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure sccache
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
 
       - name: Install system deps
         run: |
@@ -44,6 +52,12 @@ jobs:
 
       - name: Build binary
         run: cargo build --release
+
+      - name: Install Tauri Driver (for real-binary IPC E2E)
+        run: cargo install tauri-driver --locked || echo "tauri-driver install failed, fallback to smoke check"
+
+      - name: Run Real-Binary Desktop E2E (Tauri IPC)
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" node scripts/tests/desktop_real_e2e.js
 
       - name: Package
         # Release artifact bundling is only meaningful on tag pushes. On
@@ -144,7 +158,16 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: "true"
+          # Only persist caches from main/tags — PR runs reuse but never churn them
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure sccache
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -155,9 +178,19 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Cache Android NDK
+        uses: actions/cache@v4
+        id: ndk-cache
+        with:
+          path: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          key: android-ndk-27.2.12479018
+
       - name: Install NDK
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: sdkmanager --install "ndk;27.2.12479018"
+
+      - name: Register NDK paths
         run: |
-          sdkmanager --install "ndk;27.2.12479018"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/27.2.12479018" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
 
@@ -187,10 +220,16 @@ jobs:
             pkg-config
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "2.11.4" 2>/dev/null || npm install -g @tauri-apps/cli@2.11.4
+        # npm ships a prebuilt binary — cargo install would compile for ~2 min
+        run: npm install -g @tauri-apps/cli@2.11.4
 
       - name: Init Android project
-        run: cargo tauri android init || npx @tauri-apps/cli android init || true
+        run: |
+          if [ ! -f gen/android/app/build.gradle.kts ]; then
+            npx @tauri-apps/cli android init
+          else
+            echo "gen/android already present — skipping init"
+          fi
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
@@ -276,13 +315,20 @@ jobs:
             -storepass password -keypass password \
             -dname "CN=Auralis, OU=Auralis, O=Auralis, L=Unknown, ST=Unknown, C=US"
 
+      - name: Tune Gradle performance
+        run: |
+          GP="gen/android/gradle.properties"
+          touch "$GP"
+          grep -q "org.gradle.caching" "$GP" || printf "\norg.gradle.caching=true\norg.gradle.parallel=true\n" >> "$GP"
+          echo "Gradle performance flags enabled"
+
       - name: Build APK
         run: |
           SYSROOT_LIB_ARM64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/26"
           SYSROOT_LIB_X64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/26"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_ARM64"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_X64"
-          cargo tauri android build --apk --target aarch64 x86_64
+          npx @tauri-apps/cli android build --apk --target aarch64 x86_64 --split-per-abi
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
@@ -291,11 +337,6 @@ jobs:
       - name: Sign APK
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          APK_PATH=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
-          if [ -z "$APK_PATH" ]; then
-            echo "No APK found!"
-            exit 1
-          fi
           ZALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
           if [ -z "$APKSIGNER" ] || [ -z "$ZALIGN" ]; then
@@ -303,66 +344,103 @@ jobs:
             exit 1
           fi
 
-          echo "Running 16 KB zipalign on $APK_PATH"
-          "$ZALIGN" -f -P 16 4 "$APK_PATH" "$RUNNER_TEMP/aligned.apk"
+          echo "Signing all per-ABI APKs (arm64 + x86_64)"
+          COUNT=0
+          for APK_PATH in $(find gen/android -name "*.apk" -path "*/release/*"); do
+            [ -z "$APK_PATH" ] && continue
+            echo "Found APK: $APK_PATH"
+            # Derive ABI label from path/filename
+            if echo "$APK_PATH" | grep -qi "arm64\|aarch64"; then
+              ABI="arm64"
+            elif echo "$APK_PATH" | grep -qi "x86_64\|x64"; then
+              ABI="x86_64"
+            else
+              # Universal or unknown — infer from contents
+              if unzip -l "$APK_PATH" 2>/dev/null | grep -q "lib/arm64-v8a"; then ABI="arm64"; else ABI="x86_64"; fi
+            fi
+            OUT="auralis-${{ github.ref_name }}-android-${ABI}.apk"
+            echo " -> Signing $APK_PATH as $OUT ($ABI)"
+            "$ZALIGN" -f -P 16 4 "$APK_PATH" "$RUNNER_TEMP/aligned-${ABI}.apk"
+            "$APKSIGNER" sign \
+              --ks "$RUNNER_TEMP/auralis-release.jks" \
+              --ks-key-alias auralis \
+              --ks-pass pass:password \
+              --key-pass pass:password \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --out "$OUT" \
+              "$RUNNER_TEMP/aligned-${ABI}.apk"
+            "$APKSIGNER" verify --verbose "$OUT"
+            COUNT=$((COUNT+1))
+          done
 
-          echo "Signing aligned APK with apksigner"
-          "$APKSIGNER" sign \
-            --ks "$RUNNER_TEMP/auralis-release.jks" \
-            --ks-key-alias auralis \
-            --ks-pass pass:password \
-            --key-pass pass:password \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out "auralis-${{ github.ref_name }}-android.apk" \
-            "$RUNNER_TEMP/aligned.apk"
-          "$APKSIGNER" verify --verbose "auralis-${{ github.ref_name }}-android.apk"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No APK found to sign!"
+            exit 1
+          fi
+          echo "Signed $COUNT APK(s):"
+          ls -lh auralis-*-android-*.apk
 
       - name: Verify Android APK Native Binary & Scanner Assets
         run: |
-          APK_TARGET=$(find . -maxdepth 1 -name "auralis-*-android.apk" | head -1)
-          if [ -z "$APK_TARGET" ]; then
-            APK_TARGET=$(find gen/android -name "*.apk" -path "*/release/*" | head -1)
+          APK_LIST=$(find . -maxdepth 1 -name "auralis-*-android-*.apk")
+          if [ -z "$APK_LIST" ]; then
+            APK_LIST=$(find gen/android -name "*.apk" -path "*/release/*")
           fi
-          echo "Inspecting compiled Android APK: $APK_TARGET"
-          unzip -l "$APK_TARGET" | grep -E "libauralis_lib\.so|libauralis\.so" || { echo "libauralis native library missing in APK!"; exit 1; }
-          unzip -l "$APK_TARGET" | grep "libc++_shared.so" || { echo "libc++_shared.so missing in APK!"; exit 1; }
-          unzip -l "$APK_TARGET" | grep -E "AndroidManifest\.xml" || { echo "AndroidManifest.xml missing in APK!"; exit 1; }
-          echo "Checking 16KB page-size alignment (required for Android 15+ / Play 2026)..."
-          ZALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
-          if [ -z "$ZALIGN" ]; then
-            echo "zipalign not found!"
+          if [ -z "$APK_LIST" ]; then
+            echo "No APKs found for verification!"
             exit 1
           fi
-          if ! "$ZALIGN" -c -P 16 4 "$APK_TARGET" > /dev/null 2>&1; then
-            echo "Checking zipalign verification details:"
-            "$ZALIGN" -c -v -P 16 4 "$APK_TARGET" || exit 1
-          fi
-          TMP_DIR=$(mktemp -d)
-          unzip -q "$APK_TARGET" "lib/arm64-v8a/*.so" -d "$TMP_DIR"
+
           READELF="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          if [ ! -x "$READELF" ]; then
-            echo "llvm-readelf not found at $READELF"
-            exit 1
-          fi
-          for so in "$TMP_DIR"/lib/arm64-v8a/*.so; do
-            BAD=$("$READELF" -lW "$so" | awk '$1=="LOAD" && $NF != "0x4000" {print $NF}')
-            if [ -n "$BAD" ]; then
-              echo "FAIL: $(basename "$so") has non-16KB LOAD alignments: $BAD"
+          ZALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
+
+          for APK_TARGET in $APK_LIST; do
+            echo "===== Inspecting APK: $APK_TARGET ====="
+            unzip -l "$APK_TARGET" | grep -E "libauralis_lib\.so|libauralis\.so" || { echo "libauralis native library missing in $APK_TARGET!"; exit 1; }
+            unzip -l "$APK_TARGET" | grep "libc++_shared.so" || { echo "libc++_shared.so missing in $APK_TARGET!"; exit 1; }
+            unzip -l "$APK_TARGET" | grep -E "AndroidManifest\.xml" || { echo "AndroidManifest.xml missing in $APK_TARGET!"; exit 1; }
+            echo "Checking 16KB zipalign for $APK_TARGET..."
+            if ! "$ZALIGN" -c -P 16 4 "$APK_TARGET" > /dev/null 2>&1; then
+              echo "zipalign verification details for $APK_TARGET:"
+              "$ZALIGN" -c -v -P 16 4 "$APK_TARGET" || exit 1
+            fi
+            # Determine ABI lib dir inside APK
+            if unzip -l "$APK_TARGET" | grep -q "lib/arm64-v8a/"; then
+              LIB_DIR="lib/arm64-v8a"
+            elif unzip -l "$APK_TARGET" | grep -q "lib/x86_64/"; then
+              LIB_DIR="lib/x86_64"
+            else
+              echo "No recognized lib dir in $APK_TARGET (listing):"
+              unzip -l "$APK_TARGET" | grep "lib/" | head
+              continue
+            fi
+            TMP_DIR=$(mktemp -d)
+            unzip -q "$APK_TARGET" "${LIB_DIR}/*.so" -d "$TMP_DIR" || true
+            if [ ! -x "$READELF" ]; then
+              echo "llvm-readelf not found at $READELF"
               exit 1
             fi
-            echo "OK: $(basename "$so") all LOAD segments 16KB-aligned"
+            for so in "$TMP_DIR"/${LIB_DIR}/*.so; do
+              [ -f "$so" ] || continue
+              BAD=$("$READELF" -lW "$so" | awk '$1=="LOAD" && $NF != "0x4000" {print $NF}')
+              if [ -n "$BAD" ]; then
+                echo "FAIL: $(basename "$so") in $APK_TARGET has non-16KB LOAD alignments: $BAD"
+                exit 1
+              fi
+              echo "OK: $(basename "$so") in $APK_TARGET all LOAD segments 16KB-aligned"
+            done
+            rm -rf "$TMP_DIR"
           done
-          rm -rf "$TMP_DIR"
-          echo "Android APK structure, native audio engine, 16KB alignment, and scanner assets verified successfully!"
+          echo "All Android APKs verified successfully (native lib, 16KB alignment, scanner assets)!"
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: release-android
-          path: auralis-*-android.apk
+          path: auralis-*-android-*.apk
 
   test-android-e2e:
     name: Android E2E Download & Playback Test (x86_64 KVM)
@@ -379,7 +457,15 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: "true"
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure sccache
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -390,9 +476,19 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Cache Android NDK
+        uses: actions/cache@v4
+        id: ndk-cache-e2e
+        with:
+          path: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          key: android-ndk-27.2.12479018
+
       - name: Install NDK
+        if: steps.ndk-cache-e2e.outputs.cache-hit != 'true'
+        run: sdkmanager --install "ndk;27.2.12479018"
+
+      - name: Register NDK paths
         run: |
-          sdkmanager --install "ndk;27.2.12479018"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/27.2.12479018" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
 
