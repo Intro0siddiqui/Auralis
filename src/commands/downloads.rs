@@ -215,11 +215,12 @@ pub async fn list_downloads(
 }
 
 /// Request payload for native HTTP fetch (bypasses browser CORS).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HttpFetchRequest {
     pub url: String,
     pub method: Option<String>,
-    pub headers: Option<HashMap<String, String>>,
+    pub headers: Option<HashMap<String, Option<String>>>,
     pub body: Option<String>,
 }
 
@@ -260,11 +261,13 @@ pub async fn http_fetch(request: HttpFetchRequest) -> Result<HttpFetchResponse, 
 
     if let Some(headers) = request.headers {
         for (k, v) in headers {
-            if let (Ok(name), Ok(val)) = (
-                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-                reqwest::header::HeaderValue::from_str(&v),
-            ) {
-                req_builder = req_builder.header(name, val);
+            if let Some(v_str) = v {
+                if let (Ok(name), Ok(val)) = (
+                    reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(&v_str),
+                ) {
+                    req_builder = req_builder.header(name, val);
+                }
             }
         }
     }

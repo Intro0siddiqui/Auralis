@@ -20,25 +20,27 @@
 async function nativeFetch(input, init = {}) {
     let url = typeof input === 'string' ? input : (input?.url || String(input));
     let method = init?.method || input?.method || 'GET';
-    const headers = {};
+    const cleanHeaders = {};
 
-    if (input?.headers) {
-        if (typeof input.headers.forEach === 'function') {
-            input.headers.forEach((v, k) => { headers[k] = v; });
-        } else if (typeof input.headers === 'object') {
-            Object.assign(headers, input.headers);
+    const extractHeaders = (hdrs) => {
+        if (!hdrs) return;
+        if (typeof hdrs.forEach === 'function') {
+            hdrs.forEach((v, k) => {
+                if (v !== undefined && v !== null) cleanHeaders[String(k)] = String(v);
+            });
+        } else if (Array.isArray(hdrs)) {
+            for (const [k, v] of hdrs) {
+                if (v !== undefined && v !== null) cleanHeaders[String(k)] = String(v);
+            }
+        } else if (typeof hdrs === 'object') {
+            for (const [k, v] of Object.entries(hdrs)) {
+                if (v !== undefined && v !== null) cleanHeaders[String(k)] = String(v);
+            }
         }
-    }
+    };
 
-    if (init?.headers) {
-        if (typeof init.headers.forEach === 'function') {
-            init.headers.forEach((v, k) => { headers[k] = v; });
-        } else if (Array.isArray(init.headers)) {
-            for (const [k, v] of init.headers) headers[k] = v;
-        } else if (typeof init.headers === 'object') {
-            Object.assign(headers, init.headers);
-        }
-    }
+    if (input?.headers) extractHeaders(input.headers);
+    if (init?.headers) extractHeaders(init.headers);
 
     let body = null;
     const rawBody = init?.body !== undefined ? init.body : input?.body;
@@ -63,7 +65,7 @@ async function nativeFetch(input, init = {}) {
 
         if (typeof invoke === 'function') {
             const resp = await invoke('http_fetch', {
-                request: { url, method, headers, body }
+                request: { url, method, headers: cleanHeaders, body }
             });
 
             return new Response(resp.body, {
