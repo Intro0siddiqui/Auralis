@@ -276,6 +276,7 @@ class YouTubeResolver {
         const sd = info.streaming_data || {};
         const allCandidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
         const audioCandidates = allCandidates.filter((f) => isAudioFormat(f));
+        console.log(`[YouTubeResolver] Resolved info for ${videoId}: all formats=${allCandidates.length}, audio candidates=${audioCandidates.length}`);
 
         const container = opts.container === 'mp4' || opts.container === 'webm' ? opts.container : null;
         const quality = opts.quality || 'best';

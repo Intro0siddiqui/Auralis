@@ -261,6 +261,9 @@ pub async fn http_fetch(request: HttpFetchRequest) -> Result<HttpFetchResponse, 
 
     if let Some(headers) = request.headers {
         for (k, v) in headers {
+            if k.eq_ignore_ascii_case("accept-encoding") || k.eq_ignore_ascii_case("host") {
+                continue;
+            }
             if let Some(v_str) = v {
                 if let (Ok(name), Ok(val)) = (
                     reqwest::header::HeaderName::from_bytes(k.as_bytes()),
@@ -290,6 +293,11 @@ pub async fn http_fetch(request: HttpFetchRequest) -> Result<HttpFetchResponse, 
 
     let mut resp_headers = HashMap::new();
     for (k, v) in response.headers() {
+        if k.as_str().eq_ignore_ascii_case("content-encoding")
+            || k.as_str().eq_ignore_ascii_case("content-length")
+        {
+            continue;
+        }
         if let Ok(v_str) = v.to_str() {
             resp_headers.insert(k.as_str().to_string(), v_str.to_string());
         }
