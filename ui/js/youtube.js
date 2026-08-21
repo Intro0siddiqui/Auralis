@@ -19,6 +19,9 @@
  */
 async function nativeFetch(input, init = {}) {
     let url = typeof input === 'string' ? input : (input?.url || String(input));
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://www.youtube.com/youtubei/v1' + (url.startsWith('/') ? url : '/' + url);
+    }
     let method = init?.method || input?.method || 'GET';
     const cleanHeaders = {};
 
@@ -268,7 +271,7 @@ class YouTubeResolver {
         if (client.session?.http?.fetch) {
             for (const cfg of clientConfigs) {
                 try {
-                    const resp = await client.session.http.fetch('/player', {
+                    const resp = await client.session.http.fetch('https://www.youtube.com/youtubei/v1/player', {
                         method: 'POST',
                         body: JSON.stringify({
                             videoId,
