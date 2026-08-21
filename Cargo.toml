@@ -32,8 +32,8 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 futures = "0.3"
 async-trait = "0.1"
 
-# HTTP streaming client (pure-Rust; fetches resolved audio streams from the
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+# HTTP streaming client (pure-Rust; uses embedded WebPKI root certificates for 100% Android/cross-platform compatibility)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
 
 # Tauri runtime (v2)
 tauri = { version = "2", features = [] }
