@@ -236,41 +236,9 @@ class YouTubeResolver {
             return all.some((f) => isAudioFormat(f) && Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
         };
 
-        // Prioritize clients that provide direct unthrottled HTTPS URLs (ANDROID_VR, ANDROID, IOS, TV, MWEB, WEB)
-        const clientAttempts = [
-            async () => client.getInfo(videoId, { client: 'ANDROID_VR' }),
-            async () => client.getInfo(videoId, { client: 'ANDROID' }),
-            async () => client.getInfo(videoId, { client: 'IOS' }),
-            async () => client.getInfo(videoId, { client: 'TV' }),
-            async () => client.getInfo(videoId, { client: 'MWEB' }),
-            async () => client.getInfo(videoId),
-        ];
-
-        let fallbackInfo = null;
-        for (const attempt of clientAttempts) {
-            try {
-                const res = await attempt();
-                if (res && res.streaming_data) {
-                    const sd = res.streaming_data;
-                    const candidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
-                    if (candidates.length > 0) {
-                        if (!fallbackInfo) fallbackInfo = res;
-                        if (hasDirectOrDecipherableAudio(res)) {
-                            info = res;
-                            break;
-                        }
-                    }
-                }
-            } catch (e) {
-                lastErr = e;
-            }
-        }
-
-        if (!info) {
-            info = fallbackInfo;
-        }
-
-        if (!info && client.actions?.execute) {
+        // 1. First attempt: Direct raw player API query across reliable mobile/embedded clients (IOS, ANDROID_VR, ANDROID, WEB)
+        // This directly fetches raw streamingData with direct unthrottled HTTPS audio stream URLs without parser overhead.
+        if (client.actions?.execute) {
             for (const cl of ['IOS', 'ANDROID_VR', 'ANDROID', 'WEB']) {
                 try {
                     const raw = await client.actions.execute('/player', { videoId, client: cl });
@@ -299,7 +267,7 @@ class YouTubeResolver {
                             content_length: f.contentLength ? parseInt(f.contentLength, 10) : undefined,
                         }));
                         const vd = raw.data?.videoDetails || {};
-                        info = {
+                        const parsed = {
                             basic_info: {
                                 id: videoId,
                                 title: vd.title || 'YouTube Track',
@@ -313,11 +281,50 @@ class YouTubeResolver {
                                 formats: fmts,
                             },
                         };
-                        break;
+                        if (hasDirectOrDecipherableAudio(parsed)) {
+                            info = parsed;
+                            break;
+                        }
                     }
                 } catch (e) {
                     lastErr = e;
                 }
+            }
+        }
+
+        // 2. Second attempt: High-level Innertube getInfo fallback
+        if (!info) {
+            const clientAttempts = [
+                async () => client.getInfo(videoId, { client: 'IOS' }),
+                async () => client.getInfo(videoId, { client: 'ANDROID_VR' }),
+                async () => client.getInfo(videoId, { client: 'ANDROID' }),
+                async () => client.getInfo(videoId, { client: 'TV' }),
+                async () => client.getInfo(videoId, { client: 'MWEB' }),
+                async () => client.getInfo(videoId),
+            ];
+
+            let fallbackInfo = null;
+            for (const attempt of clientAttempts) {
+                try {
+                    const res = await attempt();
+                    if (res && res.streaming_data) {
+                        const sd = res.streaming_data;
+                        const candidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
+                        if (candidates.length > 0) {
+                            if (!fallbackInfo) fallbackInfo = res;
+                            if (hasDirectOrDecipherableAudio(res)) {
+                                info = res;
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    lastErr = e;
+                }
+            }
+
+            if (!info) {
+                info = fallbackInfo;
             }
         }
 
