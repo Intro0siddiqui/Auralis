@@ -255,7 +255,10 @@ class YouTubeResolver {
             for (const cl of ['IOS', 'ANDROID_VR', 'ANDROID']) {
                 try {
                     const raw = await client.actions.execute('/player', { videoId, client: cl });
+                    const st = raw?.data?.playabilityStatus?.status;
                     const sd = raw?.data?.streamingData;
+                    const totalFormats = (sd?.adaptiveFormats?.length || 0) + (sd?.formats?.length || 0);
+                    console.log(`[YouTubeResolver] actions.execute('${cl}') -> status: ${st}, formats: ${totalFormats}`);
                     if (sd && (sd.adaptiveFormats?.length || sd.formats?.length)) {
                         const adapt = (sd.adaptiveFormats || []).map((f) => ({
                             ...f,
@@ -300,6 +303,7 @@ class YouTubeResolver {
                         }
                     }
                 } catch (e) {
+                    console.error(`[YouTubeResolver] actions.execute('${cl}') error:`, e.message);
                     lastErr = e;
                 }
             }

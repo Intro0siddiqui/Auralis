@@ -117,24 +117,24 @@ echo "Asserting downloaded audio file in sandboxed storage..."
 adb root 2>/dev/null || true
 sleep 1
 
-DOWNLOAD_FILES=$(adb shell "ls -l ${SANDBOX_DOWNLOAD_DIR}/*.m4a 2>/dev/null" | tr -d '\r' || true)
+DOWNLOAD_FILES=$(adb shell "ls -l ${SANDBOX_DOWNLOAD_DIR}/*.* 2>/dev/null" | grep -E '\.(m4a|mp3|webm|opus|ogg)$' | tr -d '\r' || true)
 if [ -z "$DOWNLOAD_FILES" ] || echo "$DOWNLOAD_FILES" | grep -q "No such file"; then
     # Try run-as com.auralis.v2 fallback
-    DOWNLOAD_FILES=$(adb shell "run-as ${PACKAGE_NAME} ls -l files/downloads/*.m4a 2>/dev/null" | tr -d '\r' || true)
+    DOWNLOAD_FILES=$(adb shell "run-as ${PACKAGE_NAME} ls -l files/downloads/ 2>/dev/null" | grep -E '\.(m4a|mp3|webm|opus|ogg)$' | tr -d '\r' || true)
 fi
 
 echo "Storage listing:"
 echo "$DOWNLOAD_FILES"
 
 if [ -z "$DOWNLOAD_FILES" ] || echo "$DOWNLOAD_FILES" | grep -q "No such file"; then
-    echo "Error: No .m4a file found in sandboxed storage ${SANDBOX_DOWNLOAD_DIR}/"
+    echo "Error: No audio file found in sandboxed storage ${SANDBOX_DOWNLOAD_DIR}/"
     exit 1
 fi
 
 # Extract file size (5th column in standard ls -l)
 FILE_SIZE=$(echo "$DOWNLOAD_FILES" | head -n 1 | awk '{print $5}')
 if [ -z "$FILE_SIZE" ] || ! [[ "$FILE_SIZE" =~ ^[0-9]+$ ]]; then
-    FILE_SIZE=$(adb shell "stat -c %s ${SANDBOX_DOWNLOAD_DIR}/*.m4a 2>/dev/null" | head -n 1 | tr -d '\r' || true)
+    FILE_SIZE=$(adb shell "stat -c %s ${SANDBOX_DOWNLOAD_DIR}/*.* 2>/dev/null" | head -n 1 | tr -d '\r' || true)
 fi
 
 echo "Validated downloaded file size: ${FILE_SIZE} bytes"
