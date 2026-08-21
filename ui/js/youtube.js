@@ -220,29 +220,20 @@ class YouTubeResolver {
         let info = null;
         let lastErr = null;
 
-        const hasAudioFormats = (r) => {
-            if (!r) return false;
-            if (typeof r.chooseFormat === 'function') {
-                try {
-                    const f = r.chooseFormat({ type: 'audio', quality: 'best' });
-                    if (f && (f.url || f.signature_cipher || f.cipher)) return true;
-                } catch (_) {}
-            }
+        const hasDirectOrDecipherableAudio = (r) => {
+            if (!r || !r.streaming_data) return false;
             const sd = r.streaming_data;
-            if (sd) {
-                if (sd.adaptive_formats?.some((f) => f && f.has_audio)) return true;
-                if (sd.formats?.some((f) => f && f.has_audio)) return true;
-            }
-            return false;
+            const all = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
+            return all.some((f) => f && f.has_audio && Boolean(f.url || f.signature_cipher || f.cipher));
         };
 
-        // Attempt multiple client contexts (Default/WEB, Android, Mobile Web, Music, iOS)
+        // Prioritize clients that provide direct unthrottled HTTPS URLs (MWEB, IOS, ANDROID, Music, Web)
         const clientAttempts = [
-            async () => client.getInfo(videoId),
-            async () => client.getInfo(videoId, { client: 'ANDROID' }),
             async () => client.getInfo(videoId, { client: 'MWEB' }),
-            async () => client.music ? client.music.getInfo(videoId) : null,
             async () => client.getInfo(videoId, { client: 'IOS' }),
+            async () => client.getInfo(videoId, { client: 'ANDROID' }),
+            async () => client.music ? client.music.getInfo(videoId) : null,
+            async () => client.getInfo(videoId),
         ];
 
         let fallbackInfo = null;
@@ -253,7 +244,7 @@ class YouTubeResolver {
                     if (!fallbackInfo && (res.basic_info || res.streaming_data)) {
                         fallbackInfo = res;
                     }
-                    if (hasAudioFormats(res)) {
+                    if (hasDirectOrDecipherableAudio(res)) {
                         info = res;
                         break;
                     }
@@ -273,6 +264,8 @@ class YouTubeResolver {
 
         const bi = info.basic_info || {};
         const sd = info.streaming_data || {};
+        const allCandidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
+        const audioCandidates = allCandidates.filter((f) => f && f.has_audio);
 
         const container = opts.container === 'mp4' || opts.container === 'webm' ? opts.container : null;
         const quality = opts.quality || 'best';
@@ -293,10 +286,11 @@ class YouTubeResolver {
 
         if (!fmt) {
             fmt =
-                sd.adaptive_formats?.find((f) => f && f.has_audio && !f.has_video) ||
-                sd.formats?.find((f) => f && f.has_audio) ||
-                sd.adaptive_formats?.[0] ||
-                sd.formats?.[0];
+                audioCandidates.find((f) => !f.has_video && f.url) ||
+                audioCandidates.find((f) => f.url) ||
+                audioCandidates.find((f) => !f.has_video) ||
+                audioCandidates[0] ||
+                allCandidates[0];
         }
 
         if (!fmt) throw new Error('No audio stream found for this video');
@@ -312,9 +306,8 @@ class YouTubeResolver {
 
         if (!streamUrl) {
             // Fallback: iterate over all available formats looking for any decipherable audio stream
-            const allCandidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
-            for (const candidate of allCandidates) {
-                if (candidate && candidate.has_audio) {
+            for (const candidate of audioCandidates) {
+                if (candidate) {
                     if (candidate.url) {
                         streamUrl = candidate.url;
                         fmt = candidate;
