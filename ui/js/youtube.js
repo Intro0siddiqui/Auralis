@@ -236,13 +236,47 @@ class YouTubeResolver {
             return all.some((f) => isAudioFormat(f) && Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
         };
 
-        // 1. First attempt: Direct raw player API query across reliable mobile/embedded clients (IOS, ANDROID_VR, ANDROID, WEB)
-        // This directly fetches raw streamingData with direct unthrottled HTTPS audio stream URLs without parser overhead.
-        if (client.actions?.execute) {
-            for (const cl of ['IOS', 'ANDROID_VR', 'ANDROID', 'WEB']) {
+        // 1. First attempt: Direct raw player API query with dedicated mobile client contexts (IOS, ANDROID_VR, ANDROID)
+        // This directly fetches raw streamingData with unthrottled HTTPS audio stream URLs without parser overhead.
+        const clientConfigs = [
+            {
+                clientName: 'IOS',
+                clientVersion: '20.11.6',
+                deviceMake: 'Apple',
+                deviceModel: 'iPhone10,4',
+                gl: 'US',
+                hl: 'en',
+            },
+            {
+                clientName: 'ANDROID_VR',
+                clientVersion: '1.61.48',
+                deviceMake: 'Oculus',
+                deviceModel: 'Quest 3',
+                gl: 'US',
+                hl: 'en',
+            },
+            {
+                clientName: 'ANDROID',
+                clientVersion: '21.03.36',
+                deviceMake: 'Samsung',
+                deviceModel: 'SM-S908E',
+                gl: 'US',
+                hl: 'en',
+            },
+        ];
+
+        if (client.session?.http?.fetch) {
+            for (const cfg of clientConfigs) {
                 try {
-                    const raw = await client.actions.execute('/player', { videoId, client: cl });
-                    const sd = raw?.data?.streamingData;
+                    const resp = await client.session.http.fetch('/player', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            videoId,
+                            context: { client: cfg },
+                        }),
+                    });
+                    const data = await resp.json();
+                    const sd = data?.streamingData;
                     if (sd && (sd.adaptiveFormats?.length || sd.formats?.length)) {
                         const adapt = (sd.adaptiveFormats || []).map((f) => ({
                             ...f,
@@ -266,7 +300,7 @@ class YouTubeResolver {
                             has_video: Boolean(f.mimeType?.startsWith('video/')),
                             content_length: f.contentLength ? parseInt(f.contentLength, 10) : undefined,
                         }));
-                        const vd = raw.data?.videoDetails || {};
+                        const vd = data.videoDetails || {};
                         const parsed = {
                             basic_info: {
                                 id: videoId,
