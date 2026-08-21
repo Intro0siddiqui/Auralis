@@ -4,8 +4,9 @@
 # Auralis Android Emulator End-to-End Test Runner
 # ==============================================================================
 # Installs APK on running Android emulator/device, grants permissions,
-# forwards WebView DevTools socket, runs CDP E2E download test, and verifies
-# that downloaded audio file exists in app sandboxed storage with size > 10000 bytes.
+# forwards WebView DevTools socket, runs CDP E2E download & playback test,
+# and verifies that downloaded audio file exists in app sandboxed storage
+# with size > 10000 bytes.
 # ==============================================================================
 
 set -eo pipefail

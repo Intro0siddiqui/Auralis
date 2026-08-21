@@ -115,8 +115,7 @@ class YouTubeResolver {
         const key = [opts.cookie || '', opts.poToken || ''].join('|');
         if (!this._clients[key]) {
             const cfg = {
-                generate_session_locally: true,
-                retrieve_player: true,
+                retrieve_player: false,
             };
             if (opts.cookie) cfg.cookie = opts.cookie;
             if (opts.poToken) cfg.poToken = opts.poToken;
