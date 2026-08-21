@@ -222,11 +222,19 @@ class YouTubeResolver {
         let info = null;
         let lastErr = null;
 
+        const isAudioFormat = (f) => {
+            if (!f) return false;
+            if (f.has_audio && !f.has_video) return true;
+            if (typeof f.mime_type === 'string' && f.mime_type.startsWith('audio/')) return true;
+            if (f.has_audio) return true;
+            return false;
+        };
+
         const hasDirectOrDecipherableAudio = (r) => {
             if (!r || !r.streaming_data) return false;
             const sd = r.streaming_data;
             const all = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
-            return all.some((f) => f && f.has_audio && Boolean(f.url || f.signature_cipher || f.cipher));
+            return all.some((f) => isAudioFormat(f) && Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
         };
 
         // Prioritize clients that provide direct unthrottled HTTPS URLs (MWEB, IOS, ANDROID, Music, Web)
@@ -267,7 +275,7 @@ class YouTubeResolver {
         const bi = info.basic_info || {};
         const sd = info.streaming_data || {};
         const allCandidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
-        const audioCandidates = allCandidates.filter((f) => f && f.has_audio);
+        const audioCandidates = allCandidates.filter((f) => isAudioFormat(f));
 
         const container = opts.container === 'mp4' || opts.container === 'webm' ? opts.container : null;
         const quality = opts.quality || 'best';
@@ -286,13 +294,17 @@ class YouTubeResolver {
             }
         }
 
-        if (!fmt) {
+        if (!fmt && audioCandidates.length > 0) {
             fmt =
-                audioCandidates.find((f) => !f.has_video && f.url) ||
+                audioCandidates.find((f) => f.url && f.mime_type?.includes('mp4')) ||
                 audioCandidates.find((f) => f.url) ||
+                audioCandidates.find((f) => !f.has_video && f.mime_type?.includes('mp4')) ||
                 audioCandidates.find((f) => !f.has_video) ||
-                audioCandidates[0] ||
-                allCandidates[0];
+                audioCandidates[0];
+        }
+
+        if (!fmt) {
+            fmt = allCandidates.find((f) => f && f.has_audio) || allCandidates[0];
         }
 
         if (!fmt) throw new Error('No audio stream found for this video');
