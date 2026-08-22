@@ -197,6 +197,7 @@ impl Downloader {
         let client = reqwest::Client::builder()
             .use_rustls_tls()
             .user_agent("Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
+            .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(300))
             .build()
             .map_err(|e| DownloaderError::HttpError(format!("failed to build HTTP client: {e}")))?;
@@ -205,9 +206,9 @@ impl Downloader {
         if start_byte > 0 {
             req = req.header("Range", format!("bytes={}-", start_byte));
         }
-        let mut res = req
-            .send()
+        let mut res = tokio::time::timeout(Duration::from_secs(30), req.send())
             .await
+            .map_err(|_| DownloaderError::HttpError("request timed out (30s)".to_string()))?
             .map_err(|e| DownloaderError::HttpError(format!("request failed: {e}")))?;
 
         let resuming = start_byte > 0 && res.status().as_u16() == 206;

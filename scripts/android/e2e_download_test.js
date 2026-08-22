@@ -20,7 +20,7 @@ const { EventEmitter } = require('events');
 const CDP_HOST = process.env.CDP_HOST || '127.0.0.1';
 const CDP_PORT = parseInt(process.env.CDP_PORT || '9222', 10);
 const TEST_YOUTUBE_URL = process.env.TEST_YOUTUBE_URL || process.argv[2] || 'https://www.youtube.com/watch?v=ZYEz2EKwrQ4';
-const OVERALL_TIMEOUT_MS = parseInt(process.env.TEST_TIMEOUT_MS || '120000', 10); // 120s overall timeout
+const OVERALL_TIMEOUT_MS = parseInt(process.env.TEST_TIMEOUT_MS || '180000', 10); // 180s overall timeout (allows 30s stall + fallback)
 
 /**
  * Minimal zero-dependency RFC 6455 WebSocket client for Node environments
@@ -505,8 +505,8 @@ function buildInPageTestExpression(testUrl) {
             const promise = new Promise((resolve, reject) => {
                 const t = setTimeout(() => {
                     if (typeof unlisten === 'function') unlisten();
-                    reject(new Error('Download timeout exceeded (90 seconds waiting for download:completed event)'));
-                }, 90000);
+                    reject(new Error('Download timeout exceeded (40 seconds waiting for download:completed event)'));
+                }, 40000);
                 const h = (ev) => {
                     const p = (ev && ev.payload) ? ev.payload : ev;
                     log('download:completed event received:', JSON.stringify(p));
