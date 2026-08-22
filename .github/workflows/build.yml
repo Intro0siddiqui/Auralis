@@ -66,6 +66,9 @@ jobs:
       - name: Run Real-Binary Desktop E2E (Tauri IPC)
         run: xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" node scripts/tests/desktop_real_e2e.js
 
+      - name: Run Desktop Download → Player E2E (JS, Rust downloader + player)
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" node scripts/tests/desktop_download_player_e2e.js
+
       - name: Package
         # Release artifact bundling is only meaningful on tag pushes. On
         # pull_request runs github.ref_name is "<PR>/merge" (contains a slash),

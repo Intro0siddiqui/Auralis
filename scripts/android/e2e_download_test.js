@@ -468,8 +468,23 @@ function buildInPageTestExpression(testUrl) {
             ext: resolved.ext,
             platform: resolved.platform,
             total_bytes: resolved.total_bytes,
-            has_stream_url: Boolean(resolved.stream_url)
+            has_stream_url: Boolean(resolved.stream_url),
+            has_headers: Boolean(resolved.headers),
+            client: resolved.client || null
         }));
+        // Verify client-matched headers are present (prevents googlevideo 403 on WebView 150)
+        if (resolved.platform === 'youtube') {
+            if (!resolved.headers || !resolved.headers['User-Agent'] || !resolved.headers['Referer']) {
+                throw new Error('YouTube resolver must return headers {User-Agent, Referer, Origin} — googlevideo 403 regression (winningClient=' + (resolved.client||'?') + ')');
+            }
+            if (!resolved.client || !['IOS','ANDROID','ANDROID_VR','TV','MWEB','WEB'].includes(resolved.client)) {
+                warn('Resolver client field missing/unexpected: ' + resolved.client);
+            }
+            log('Resolver headers verified:', JSON.stringify({ 'User-Agent': resolved.headers['User-Agent'].slice(0,40)+'…', Referer: resolved.headers['Referer'], client: resolved.client }));
+            if (resolved.stream_url && resolved.stream_url.includes('signatureCipher')) {
+                throw new Error('Stream URL still contains signatureCipher — decipher not performed');
+            }
+        }
 
         // 3-4. Download with per-candidate retry (listener created per attempt)
         log('Step 2/3: Download phase — will retry across candidates on stall/failed');
@@ -482,7 +497,8 @@ function buildInPageTestExpression(testUrl) {
                 platform: resolved.platform || 'youtube',
                 format: resolved.ext || 'm4a',
                 ext: resolved.ext || 'm4a',
-                thumbnail: resolved.thumbnail || null
+                thumbnail: resolved.thumbnail || null,
+                headers: resolved.headers || null
             },
             {
                 url: 'https://raw.githubusercontent.com/mdn/webaudio-examples/main/audio-basics/outfoxing.mp3',
@@ -528,6 +544,7 @@ function buildInPageTestExpression(testUrl) {
             let pollTimer = null;
 
             try {
+                log('download_audio request headers present:', Boolean(cand.headers));
                 const startResult = await invoke('download_audio', { request: cand });
                 log('download_audio invocation returned:', JSON.stringify(startResult));
                 downloadId = startResult?.id;
