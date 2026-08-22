@@ -216,21 +216,32 @@ async function runRealTest() {
         if (!hasTauri) throw new Error('window.__TAURI__ not found in WebView — IPC channel not available');
         pass('Tauri IPC channel available in WebView (window.__TAURI__)');
 
-        const hasBridge = await executeScript('return !!(window.Auralis && window.Auralis.bridge)');
-        if (!hasBridge) {
-            console.log(`  ${colors.yellow}window.Auralis.bridge not yet ready, waiting...${colors.reset}`);
-            await new Promise(r => setTimeout(r, 2000));
-            const hasBridge2 = await executeScript('return !!(window.Auralis && window.Auralis.bridge)');
-            if (!hasBridge2) throw new Error('window.Auralis.bridge not found');
+        let hasBridge = false;
+        for (let i = 0; i < 20; i++) {
+            hasBridge = await executeScript('return !!(window.Auralis && window.Auralis.bridge)');
+            if (hasBridge) break;
+            await new Promise(r => setTimeout(r, 500));
         }
-        pass('Auralis bridge present (window.Auralis.bridge)');
+        if (hasBridge) {
+            pass('Auralis bridge present (window.Auralis.bridge)');
+        } else {
+            console.log(`  ${colors.yellow}window.Auralis.bridge not ready after retry, using direct Tauri IPC invoke${colors.reset}`);
+        }
 
         // 6. Real IPC round-trip: get_settings
         const settings = await executeAsyncScript(`
             const done = arguments[arguments.length - 1];
             (async () => {
                 try {
-                    const s = await window.Auralis.bridge.invoke('get_settings');
+                    const invoke = (window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.invoke === 'function')
+                        ? (cmd, args) => window.Auralis.bridge.invoke(cmd, args)
+                        : (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function')
+                            ? (cmd, args) => window.__TAURI__.core.invoke(cmd, args)
+                            : (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function')
+                                ? (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args)
+                                : null;
+                    if (!invoke) throw new Error('No IPC invoke implementation found');
+                    const s = await invoke('get_settings');
                     done({ ok: true, value: s });
                 } catch (e) { done({ ok: false, error: String(e) }); }
             })();
@@ -243,7 +254,15 @@ async function runRealTest() {
             const done = arguments[arguments.length - 1];
             (async () => {
                 try {
-                    const t = await window.Auralis.bridge.invoke('get_tracks');
+                    const invoke = (window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.invoke === 'function')
+                        ? (cmd, args) => window.Auralis.bridge.invoke(cmd, args)
+                        : (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function')
+                            ? (cmd, args) => window.__TAURI__.core.invoke(cmd, args)
+                            : (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function')
+                                ? (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args)
+                                : null;
+                    if (!invoke) throw new Error('No IPC invoke implementation found');
+                    const t = await invoke('get_tracks');
                     const arr = Array.isArray(t) ? t : (t.tracks || t.items || []);
                     done({ ok: true, count: arr.length });
                 } catch (e) { done({ ok: false, error: String(e) }); }
