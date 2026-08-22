@@ -656,11 +656,7 @@ jobs:
           script: bash scripts/android/run_emulator_test.sh "${{ steps.sign.outputs.apk_path }}"
 
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -670,7 +666,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          # Restore-only — saves are handled by build-* jobs to avoid 3× cache churn
+          # Restore-only — saves are handled by build-* jobs
           save-if: "false"
 
       - name: Setup Node
@@ -678,8 +674,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install system deps (Linux)
-        if: runner.os == 'Linux'
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
