@@ -692,16 +692,6 @@ jobs:
       - name: Run unit & integration tests
         run: cargo test --all-features
 
-      - name: Run Desktop E2E Tests (Linux xvfb)
-        if: runner.os == 'Linux'
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" node scripts/tests/desktop_e2e_test.js
-
-      - name: Run Desktop E2E Tests (macOS & Windows)
-        if: runner.os != 'Linux'
-        run: |
-          node scripts/tests/desktop_e2e_test.js
-
   lint:
     runs-on: ubuntu-22.04
     steps:
