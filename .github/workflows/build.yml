@@ -90,7 +90,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: "true"
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
 
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2.0.0
@@ -124,7 +124,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: "true"
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
 
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2.0.0
@@ -670,7 +670,8 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: "true"
+          # Restore-only — saves are handled by build-* jobs to avoid 3× cache churn
+          save-if: "false"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -719,7 +720,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: "true"
+          save-if: "false"
 
       - name: Format check
         run: cargo fmt -- --check
