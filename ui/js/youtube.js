@@ -249,10 +249,10 @@ class YouTubeResolver {
             return all.some((f) => isAudioFormat(f) && Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
         };
 
-        // 1. First attempt: Direct raw player API query with reliable mobile client contexts (IOS, ANDROID_VR, ANDROID)
+        // 1. First attempt: Direct raw player API query with reliable client contexts (IOS, ANDROID, ANDROID_VR, TV, MWEB, WEB)
         // This directly fetches raw streamingData with unthrottled HTTPS audio stream URLs without parser overhead.
         if (client.actions?.execute) {
-            for (const cl of ['IOS', 'ANDROID_VR', 'ANDROID']) {
+            for (const cl of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
                 try {
                     const raw = await client.actions.execute('/player', { videoId, client: cl });
                     const st = raw?.data?.playabilityStatus?.status;
@@ -313,11 +313,11 @@ class YouTubeResolver {
         if (!info) {
             const clientAttempts = [
                 async () => client.getInfo(videoId, { client: 'IOS' }),
-                async () => client.getInfo(videoId, { client: 'ANDROID_VR' }),
                 async () => client.getInfo(videoId, { client: 'ANDROID' }),
+                async () => client.getInfo(videoId, { client: 'ANDROID_VR' }),
                 async () => client.getInfo(videoId, { client: 'TV' }),
                 async () => client.getInfo(videoId, { client: 'MWEB' }),
-                async () => client.getInfo(videoId),
+                async () => client.getInfo(videoId, { client: 'WEB' }),
             ];
 
             let fallbackInfo = null;
