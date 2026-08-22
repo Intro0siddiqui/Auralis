@@ -14,7 +14,6 @@ concurrency:
 
 jobs:
   build-linux:
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +53,9 @@ jobs:
 
       - name: Build binary
         run: cargo build --release
+
+      - name: Run unit & integration tests
+        run: cargo test --all-features
 
       - name: Install Tauri Driver (for real-binary IPC E2E)
         run: cargo install tauri-driver --locked || echo "tauri-driver install failed, fallback to smoke check"
@@ -655,41 +657,6 @@ jobs:
           disable-animations: true
           script: bash scripts/android/run_emulator_test.sh "${{ steps.sign.outputs.apk_path }}"
 
-  test:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore-only — saves are handled by build-* jobs
-          save-if: "false"
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libasound2-dev \
-            libssl-dev \
-            xvfb \
-            pkg-config
-
-      - name: Run unit & integration tests
-        run: cargo test --all-features
-
   lint:
     runs-on: ubuntu-22.04
     steps:
@@ -724,7 +691,7 @@ jobs:
         run: cargo clippy --all-targets --all-features
 
   release:
-    needs: [build-linux, build-macos, build-windows, build-android, test, lint]
+    needs: [build-linux, build-macos, build-windows, build-android, lint]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     permissions:
