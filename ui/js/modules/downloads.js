@@ -35,6 +35,7 @@ export const downloadMethods = {
                 ext: resolved.ext,
                 total_bytes: resolved.total_bytes,
                 thumbnail: resolved.thumbnail,
+                headers: resolved.headers || null,
             },
         };
     },

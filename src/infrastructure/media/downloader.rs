@@ -39,6 +39,10 @@ pub struct StreamDownload {
     pub total_bytes: Option<u64>,
     /// Optional thumbnail/cover URL, fetched and saved as `<audio>.jpg`.
     pub thumbnail: Option<String>,
+    /// Optional HTTP headers to send with the googlevideo request (UA/Referer
+    /// matched to the InnerTube client that generated the URL). If absent,
+    /// sane YouTube defaults are injected.
+    pub headers: Option<HashMap<String, String>>,
 }
 
 /// Per-job bookkeeping required to (re)start and resume a download.
@@ -47,6 +51,7 @@ struct DownloadJob {
     stream_url: String,
     output_path: PathBuf,
     thumbnail: Option<String>,
+    headers: Option<HashMap<String, String>>,
 }
 
 /// Streams a resolved audio URL to disk with progress tracking.
@@ -148,6 +153,7 @@ impl Downloader {
                     stream_url: req.stream_url.clone(),
                     output_path: path,
                     thumbnail: req.thumbnail,
+                    headers: req.headers,
                 },
             );
         }
@@ -194,15 +200,45 @@ impl Downloader {
         start_byte: u64,
         active: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
     ) -> Result<(), DownloaderError> {
+        // Build client: use supplied UA if present, otherwise sane default.
+        let ua = job
+            .headers
+            .as_ref()
+            .and_then(|h| h.get("User-Agent").or_else(|| h.get("user-agent")).cloned())
+            .unwrap_or_else(|| "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36".to_string());
+
         let client = reqwest::Client::builder()
             .use_rustls_tls()
-            .user_agent("Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
+            .user_agent(ua)
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(300))
             .build()
             .map_err(|e| DownloaderError::HttpError(format!("failed to build HTTP client: {e}")))?;
 
         let mut req = client.get(&job.stream_url);
+        // Inject headers that googlevideo validates: Referer/Origin/Accept.
+        // Caller (youtube.js) supplies a client-matched UA; we add the rest.
+        let mut injected: HashMap<String, String> = HashMap::new();
+        injected.insert(
+            "Referer".to_string(),
+            "https://www.youtube.com/".to_string(),
+        );
+        injected.insert("Origin".to_string(), "https://www.youtube.com".to_string());
+        injected.insert("Accept".to_string(), "*/*".to_string());
+        injected.insert("Accept-Language".to_string(), "en-US,en;q=0.9".to_string());
+        injected.insert("Sec-Fetch-Mode".to_string(), "no-cors".to_string());
+        injected.insert("Connection".to_string(), "keep-alive".to_string());
+        if let Some(h) = &job.headers {
+            for (k, v) in h {
+                if k.eq_ignore_ascii_case("user-agent") {
+                    continue;
+                }
+                injected.insert(k.clone(), v.clone());
+            }
+        }
+        for (k, v) in injected {
+            req = req.header(k, v);
+        }
         if start_byte > 0 {
             req = req.header("Range", format!("bytes={}-", start_byte));
         }

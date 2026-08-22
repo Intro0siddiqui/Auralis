@@ -33,6 +33,8 @@ pub struct DownloadRequest {
     pub total_bytes: Option<u64>,
     /// Optional thumbnail URL for display.
     pub thumbnail: Option<String>,
+    /// Optional headers (UA/Referer/Origin) matched to the InnerTube client.
+    pub headers: Option<HashMap<String, String>>,
 }
 
 /// Playlist download request — a pre-resolved list of items.
@@ -71,6 +73,7 @@ pub async fn download_audio(
             .unwrap_or_else(|| format.extension().to_string()),
         total_bytes: request.total_bytes,
         thumbnail: request.thumbnail,
+        headers: request.headers,
     };
 
     let id = downloader.download(stream).await.map_err(|e| {
@@ -143,6 +146,7 @@ pub async fn download_playlist(
                 .unwrap_or_else(|| format.extension().to_string()),
             total_bytes: item.total_bytes,
             thumbnail: item.thumbnail,
+            headers: item.headers.clone(),
         };
 
         match downloader.download(stream).await {

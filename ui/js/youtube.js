@@ -232,6 +232,7 @@ class YouTubeResolver {
         const videoId = this.extractVideoId(url);
 
         let info = null;
+        let winningClient = null;
         let lastErr = null;
 
         const isAudioFormat = (f) => {
@@ -299,6 +300,7 @@ class YouTubeResolver {
                         };
                         if (hasDirectOrDecipherableAudio(parsed)) {
                             info = parsed;
+                            winningClient = cl;
                             break;
                         }
                     }
@@ -321,16 +323,20 @@ class YouTubeResolver {
             ];
 
             let fallbackInfo = null;
-            for (const attempt of clientAttempts) {
+            let fallbackClient = null;
+            const clientNames = ['IOS','ANDROID','ANDROID_VR','TV','MWEB','WEB'];
+            for (let i = 0; i < clientAttempts.length; i++) {
+                const attempt = clientAttempts[i];
                 try {
                     const res = await attempt();
                     if (res && res.streaming_data) {
                         const sd = res.streaming_data;
                         const candidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
                         if (candidates.length > 0) {
-                            if (!fallbackInfo) fallbackInfo = res;
+                            if (!fallbackInfo) { fallbackInfo = res; fallbackClient = clientNames[i]; }
                             if (hasDirectOrDecipherableAudio(res)) {
                                 info = res;
+                                winningClient = clientNames[i];
                                 break;
                             }
                         }
@@ -342,6 +348,7 @@ class YouTubeResolver {
 
             if (!info) {
                 info = fallbackInfo;
+                if (!winningClient) winningClient = fallbackClient;
             }
         }
 
@@ -426,6 +433,62 @@ class YouTubeResolver {
             }
         }
 
+        if (!streamUrl && (fmt.signature_cipher || fmt.cipher)) {
+            // actions.execute path produced a plain object with cipher but no decipher()
+            // method — decode and ask the player to decipher `s`/`n`.
+            const cipherStr = fmt.signature_cipher || fmt.cipher;
+            try {
+                const params = new URLSearchParams(cipherStr);
+                let url = params.get('url');
+                const s = params.get('s');
+                const sp = params.get('sp') || 'sig';
+                const n = params.get('n') ? null : null; // n lives in url, handled below
+                if (url) {
+                    url = decodeURIComponent(url);
+                    if (s && client.session?.player) {
+                        // Try youtubei's n/s decipher via player
+                        let deciphered = s;
+                        if (typeof client.session.player.decipher === 'function') {
+                            try { deciphered = await client.session.player.decipher(s); } catch (_) {}
+                        } else if (typeof client.session.player.ncode === 'function') {
+                            try { deciphered = client.session.player.ncode(s); } catch (_) {}
+                        }
+                        const u = new URL(url);
+                        u.searchParams.set(sp, deciphered);
+                        streamUrl = u.toString();
+                    } else if (url) {
+                        streamUrl = url;
+                    }
+                }
+            } catch (e) {
+                console.warn('[YouTubeResolver] cipher decode failed:', e?.message || e);
+            }
+        }
+
+        // n-parameter throttling: if URL contains &n=..., ask player to decipher n
+        if (streamUrl && streamUrl.includes('&n=') && client.session?.player) {
+            try {
+                const u = new URL(streamUrl);
+                const nVal = u.searchParams.get('n');
+                if (nVal) {
+                    let nDec = nVal;
+                    const p = client.session.player;
+                    if (typeof p.decipher === 'function') {
+                        // Some players expose decipher for n as well
+                        try { nDec = await p.decipher(nVal); } catch (_) {}
+                    }
+                    if (typeof p.ncode === 'function') {
+                        try { nDec = p.ncode(nVal); } catch (_) {}
+                    }
+                    // youtubei's player often has `n` transform on `player.n`
+                    if (nDec !== nVal) {
+                        u.searchParams.set('n', nDec);
+                        streamUrl = u.toString();
+                    }
+                }
+            } catch (_) {}
+        }
+
         if (!streamUrl) throw new Error('Unable to extract playable audio URL');
 
         const ext = this.extFromMime(fmt.mime_type);
@@ -433,6 +496,24 @@ class YouTubeResolver {
         const thumb = this.pickThumb(bi.thumbnail);
         const totalRaw = fmt.content_length ? Number(fmt.content_length) : NaN;
         const total = isNaN(totalRaw) ? null : totalRaw;
+
+        // Build headers matched to the InnerTube client that produced the URL
+        // — googlevideo validates UA/Referer/Origin against the client context.
+        const uaMap = {
+            'IOS': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+            'ANDROID': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US; Pixel 8 Build/UD1A.230803.041)',
+            'ANDROID_VR': 'com.google.android.apps.youtube.vr/1.56.42 (Linux; U; Android 14; en_US; Pixel 8 Build/UD1A.230803.041)',
+            'TV': 'Mozilla/5.0 (ChromiumStylePlatform) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'MWEB': 'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+            'WEB': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        };
+        const headers = {
+            'User-Agent': uaMap[winningClient] || uaMap['ANDROID'],
+            'Referer': 'https://www.youtube.com/',
+            'Origin': 'https://www.youtube.com',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+        };
 
         return {
             kind: 'track',
@@ -442,6 +523,8 @@ class YouTubeResolver {
             total_bytes: total,
             thumbnail: thumb,
             platform: 'youtube',
+            headers,
+            client: winningClient,
         };
     }
 

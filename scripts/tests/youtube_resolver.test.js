@@ -171,6 +171,14 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         assert.ok(csp.includes('connect-src'), 'CSP missing connect-src');
         assert.ok(csp.includes('https:'), 'CSP connect-src must include https: for youtubei/googlevideo');
     });
+
+    it('resolver returns client-matched headers (prevents googlevideo 403)', () => {
+        // ytDl fix for 8BWnhTscTMs: title resolved but Rust reqwest 403'd
+        // because UA/Referer mismatched IOS context. Headers must travel to Rust.
+        assert.ok(src.includes("headers") && src.includes("User-Agent"), 'youtube.js must return headers with User-Agent');
+        assert.ok(src.includes("winningClient") && src.includes("uaMap"), 'youtube.js must map winningClient -> UA');
+        assert.ok(src.includes("Referer") && src.includes("Origin"), 'headers must include Referer/Origin');
+    });
 });
 
 describe('nativeFetch header extraction (Tauri bridge)', () => {
