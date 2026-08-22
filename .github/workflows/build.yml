@@ -57,6 +57,9 @@ jobs:
       - name: Run unit & integration tests
         run: cargo test --all-features
 
+      - name: Run JS unit tests (YouTube resolver - catches ARM stream regression)
+        run: node --test scripts/tests/youtube_resolver.test.js
+
       - name: Install Tauri Driver (for real-binary IPC E2E)
         run: cargo install tauri-driver --locked || echo "tauri-driver install failed, fallback to smoke check"
 

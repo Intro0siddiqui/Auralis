@@ -24,14 +24,14 @@ async function nativeFetch(input, init = {}) {
 
     const extractHeaders = (hdrs) => {
         if (!hdrs) return;
-        if (typeof hdrs.forEach === 'function') {
-            hdrs.forEach((v, k) => {
-                if (v !== undefined && v !== null) cleanHeaders[String(k)] = String(v);
-            });
-        } else if (Array.isArray(hdrs)) {
+        if (Array.isArray(hdrs)) {
             for (const [k, v] of hdrs) {
                 if (v !== undefined && v !== null) cleanHeaders[String(k)] = String(v);
             }
+        } else if (typeof hdrs.forEach === 'function') {
+            hdrs.forEach((v, k) => {
+                if (v !== undefined && v !== null) cleanHeaders[String(k)] = String(v);
+            });
         } else if (typeof hdrs === 'object') {
             for (const [k, v] of Object.entries(hdrs)) {
                 if (v !== undefined && v !== null) cleanHeaders[String(k)] = String(v);
