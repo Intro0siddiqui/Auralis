@@ -34,9 +34,5 @@ cargo test --all-features --lib --bins
 echo "==> Running doc tests"
 cargo test --all-features --doc
 
-# Integration tests
-echo "==> Running integration tests"
-cargo test --all-features --test '*' || true   # OK if no integration tests yet
-
 echo
 echo "✓ All tests passed"

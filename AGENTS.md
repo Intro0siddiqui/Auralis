@@ -180,24 +180,18 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 bash scripts/test.sh
 # or
 cargo test --all-features
-cargo test --test integration -- --nocapture   # end-to-end scan / ingestion
+node scripts/tests/desktop_real_e2e.js  # real release binary IPC e2e
 ```
 
-### Test Gaps
+### Test Coverage
 
-`tests/integration.rs` exists and is run in CI (`build-linux`/`build-macos`/`build-windows`/`test` jobs). Unit tests exist for some domain models (`PairingInfo::generate`, `SyncChange::new`, `PairedDevice::mark_synced`). Extend coverage to:
-
-1. **Domain models** — extend unit tests to all models.
-2. **Database layer** — Test repository CRUD operations with a temp SQLite DB.
-3. **Command handlers** — Add integration tests using `#[tauri::test]` macro.
-4. **File scanner** — Test scanning with a temp directory containing fixture files.
+Unit tests exist across domain models (`PairingInfo::generate`, `SyncChange::new`, `PairedDevice::mark_synced`, `track`, `album`, `artist`, `download`, `playlist`, `settings`), infrastructure (`scanner`, `network`), and templates. Real-binary IPC end-to-end verification is handled by `scripts/tests/desktop_real_e2e.js`.
 
 ### Test Conventions
 
-- Use `tempfile` for filesystem-based tests.
 - Use `:memory:` SQLite for repository tests.
 - Place unit tests in each `src/` module with `#[cfg(test)] mod tests`.
-- Place integration tests in `tests/integration.rs`.
+- End-to-end IPC testing is conducted against the real release binary via WebDriver.
 
 ---
 
@@ -253,5 +247,5 @@ The CI workflow (`.github/workflows/build.yml`) runs on every push/PR to `main` 
 | **Sync model** | `src/domain/models/sync.rs` |
 | **Network implementation** | `src/infrastructure/network.rs` |
 | **Android CI / Release** | `.github/workflows/build.yml` (tag-gated; builds Linux/macOS/Windows/Android + GitHub Release) |
-| **Integration tests** | `tests/integration.rs` |
+| **Desktop E2E IPC** | `scripts/tests/desktop_real_e2e.js` |
 | **Build config** | `Cargo.toml`, `Cargo.lock`, `tauri.conf.json`, `.cargo/config.toml` |

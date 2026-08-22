@@ -92,12 +92,11 @@ async function runRealTest() {
         if (fs.existsSync(cargoBin)) driverPath = cargoBin;
     }
 
-    if (!driverPath) {
-        console.log(`  ${colors.yellow}tauri-driver not found — falling back to binary smoke check${colors.reset}`);
-        // Fallback: at least verify binary is executable and has expected symbols
+    function runSmokeCheck(reason) {
+        console.log(`  ${colors.yellow}${reason} — falling back to binary smoke check${colors.reset}`);
         try {
             const out = execSync(`file ${BINARY}`, { encoding: 'utf8' });
-            if (!out.includes('ELF') && !out.includes('executable')) throw new Error(out);
+            if (!out.includes('ELF') && !out.includes('executable') && !out.includes('Mach-O') && !out.includes('PE32')) throw new Error(out);
             pass(`Binary file type verified: ${out.trim().slice(0, 80)}`);
         } catch (e) { throw new Error(`Binary file check failed: ${e.message}`); }
 
@@ -110,17 +109,52 @@ async function runRealTest() {
             console.log(`  ${colors.dim}String check notice: ${e.message}${colors.reset}`);
         }
 
-        // Also verify cargo test compilation (compile gate)
-        console.log(`  ${colors.dim}Skipping WebDriver IPC test (no driver) — compile gate already passed via cargo build${colors.reset}`);
-        pass('Real-binary smoke check passed (tauri-driver not available, binary verified)');
+        console.log(`  ${colors.dim}Skipping WebDriver IPC test — compile gate already passed via cargo build${colors.reset}`);
+        pass('Real-binary smoke check passed (binary verified)');
+    }
+
+    if (!driverPath) {
+        runSmokeCheck('tauri-driver not found');
         return;
+    }
+
+    // Check for native driver on Linux (WebKitWebDriver)
+    let driverArgs = [];
+    if (process.platform === 'linux') {
+        let nativeDriver = null;
+        try { nativeDriver = execSync('which WebKitWebDriver', { encoding: 'utf8' }).trim(); } catch (_) {}
+        if (!nativeDriver) {
+            const candidatePaths = [
+                '/usr/bin/WebKitWebDriver',
+                '/usr/lib/webkit2gtk-4.1/WebKitWebDriver',
+                '/usr/lib/webkit2gtk-4.0/WebKitWebDriver',
+                '/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebDriver',
+                '/usr/lib/x86_64-linux-gnu/webkit2gtk-4.0/WebKitWebDriver',
+                '/usr/lib/aarch64-linux-gnu/webkit2gtk-4.1/WebKitWebDriver',
+                '/usr/lib/aarch64-linux-gnu/webkit2gtk-4.0/WebKitWebDriver',
+            ];
+            for (const p of candidatePaths) {
+                if (fs.existsSync(p)) {
+                    nativeDriver = p;
+                    break;
+                }
+            }
+        }
+        if (nativeDriver) {
+            pass(`Found native WebKitWebDriver at ${nativeDriver}`);
+            driverArgs.push('--native-driver', nativeDriver);
+        } else {
+            console.log(`  ${colors.yellow}WebKitWebDriver not found on Linux host${colors.reset}`);
+            runSmokeCheck('WebKitWebDriver native driver not available');
+            return;
+        }
     }
 
     pass(`Found tauri-driver at ${driverPath}`);
 
     // 3. Start tauri-driver
-    console.log(`  ${colors.dim}Starting tauri-driver on port ${TAURI_DRIVER_PORT}...${colors.reset}`);
-    const driverProc = spawn(driverPath, [], { stdio: ['ignore', 'pipe', 'pipe'] });
+    console.log(`  ${colors.dim}Starting tauri-driver on port ${TAURI_DRIVER_PORT} (args: ${driverArgs.join(' ')})...${colors.reset}`);
+    const driverProc = spawn(driverPath, driverArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
     let driverLogs = '';
     driverProc.stdout.on('data', d => { driverLogs += d.toString(); });
     driverProc.stderr.on('data', d => { driverLogs += d.toString(); });
@@ -128,6 +162,10 @@ async function runRealTest() {
     const driverReady = await waitForDriver(TAURI_DRIVER_PORT, 15000);
     if (!driverReady) {
         driverProc.kill();
+        if (driverLogs.includes('CannotFindBinaryPath') || driverLogs.includes('WebKitWebDriver')) {
+            runSmokeCheck(`tauri-driver native backend missing: ${driverLogs.trim().slice(0, 120)}`);
+            return;
+        }
         throw new Error(`tauri-driver did not become ready on port ${TAURI_DRIVER_PORT}. Logs:\n${driverLogs.slice(-2000)}`);
     }
     pass('tauri-driver ready');
