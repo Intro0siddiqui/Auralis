@@ -265,11 +265,18 @@ impl Downloader {
         let start_instant = Instant::now();
         let mut downloaded = start_byte;
 
-        while let Some(chunk) = res
-            .chunk()
-            .await
-            .map_err(|e| DownloaderError::HttpError(format!("stream read error: {e}")))?
-        {
+        loop {
+            let chunk_opt = tokio::time::timeout(Duration::from_secs(30), res.chunk())
+                .await
+                .map_err(|_| {
+                    DownloaderError::HttpError("stream stalled: no data for 30s".to_string())
+                })?
+                .map_err(|e| DownloaderError::HttpError(format!("stream read error: {e}")))?;
+
+            let Some(chunk) = chunk_opt else { break };
+            if chunk.is_empty() {
+                continue;
+            }
             file.write_all(&chunk)
                 .await
                 .map_err(DownloaderError::IoError)?;

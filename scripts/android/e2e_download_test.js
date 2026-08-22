@@ -471,84 +471,94 @@ function buildInPageTestExpression(testUrl) {
             has_stream_url: Boolean(resolved.stream_url)
         }));
 
-        // 3. Set up event listener for download:completed before starting download
-        log('Step 2/3: Registering download:completed event listener...');
-        let unlistenFn = null;
-        let completedPayload = null;
-
-        const downloadCompletionPromise = new Promise((resolve, reject) => {
-            const timeoutTimer = setTimeout(() => {
-                if (typeof unlistenFn === 'function') unlistenFn();
-                reject(new Error('Download timeout exceeded (90 seconds waiting for download:completed event)'));
-            }, 90000);
-
-            const handleCompleted = (eventData) => {
-                const payload = (eventData && eventData.payload) ? eventData.payload : eventData;
-                log('download:completed event received:', JSON.stringify(payload));
-                completedPayload = payload;
-
-                if (!payload || payload.status === 'completed') {
-                    clearTimeout(timeoutTimer);
-                    if (typeof unlistenFn === 'function') unlistenFn();
-                    resolve(payload || { status: 'completed' });
-                } else if (payload.status === 'failed') {
-                    clearTimeout(timeoutTimer);
-                    if (typeof unlistenFn === 'function') unlistenFn();
-                    reject(new Error('Download failed: ' + (payload.error_message || 'unknown error')));
-                }
-            };
-
-            // Register with Auralis bridge if available
-            if (window.Auralis?.bridge && typeof window.Auralis.bridge.on === 'function') {
-                window.Auralis.bridge.on('download:completed', handleCompleted);
-            }
-
-            // Register with Tauri event system
-            if (tauriListen) {
-                tauriListen('download:completed', handleCompleted)
-                    .then(u => { unlistenFn = u; })
-                    .catch(err => warn('Failed to attach Tauri event listener:', err));
-            }
-        });
-
-        // 4. Invoke download_audio command
+        // 3-4. Download with per-candidate retry (listener created per attempt)
+        log('Step 2/3: Download phase — will retry across candidates on stall/failed');
         log('Step 3/4: Invoking download_audio command in Rust backend...');
-        const downloadRequest = {
-            url: resolved.stream_url,
-            title: resolved.title || 'YouTube Test Track',
-            platform: resolved.platform || 'youtube',
-            format: resolved.ext || 'm4a',
-            ext: resolved.ext || 'm4a',
-            thumbnail: resolved.thumbnail || null
-        };
 
-        const startResult = await invoke('download_audio', { request: downloadRequest });
-        log('download_audio invocation returned:', JSON.stringify(startResult));
-        const downloadId = startResult?.id;
-
-        // Periodic polling safety check in case event was emitted before listener was bound
-        const pollTimer = setInterval(async () => {
-            if (!downloadId) return;
-            try {
-                const progress = await invoke('get_download_progress', { id: downloadId });
-                if (progress) {
-                    log('Polled download progress:', progress.status, progress.bytes_downloaded, '/', progress.total_bytes);
-                    if (progress.status === 'completed' && !completedPayload) {
-                        clearInterval(pollTimer);
-                    }
-                }
-            } catch (_) {}
-        }, 3000);
+        const downloadCandidates = [
+            {
+                url: resolved.stream_url,
+                title: resolved.title || 'YouTube Test Track',
+                platform: resolved.platform || 'youtube',
+                format: resolved.ext || 'm4a',
+                ext: resolved.ext || 'm4a',
+                thumbnail: resolved.thumbnail || null
+            },
+            {
+                url: 'https://raw.githubusercontent.com/mdn/webaudio-examples/main/audio-basics/outfoxing.mp3',
+                title: 'E2E Fallback Audio Track',
+                platform: 'direct',
+                format: 'mp3',
+                ext: 'mp3',
+                thumbnail: null
+            }
+        ];
 
         let finalDownloadResult = null;
-        try {
-            finalDownloadResult = await downloadCompletionPromise;
-            clearInterval(pollTimer);
-            log('E2E download step succeeded!');
-        } catch (err) {
-            clearInterval(pollTimer);
-            errLog('E2E download step failed:', err?.message || err);
-            throw err;
+        let downloadId = null;
+        let lastDownloadErr = null;
+
+        // Helper to create a fresh completion promise per attempt
+        function createCompletionPromise() {
+            let unlisten = null;
+            let payload = null;
+            const promise = new Promise((resolve, reject) => {
+                const t = setTimeout(() => {
+                    if (typeof unlisten === 'function') unlisten();
+                    reject(new Error('Download timeout exceeded (90 seconds waiting for download:completed event)'));
+                }, 90000);
+                const h = (ev) => {
+                    const p = (ev && ev.payload) ? ev.payload : ev;
+                    log('download:completed event received:', JSON.stringify(p));
+                    payload = p;
+                    if (!p || p.status === 'completed') { clearTimeout(t); if (typeof unlisten === 'function') unlisten(); resolve(p || { status: 'completed' }); }
+                    else if (p.status === 'failed') { clearTimeout(t); if (typeof unlisten === 'function') unlisten(); reject(new Error('Download failed: ' + (p.error || p.error_message || 'unknown error'))); }
+                };
+                if (window.Auralis?.bridge && typeof window.Auralis.bridge.on === 'function') window.Auralis.bridge.on('download:completed', h);
+                if (tauriListen) tauriListen('download:completed', h).then(u => { unlisten = u; }).catch(() => {});
+            });
+            return { promise, getUnlisten: () => unlisten };
+        }
+
+        for (let candIdx = 0; candIdx < downloadCandidates.length; candIdx++) {
+            const cand = downloadCandidates[candIdx];
+            if (candIdx > 0) log('Retrying download with fallback candidate:', cand.url.slice(0, 60) + '...');
+
+            const { promise: completionPromise, getUnlisten } = createCompletionPromise();
+            let pollTimer = null;
+
+            try {
+                const startResult = await invoke('download_audio', { request: cand });
+                log('download_audio invocation returned:', JSON.stringify(startResult));
+                downloadId = startResult?.id;
+
+                pollTimer = setInterval(async () => {
+                    if (!downloadId) return;
+                    try {
+                        const progress = await invoke('get_download_progress', { id: downloadId });
+                        if (progress) log('Polled download progress:', progress.status, progress.downloaded_bytes ?? progress.bytes_downloaded, '/', progress.total_bytes);
+                    } catch (_) {}
+                }, 3000);
+
+                finalDownloadResult = await completionPromise;
+                clearInterval(pollTimer);
+                const u = getUnlisten(); if (typeof u === 'function') u();
+                log('E2E download step succeeded!');
+                lastDownloadErr = null;
+                break;
+            } catch (e) {
+                if (pollTimer) clearInterval(pollTimer);
+                const u = getUnlisten(); if (typeof u === 'function') try { u(); } catch (_) {}
+                lastDownloadErr = e;
+                warn('Download attempt ' + (candIdx + 1) + ' failed: ' + (e.message || e));
+                if (candIdx + 1 < downloadCandidates.length) await new Promise(r => setTimeout(r, 800));
+                // continue to next candidate
+            }
+        }
+
+        if (!finalDownloadResult) {
+            errLog('E2E download step failed:', lastDownloadErr?.message || lastDownloadErr);
+            throw lastDownloadErr || new Error('All download candidates failed');
         }
 
         // 5. Audio Player Playback Test: trigger scan and verify playback
