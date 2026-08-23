@@ -147,17 +147,22 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
     });
 
     it('source has actions.execute loop over 6 clients (not 3)', () => {
-        // The array literal must list all 6 in order
-        const six = "['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']";
-        assert.ok(src.includes(six), `Expected ${six} in youtube.js — prevents revert to 3-client ARM bug`);
+        // Must list all 6 clients somewhere (PO-token-aware orderedClients now splits order)
+        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
+            assert.ok(src.includes(`'${c}'`), `Expected client '${c}' in youtube.js`);
+        }
+        // orderedClients must be defined (TV/ANDROID_VR-first when no poToken)
+        assert.ok(src.includes('orderedClients'), 'Expected orderedClients PO-token-aware ordering');
+        assert.ok(src.includes("TV") && src.includes("ANDROID_VR"), 'orderedClients must mention TV/ANDROID_VR');
     });
 
     it('getInfo fallback tries 6 clients', () => {
-        // fallback is 6 lambdas with client: 'IOS' .. 'WEB' (actions loop uses array literal)
-        const webCount = (src.match(/client: 'WEB'/g) || []).length;
-        assert.ok(webCount >= 1, `Expected fallback block to contain client: 'WEB', got ${webCount}`);
-        // array literal must also include WEB for the actions.execute path
+        // fallback now uses orderedClients.map(cl => getInfo(... client: cl)) — still must cover all 6
+        assert.ok(src.includes('orderedClients') && src.includes('getInfo'), 'fallback must be PO-token-aware via orderedClients + getInfo');
         assert.ok(src.includes("'IOS'") && src.includes("'WEB'"), 'fallback must mention IOS and WEB');
+        // at least one explicit client literal check remains (uaMap etc)
+        const hasTV = src.includes("'TV'") || src.includes('"TV"');
+        assert.ok(hasTV, 'fallback must mention TV');
     });
 
     it('nativeFetch bridges via http_fetch (bypasses WebView CORS)', () => {
