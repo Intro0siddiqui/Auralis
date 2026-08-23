@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// A fully-resolved download job submitted to the downloader.
@@ -117,9 +117,18 @@ impl Downloader {
     /// progress is tracked in `active_downloads` and surfaced via the
     /// `download:progress` / `download:completed` events emitted by the command.
     pub async fn download(&self, req: StreamDownload) -> Result<Uuid, DownloaderError> {
-        info!(url = %req.stream_url, title = %req.title, "Starting download");
+        let host = req.stream_url.split('/').nth(2).unwrap_or("unknown");
+        let has_headers = req.headers.is_some();
+        let header_keys = req
+            .headers
+            .as_ref()
+            .map(|h| h.keys().cloned().collect::<Vec<_>>().join(","))
+            .unwrap_or_default();
+        info!(url = %req.stream_url, title = %req.title, platform = %req.platform, ext = %req.ext, total_bytes = ?req.total_bytes, host = %host, has_headers = %has_headers, headers = %header_keys, "Starting download");
+        debug!(url = %req.stream_url, headers = ?req.headers, "Download request headers");
 
         if !req.stream_url.starts_with("https://") && !req.stream_url.starts_with("http://") {
+            warn!(url = %req.stream_url, "Rejected non-http(s) URL");
             return Err(DownloaderError::InvalidUrl(req.stream_url));
         }
 
@@ -179,7 +188,9 @@ impl Downloader {
             };
 
             if let Err(e) = Self::run_stream(id, &job, start_byte, active.clone()).await {
-                error!(download_id = %id, error = %e, "Download failed");
+                let url_host = job.stream_url.split('/').nth(2).unwrap_or("unknown");
+                error!(download_id = %id, url_host = %url_host, url = %job.stream_url, start_byte = start_byte, error = %e, "Download failed — will mark as failed with diagnostic");
+                warn!(download_id = %id, error = %e, "DIAGNOSTIC download_failed id={} host={} url={} error={}", id, url_host, job.stream_url, e);
                 let mut guard = active.write().await;
                 if let Some(state) = guard.get_mut(&id) {
                     state.fail(e.to_string());
@@ -194,12 +205,22 @@ impl Downloader {
     }
 
     /// Stream `job.stream_url` to `job.output_path`, updating progress.
+    /// On failure the returned `DownloaderError` string is intentionally
+    /// verbose (status + body snippet + host + byte counts) so it surfaces
+    /// in the `download:completed` event's `error` field, the toast, and
+    /// `adb logcat` — users diagnose without devtools.
     async fn run_stream(
         id: Uuid,
         job: &DownloadJob,
         start_byte: u64,
         active: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
     ) -> Result<(), DownloaderError> {
+        let host = job.stream_url.split('/').nth(2).unwrap_or("unknown");
+        let url_snip = if job.stream_url.len() > 160 {
+            format!("{}…", &job.stream_url[..160])
+        } else {
+            job.stream_url.clone()
+        };
         // Build client: use supplied UA if present, otherwise sane default.
         let ua = job
             .headers
@@ -207,13 +228,17 @@ impl Downloader {
             .and_then(|h| h.get("User-Agent").or_else(|| h.get("user-agent")).cloned())
             .unwrap_or_else(|| "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36".to_string());
 
+        debug!(download_id = %id, host = %host, ua = %ua, start_byte = start_byte, "Building HTTP client for stream");
         let client = reqwest::Client::builder()
             .use_rustls_tls()
-            .user_agent(ua)
+            .user_agent(ua.clone())
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(300))
             .build()
-            .map_err(|e| DownloaderError::HttpError(format!("failed to build HTTP client: {e}")))?;
+            .map_err(|e| {
+                error!(download_id = %id, error = %e, "Failed to build HTTP client");
+                DownloaderError::HttpError(format!("failed to build HTTP client: {e}"))
+            })?;
 
         let mut req = client.get(&job.stream_url);
         // Inject headers that googlevideo validates: Referer/Origin/Accept.
@@ -236,6 +261,8 @@ impl Downloader {
                 injected.insert(k.clone(), v.clone());
             }
         }
+        let injected_keys = injected.keys().cloned().collect::<Vec<_>>().join(",");
+        info!(download_id = %id, host = %host, injected = %injected_keys, start_byte = start_byte, "Sending GET for stream");
         for (k, v) in injected {
             req = req.header(k, v);
         }
@@ -244,10 +271,32 @@ impl Downloader {
         }
         let mut res = tokio::time::timeout(Duration::from_secs(30), req.send())
             .await
-            .map_err(|_| DownloaderError::HttpError("request timed out (30s)".to_string()))?
-            .map_err(|e| DownloaderError::HttpError(format!("request failed: {e}")))?;
+            .map_err(|_| {
+                let msg = format!("request timed out after 30s [{host}] start_byte={start_byte} url={url_snip}");
+                error!(download_id = %id, host = %host, start_byte = start_byte, "Request timeout (30s)");
+                warn!(download_id = %id, "DIAGNOSTIC download_timeout id={} host={} start_byte={} url={} ua={}", id, host, start_byte, url_snip, ua);
+                DownloaderError::HttpError(msg)
+            })?
+            .map_err(|e| {
+                let msg = format!("request failed [{host}] start_byte={start_byte}: {e} (url={url_snip})");
+                error!(download_id = %id, host = %host, error = %e, "Request failed");
+                DownloaderError::HttpError(msg)
+            })?;
 
-        let resuming = start_byte > 0 && res.status().as_u16() == 206;
+        let status = res.status();
+        let resuming = start_byte > 0 && status.as_u16() == 206;
+        let ct = res
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-")
+            .to_string();
+        let cl_hdr = res
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-")
+            .to_string();
 
         let total: Option<u64> = if resuming {
             res.headers()
@@ -260,11 +309,33 @@ impl Downloader {
             res.content_length()
         };
 
-        if !res.status().is_success() && res.status().as_u16() != 206 {
-            return Err(DownloaderError::HttpError(format!(
-                "HTTP status {}",
-                res.status()
-            )));
+        info!(download_id = %id, host = %host, status = %status, content_type = %ct, content_length = %cl_hdr, total = ?total, resuming = resuming, "Received response headers");
+
+        if !status.is_success() && status.as_u16() != 206 {
+            let body_snip = match tokio::time::timeout(Duration::from_secs(5), res.text()).await {
+                Ok(Ok(t)) => {
+                    let s = t.chars().take(500).collect::<String>().replace('\n', " ");
+                    if s.is_empty() {
+                        "(empty body)".to_string()
+                    } else {
+                        s
+                    }
+                }
+                Ok(Err(e)) => format!("(failed to read body: {e})"),
+                Err(_) => "(body read timed out)".to_string(),
+            };
+            let hint = match status.as_u16() {
+                403 => " — 403 Forbidden: googlevideo rejected UA/Referer/Origin or URL expired (try re-resolving; check that headers match InnerTube client)",
+                404 => " — 404: URL expired or invalid (re-resolve the video)",
+                416 => " — 416 Range Not Satisfiable: resume offset beyond file size (will retry from 0)",
+                429 => " — 429 Too Many Requests: rate-limited, retry later",
+                500..=599 => " — server error, retry later",
+                _ => "",
+            };
+            let msg = format!("HTTP {status} [{host}]{hint} body: {body_snip} (url={url_snip}, start_byte={start_byte}, ct={ct})");
+            error!(download_id = %id, host = %host, status = %status, body = %body_snip, "HTTP error response");
+            warn!(download_id = %id, "DIAGNOSTIC download_http_error id={} host={} status={} ct={} hint={} body={} url={}", id, host, status, ct, hint, body_snip, url_snip);
+            return Err(DownloaderError::HttpError(msg));
         }
 
         {
@@ -285,18 +356,28 @@ impl Downloader {
                 .create(true)
                 .append(true)
                 .open(&job.output_path)
-                .await?
+                .await
+                .map_err(|e| {
+                    error!(download_id = %id, path = ?job.output_path, error = %e, "Failed to open file for append (resume)");
+                    DownloaderError::IoError(e)
+                })?
         } else {
             tokio::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
                 .open(&job.output_path)
-                .await?
+                .await
+                .map_err(|e| {
+                    error!(download_id = %id, path = ?job.output_path, error = %e, "Failed to create/truncate output file");
+                    DownloaderError::IoError(e)
+                })?
         };
 
         if !resuming {
-            file.seek(SeekFrom::Start(0)).await?;
+            if let Err(e) = file.seek(SeekFrom::Start(0)).await {
+                warn!(download_id = %id, error = %e, "Seek to start failed (non-fatal)");
+            }
         }
 
         let start_instant = Instant::now();
@@ -306,17 +387,33 @@ impl Downloader {
             let chunk_opt = tokio::time::timeout(Duration::from_secs(30), res.chunk())
                 .await
                 .map_err(|_| {
-                    DownloaderError::HttpError("stream stalled: no data for 30s".to_string())
+                    let elapsed = start_instant.elapsed().as_secs();
+                    let msg = format!("stream stalled: no data for 30s [{host}] downloaded={downloaded}/{:?} elapsed={elapsed}s (url={url_snip})", total);
+                    error!(download_id = %id, host = %host, downloaded = downloaded, total = ?total, elapsed = elapsed, "Stream stalled (30s timeout)");
+                    warn!(download_id = %id, "DIAGNOSTIC download_stalled id={} host={} downloaded={}/{:?} elapsed={}s url={}", id, host, downloaded, total, elapsed, url_snip);
+                    DownloaderError::HttpError(msg)
                 })?
-                .map_err(|e| DownloaderError::HttpError(format!("stream read error: {e}")))?;
+                .map_err(|e| {
+                    let msg = format!("stream read error [{host}] downloaded={downloaded}/{:?}: {e} (url={url_snip})", total);
+                    error!(download_id = %id, host = %host, error = %e, downloaded = downloaded, "Stream read error");
+                    DownloaderError::HttpError(msg)
+                })?;
 
             let Some(chunk) = chunk_opt else { break };
             if chunk.is_empty() {
                 continue;
             }
-            file.write_all(&chunk)
-                .await
-                .map_err(DownloaderError::IoError)?;
+            if let Err(e) = file.write_all(&chunk).await {
+                error!(download_id = %id, path = ?job.output_path, error = %e, chunk_len = chunk.len(), "File write failed");
+                warn!(download_id = %id, "DIAGNOSTIC download_io_error id={} path={:?} error={} downloaded={}", id, job.output_path, e, downloaded);
+                return Err(DownloaderError::DownloadFailed(format!(
+                    "failed to write {} bytes to {:?}: {e} (downloaded={}/{:?})",
+                    chunk.len(),
+                    job.output_path,
+                    downloaded,
+                    total
+                )));
+            }
             downloaded += chunk.len() as u64;
 
             let elapsed = start_instant.elapsed().as_secs_f64();

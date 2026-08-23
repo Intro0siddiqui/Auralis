@@ -10,7 +10,7 @@ use crate::infrastructure::media::downloader::{Downloader, StreamDownload};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 /// A single resolved download request.
@@ -52,9 +52,19 @@ pub async fn download_audio(
     app: AppHandle,
     downloader: State<'_, Downloader>,
 ) -> Result<DownloadProgress, String> {
-    info!(url = %request.url, "Download audio requested");
+    let host = request.url.split('/').nth(2).unwrap_or("unknown");
+    let hdr_keys = request
+        .headers
+        .as_ref()
+        .map(|h| h.keys().cloned().collect::<Vec<_>>().join(","))
+        .unwrap_or_else(|| "-".to_string());
+    info!(url = %request.url, host = %host, title = %request.title, platform = ?request.platform, ext = ?request.ext, total_bytes = ?request.total_bytes, headers = %hdr_keys, "Download audio requested");
+    if request.url.len() > 200 {
+        tracing::debug!(url = %request.url, headers = ?request.headers, "Full download request");
+    }
 
     if !request.url.starts_with("https://") {
+        error!(url = %request.url, "Rejected non-HTTPS download request");
         return Err("Only secure HTTPS URLs are supported".to_string());
     }
 
@@ -72,13 +82,13 @@ pub async fn download_audio(
             .clone()
             .unwrap_or_else(|| format.extension().to_string()),
         total_bytes: request.total_bytes,
-        thumbnail: request.thumbnail,
-        headers: request.headers,
+        thumbnail: request.thumbnail.clone(),
+        headers: request.headers.clone(),
     };
 
     let id = downloader.download(stream).await.map_err(|e| {
-        error!(error = %e, "Failed to start download");
-        e.to_string()
+        error!(url = %request.url, host = %host, title = %request.title, error = %e, "Failed to start download — check logs for DIAGNOSTIC");
+        format!("Failed to start download [{host}]: {e}")
     })?;
 
     let state = downloader
@@ -87,12 +97,15 @@ pub async fn download_audio(
         .ok_or("Download not found after starting")?;
 
     // Stream progress + completion events to the frontend while the
-    // download task runs.
+    // download task runs. On failure the `error` field already contains
+    // a verbose diagnostic (HTTP status + body snippet + host) built in
+    // run_stream — it is emitted verbatim so the JS toast/logcat can show it.
     let app_handle = app.clone();
     let dl = (*downloader).clone();
+    let emit_id = id;
     tauri::async_runtime::spawn(async move {
         loop {
-            match dl.get_progress(id).await {
+            match dl.get_progress(emit_id).await {
                 Some(progress) => {
                     let _ = app_handle.emit("download:progress", &progress);
                     if matches!(
@@ -101,7 +114,31 @@ pub async fn download_audio(
                             | DownloadStatus::Failed
                             | DownloadStatus::Cancelled
                     ) {
+                        if progress.status == DownloadStatus::Failed {
+                            let host = progress.url.split('/').nth(2).unwrap_or("unknown");
+                            error!(download_id = %emit_id, host = %host, title = %progress.title, error = ?progress.error, url = %progress.url, downloaded = progress.downloaded_bytes, total = ?progress.total_bytes, "Emitting download:completed (failed) — DIAGNOSTIC visible to frontend/logcat");
+                            warn!(download_id = %emit_id, "DIAGNOSTIC download_completed_failed id={} host={} title={} error={:?} downloaded={}/{:?} url={}", emit_id, host, progress.title, progress.error, progress.downloaded_bytes, progress.total_bytes, progress.url);
+                        } else {
+                            info!(download_id = %emit_id, status = %progress.status, "Emitting download:completed");
+                        }
                         let _ = app_handle.emit("download:completed", &progress);
+                        // Also emit a dedicated diagnostic event so even if the
+                        // frontend misses `completed`, the JS console (mirrored to
+                        // logcat via webview-log-js-console-messages) still shows it.
+                        if progress.status == DownloadStatus::Failed {
+                            let diag = format!(
+                                "DIAGNOSTIC download_failed id={} host={} title={} status={} error={:?} downloaded={}/{:?} url={}",
+                                emit_id,
+                                progress.url.split('/').nth(2).unwrap_or("unknown"),
+                                progress.title,
+                                progress.status,
+                                progress.error,
+                                progress.downloaded_bytes,
+                                progress.total_bytes,
+                                progress.url
+                            );
+                            let _ = app_handle.emit("download:diagnostic", diag);
+                        }
                         break;
                     }
                 }

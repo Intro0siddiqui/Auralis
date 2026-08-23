@@ -62,11 +62,51 @@ export const coreMethods = {
                         this.showToast(`Download complete: ${(p && p.title) || 'Audio track'}`, 'success');
                         this.scanLibrary();
                     } else if (p && p.status === 'failed') {
-                        this.showToast(`Download failed: ${p.error_message || 'Stream error'}`, 'error');
+                        const rawErr = p.error || p.error_message || 'Stream error';
+                        // Fix: backend field is `error`, not `error_message` — support both.
+                        // Truncate for toast but keep full error in console/UI.
+                        const toastMsg = rawErr.length > 180 ? rawErr.slice(0, 180) + '…' : rawErr;
+                        const host = (() => { try { return new URL(p.url || '').host || 'unknown'; } catch (_) { return 'unknown'; } })();
+                        this.showToast(`Download failed [${host}]: ${toastMsg}`, 'error', 8000);
+                        // Verbose, mirrored to logcat via webview-log-js-console-messages (chromium tag)
+                        console.groupCollapsed(`%c[Download Failed] ${p.title || p.url || 'unknown'}`, 'color:#ff4d4f;font-weight:bold');
+                        console.error('DIAGNOSTIC download_failed', {
+                            id: p.id,
+                            title: p.title,
+                            url: p.url,
+                            host,
+                            status: p.status,
+                            error: rawErr,
+                            downloaded: p.downloaded_bytes,
+                            total: p.total_bytes,
+                            progress: p.progress,
+                            platform: p.platform,
+                            format: p.format,
+                            output_path: p.output_path,
+                        });
+                        console.error(`Full error: ${rawErr}`);
+                        console.error(`URL: ${p.url}`);
+                        console.error(`Hint: ${rawErr.includes('403') ? '403 Forbidden — googlevideo rejected UA/Referer. This download used headers from youtube.js winningClient; check that UA matches InnerTube client. Try re-resolving the video (URL expires ~6h) and retry. If 404/416, URL expired. If stalled, check network.' : rawErr.includes('timeout') ? 'Timeout — network stalled or host unreachable. Check connection & retry.' : 'See error body above; copy the full message from the Downloads list.'}`);
+                        console.groupEnd();
+                        // Keep a persistent in-memory log for "Copy diagnostics" button
+                        try {
+                            window.__auralisDownloadDiagnostics = window.__auralisDownloadDiagnostics || [];
+                            window.__auralisDownloadDiagnostics.push({ at: new Date().toISOString(), payload: p, rawErr });
+                            if (window.__auralisDownloadDiagnostics.length > 50) window.__auralisDownloadDiagnostics.shift();
+                        } catch (_) {}
+                    } else if (p && p.status === 'cancelled') {
+                        this.showToast(`Download cancelled: ${p.title || 'track'}`, 'info');
                     }
                     if (p) {
                         this.updateDownloadProgressUI(p);
                     }
+                });
+
+                await tauriListen('download:diagnostic', (event) => {
+                    const msg = typeof event.payload === 'string' ? event.payload : JSON.stringify(event.payload);
+                    console.error(`[download:diagnostic] ${msg}`);
+                    // also keep for adb logcat visibility
+                    console.warn(`DIAGNOSTIC ${msg}`);
                 });
 
                 // Listen for scan progress events during background or folder scan

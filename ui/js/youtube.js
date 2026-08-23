@@ -356,11 +356,16 @@ class YouTubeResolver {
             try {
                 const bi = await client.getBasicInfo(videoId);
                 if (bi && bi.streaming_data) info = bi;
-            } catch (_) {}
+            } catch (e) {
+                console.warn('[YouTubeResolver] getBasicInfo fallback failed:', e?.message || e);
+            }
         }
 
         if (!info) {
-            throw new Error(`Failed to retrieve video stream: ${lastErr?.message || 'Video unavailable'}`);
+            const msg = `Failed to retrieve video stream: ${lastErr?.message || 'Video unavailable'} (videoId=${videoId}, tried 6 InnerTube clients; last status was checked via actions.execute/getInfo — check log above for per-client status, and ensure device has network + valid YouTube cookie/PO token if age-restricted)`;
+            console.error(`DIAGNOSTIC youtube_resolve_failed videoId=${videoId} error=${msg} lastErr=${lastErr?.message || lastErr}`);
+            console.error(lastErr);
+            throw new Error(msg);
         }
 
         const bi = info.basic_info || {};
@@ -399,7 +404,11 @@ class YouTubeResolver {
             fmt = allCandidates.find((f) => f && f.has_audio) || allCandidates[0];
         }
 
-        if (!fmt) throw new Error('No audio stream found for this video');
+        if (!fmt) {
+            const diag = `No audio stream found for ${videoId}: all=${allCandidates.length} audioCandidates=${audioCandidates.length} streaming_data keys=${Object.keys(sd||{}).join(',')} (winningClient=${winningClient || 'none'}). This usually means YouTube returned no adaptive_formats — video may be private/age-restricted/region-blocked or Innertube throttling LOGIN_REQUIRED. Try another client or set youtube_cookie/po_token in Settings.`;
+            console.error(`DIAGNOSTIC no_audio_stream ${diag}`);
+            throw new Error(diag);
+        }
 
         let streamUrl = fmt.url;
         if (!streamUrl && typeof fmt.decipher === 'function' && client.session?.player) {
@@ -489,7 +498,11 @@ class YouTubeResolver {
             } catch (_) {}
         }
 
-        if (!streamUrl) throw new Error('Unable to extract playable audio URL');
+        if (!streamUrl) {
+            const diag = `Unable to extract playable audio URL for ${videoId}: fmt keys=${fmt ? Object.keys(fmt).join(',') : 'no fmt'} url=${fmt?.url?'has url':''} cipher=${fmt?.signature_cipher||fmt?.cipher?'has cipher':''} decipher=${typeof fmt?.decipher} (winningClient=${winningClient}) — check that headers/UA match and n/s decipher succeeded; see logs above.`;
+            console.error(`DIAGNOSTIC no_stream_url ${diag}`);
+            throw new Error(diag);
+        }
 
         const ext = this.extFromMime(fmt.mime_type);
         const title = String(bi.title || 'YouTube Audio').trim() || 'YouTube Audio';

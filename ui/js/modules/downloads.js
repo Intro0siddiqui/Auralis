@@ -42,9 +42,21 @@ export const downloadMethods = {
 
     async downloadResolvedTrack(resolved, format) {
         if (!resolved || resolved.kind !== 'track') throw new Error('Not a downloadable track');
-        const result = await this.invoke('download_audio', this.buildDownloadPayload(resolved, format));
-        if (result) this.updateDownloadProgressUI(result);
-        return result;
+        try {
+            const payload = this.buildDownloadPayload(resolved, format);
+            console.log('[Downloads] Invoking download_audio', { title: resolved.title, url: resolved.stream_url?.slice(0,120), host: (()=>{try{return new URL(resolved.stream_url).host}catch(_){return 'unknown'}})(), headers: Object.keys(resolved.headers||{}), client: resolved.client });
+            const result = await this.invoke('download_audio', payload);
+            if (result) this.updateDownloadProgressUI(result);
+            return result;
+        } catch (err) {
+            const msg = typeof err === 'string' ? err : (err && err.message ? err.message : String(err));
+            console.groupCollapsed(`%c[download_audio invoke failed] ${resolved.title || resolved.stream_url}`, 'color:#ff4d4f');
+            console.error('DIAGNOSTIC download_invoke_failed', { resolved, format, error: msg, stack: err && err.stack });
+            console.error(err);
+            console.groupEnd();
+            this.showToast(`Download start failed: ${msg}`, 'error', 7000);
+            throw err;
+        }
     },
 
     async loadDownloadView() {
@@ -84,8 +96,14 @@ export const downloadMethods = {
                     urlInput.value = '';
                 }
             } catch (err) {
+                const msg = err && err.message ? err.message : String(err);
+                console.groupCollapsed(`%c[YouTube Resolve Failed] ${url}`, 'color:#ff7a45');
+                console.error('DIAGNOSTIC resolve_failed', { url, opts, error: msg, stack: err && err.stack });
                 console.error(err);
-                this.showToast(`Resolve failed: ${err && err.message ? err.message : err}`, 'error');
+                console.groupEnd();
+                // Also push to global diagnostics for copy
+                try { window.__auralisDownloadDiagnostics = window.__auralisDownloadDiagnostics || []; window.__auralisDownloadDiagnostics.push({ at: new Date().toISOString(), kind: 'resolve_failed', url, error: msg }); } catch (_) {}
+                this.showToast(`Resolve failed: ${msg}`, 'error', 6000);
             }
         });
 
@@ -132,8 +150,10 @@ export const downloadMethods = {
             `).join('');
             if (window.lucide) window.lucide.createIcons();
         } catch (err) {
+            const msg2 = err && err.message ? err.message : String(err);
+            console.error('DIAGNOSTIC search_failed', { query, error: msg2, stack: err && err.stack });
             console.error(err);
-            this.showToast(`Search failed: ${err && err.message ? err.message : err}`, 'error');
+            this.showToast(`Search failed: ${msg2}`, 'error', 6000);
         }
     },
 
@@ -150,8 +170,10 @@ export const downloadMethods = {
             const result = await this.downloadResolvedTrack(resolved, 'm4a');
             if (result) this.showToast('Download started!', 'success');
         } catch (err) {
+            const m = err && err.message ? err.message : String(err);
+            console.error('DIAGNOSTIC downloadSearchResult failed', { item, error: m, stack: err && err.stack });
             console.error(err);
-            this.showToast(`Resolve failed: ${err && err.message ? err.message : err}`, 'error');
+            this.showToast(`Resolve failed: ${m}`, 'error', 6000);
         }
     },
 
@@ -196,14 +218,39 @@ export const downloadMethods = {
         }
 
         const pct = Math.round((progress.progress || 0) * 100);
+        const errRaw = progress.error || progress.error_message || '';
+        const isFailed = progress.status === 'failed';
+        const isCompleted = progress.status === 'completed';
+        if (isFailed) {
+            row.classList.add('download-failed');
+            row.style.borderLeft = '3px solid #ff4d4f';
+            // Log again for logcat visibility (progress event mirrors diagnostic)
+            console.error(`[Downloads UI] DIAGNOSTIC failed row id=${progress.id} title=${progress.title} error=${errRaw} url=${progress.url}`);
+        } else {
+            row.classList.remove('download-failed');
+            row.style.borderLeft = '';
+        }
+        const host = (() => { try { return new URL(progress.url || '').host || ''; } catch (_) { return ''; } })();
+        const subtitle = isFailed
+            ? `<span style="color:#ff4d4f;font-weight:600">failed • ${host ? host + ' • ' : ''}${pct}%</span>`
+            : `${this.escapeHtml(progress.status)}${host ? ' • ' + this.escapeHtml(host) : ''} • ${pct}%`;
+        const errBlock = isFailed && errRaw
+            ? `<div style="margin-top:6px;padding:8px 10px;background:rgba(255,77,79,0.08);border:1px solid rgba(255,77,79,0.25);border-radius:8px;font-family:monospace;font-size:11px;line-height:1.4;white-space:pre-wrap;word-break:break-all;user-select:text;max-height:120px;overflow:auto;color:var(--text-2)">${this.escapeHtml(errRaw)}</div>
+               <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                 <button type="button" class="btn btn-secondary btn-sm" onclick="navigator.clipboard&&navigator.clipboard.writeText(${JSON.stringify(errRaw).replace(/"/g,'&quot;')}).then(()=>window.Auralis&&window.Auralis.bridge&&window.Auralis.bridge.showToast&&window.Auralis.bridge.showToast('Copied error to clipboard','success')).catch(()=>window.Auralis&&window.Auralis.bridge&&window.Auralis.bridge.showToast&&window.Auralis.bridge.showToast('Copy failed','error'))" title="Copy full error (for bug report)">Copy error</button>
+                 <span style="font-size:11px;color:var(--text-3)">${errRaw.includes('403') ? '403: re-resolve the video (URL expired or UA mismatch). Check Settings → YouTube cookie/PO token.' : errRaw.includes('timeout') || errRaw.includes('stalled') ? 'Network timeout — retry on stable connection.' : errRaw.includes('404') ? 'URL expired — resolve again.' : 'Tap Copy and include in bug report; also check adb logcat chromium.'}</span>
+               </div>`
+            : '';
+        const pctBar = isFailed
+            ? `<div class="progress-track neu-inset" style="width:120px;height:6px;opacity:0.5"><div class="progress-fill" style="width:${pct}%;background:#ff4d4f;height:100%"></div></div>`
+            : `<div class="progress-track neu-inset" style="width: 120px; height: 6px;"><div class="progress-fill" style="width: ${pct}%; background: var(--accent); height: 100%;"></div></div>`;
         row.innerHTML = `
-            <div class="track-row-info">
-                <div class="track-row-title">${this.escapeHtml(progress.title || progress.url || 'Downloading...')}</div>
-                <div class="track-row-subtitle">${progress.status} • ${pct}%</div>
+            <div class="track-row-info" style="min-width:0;flex:1">
+                <div class="track-row-title" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${this.escapeHtml(progress.title || progress.url || 'Downloading...')}</div>
+                <div class="track-row-subtitle">${subtitle}</div>
+                ${errBlock}
             </div>
-            <div class="progress-track neu-inset" style="width: 120px; height: 6px;">
-                <div class="progress-fill" style="width: ${pct}%; background: var(--accent); height: 100%;"></div>
-            </div>
+            ${pctBar}
         `;
     },
 
