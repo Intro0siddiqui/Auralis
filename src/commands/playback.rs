@@ -470,7 +470,7 @@ async fn lookup_track(
                 disc_number: row.get(8)?,
                 duration_secs: row.get(9)?,
                 file_path: row.get(10)?,
-                file_size: row.get(11)?,
+                file_size: row.get::<_, i64>(11)? as u64,
                 format: parse_format(&row.get::<_, String>(12)?),
                 bitrate: row.get(13)?,
                 sample_rate: row.get(14)?,

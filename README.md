@@ -15,7 +15,7 @@ A lightweight, offline-first music player with integrated media downloading and 
 | **Desktop runtime** | JVM (100MB+) | **Tauri (system WebView, < 50MB)** |
 | **Mobile runtime** | Android (ExoPlayer) | **Tauri Android v2** |
 | **Database** | SQLDelight (SQLite) | **SQLite via `rusqlite`** |
-| **Media engine** | `yt-dlp` external | **`rusty_ytdl` (pure-Rust) with optional `yt-dlp` fallback** |
+| **Media engine** | `yt-dlp` external | **`youtubei.js` resolver + pure-Rust `reqwest` streaming (no external binaries)** |
 
 The rewrite trades the JVM's startup cost and Compose's runtime overhead for a tiny, single-binary distribution that targets both desktop and mobile from one codebase.
 
@@ -27,7 +27,7 @@ The rewrite trades the JVM's startup cost and Compose's runtime overhead for a t
 | :--- | :--- | :--- |
 | **Music Library** | Implemented | SQLite-backed; scanner extracts metadata via lofty |
 | **Audio Playback** | Implemented | rodio with queue, shuffle, repeat, seek |
-| **Media Downloading** | Implemented | `rusty_ytdl` native stream + optional `yt-dlp` fallback, with progress tracking |
+| **Media Downloading** | Implemented | `youtube.js` URL resolution + `reqwest` streaming, progress tracking, pause/resume/cancel |
 | **Playlist Management** | Implemented | Full CRUD with SQLite persistence |
 | **P2P Networking** | Implemented | libp2p with mDNS, gossipsub, request-response |
 | **Settings** | Implemented | SQLite-backed load/save |
@@ -79,7 +79,7 @@ auralis-v2/
 │   ├── infrastructure/     # External integrations
 │   │   ├── database/       # SQLite + rusqlite
 │   │   ├── filesystem/     # Track scanner + metadata
-│   │   ├── media/          # AudioPlayer (rodio/cpal/oboe) + Downloader (rusty_ytdl / optional yt-dlp)
+│   │   ├── media/          # AudioPlayer (rodio/cpal/oboe) + Downloader (reqwest streaming of resolved URLs)
 │   │   └── network.rs      # libp2p: mDNS, gossipsub, request-response
 │   ├── commands/           # Tauri command handlers
 │   │   ├── library.rs
@@ -107,10 +107,10 @@ The architecture is **Domain-Driven**: the `domain` layer is pure Rust types and
 ## Building
 
 ### Prerequisites
-- **Rust** 1.75 or newer
+- **Rust** 1.89 or newer (lofty's MSRV)
 - **Node.js** (only for the dev server / hot-reload)
 - **Tauri v2 prerequisites** — see <https://v2.tauri.app/start/prerequisites/>
-- **yt-dlp** (optional) on the system PATH for non-YouTube sites (SoundCloud, Bandcamp). YouTube audio uses the built-in pure-Rust `rusty_ytdl` engine and needs no external binary.
+- Node.js is only needed for the JS E2E test scripts (`scripts/tests/*.js`). YouTube audio needs no external binary — the built-in `youtube.js` resolver plus Rust `reqwest` streaming handle everything on-device.
 
 ### Commands
 
@@ -172,11 +172,10 @@ See [AGENTS.md](AGENTS.md) for detailed implementation guidelines and the roadma
 
 ## Media Downloading (Pure-Rust Engine)
 
-Auralis v2 features a **pure-Rust asynchronous media downloader** with zero mandatory external binaries:
+Auralis v2 features a **pure-Rust media downloader** with zero mandatory external binaries:
 
-- **Native YouTube Audio (`rusty_ytdl`)**: Connects directly to YouTube's streaming protocol asynchronously in Rust, extracts high-bitrate audio, and streams it straight to storage. Runs natively on Android, Windows, macOS, and Linux without Python.
-- **Native Direct Audio Streaming (`reqwest`)**: Downloads direct HTTPS audio files (`.mp3`, `.flac`, `.m4a`, `.wav`, `.aac`, podcast streams) natively with live byte progress tracking.
-- **Optional CLI Fallback (`yt-dlp`)**: If `yt-dlp` is installed on your system `PATH`, desktop platforms can also extract audio from third-party sites like SoundCloud and Bandcamp.
+- **YouTube resolution (`youtube.js`, vendored `youtubei.js`)**: Runs in the app's webview and resolves a direct `googlevideo` audio URL using PO-token-aware InnerTube clients, with client-matched headers.
+- **Native Direct Audio Streaming (`reqwest`)**: Streams the resolved URL (and direct HTTPS audio files — `.mp3`, `.flac`, `.m4a`, `.wav`, `.aac`) natively in Rust with live byte progress tracking. No Python, no sidecar.
 
 ---
 

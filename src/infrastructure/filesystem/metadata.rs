@@ -102,7 +102,8 @@ impl MetadataExtractor {
     }
 
     fn get_year(tag: &dyn lofty::tag::Accessor) -> Option<i32> {
-        tag.year().map(|y| y as i32)
+        // `Accessor::date()` already falls back to a raw `ItemKey::Year` string
+        tag.date().map(|ts| ts.year as i32)
     }
 
     fn get_track_number(tag: &dyn lofty::tag::Accessor) -> Option<u32> {

@@ -1,12 +1,12 @@
 [package]
 name = "auralis"
-version = "2.5.1"
+version = "2.5.2"
 edition = "2021"
 authors = ["Auralis Team"]
 description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
 license = "MIT"
 repository = "https://github.com/Intro0siddiqui/Auralis"
-rust-version = "1.75"
+rust-version = "1.89"
 readme = "README.md"
 default-run = "auralis"
 
@@ -28,7 +28,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # Core async runtime
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "io-util", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "io-util", "fs", "time"] }
 futures = "0.3"
 async-trait = "0.1"
 
@@ -41,12 +41,12 @@ tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled", "chrono", "uuid"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
@@ -57,28 +57,28 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
-thiserror = "1"
-dirs = "5"
+thiserror = "2"
+dirs = "6"
 hostname = "0.4"
-rand = "0.8"
+rand = "0.10"
 
 # P2P networking (light use — main runtime would be libp2p over IPC)
 # `macros` enables the NetworkBehaviour derive; `json` enables the serde_json
 # request-response codec for sync payload transfer.
-libp2p = { version = "0.54", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "json"] }
+libp2p = { version = "0.56", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "json"] }
 
 # QR code generation
 qrcode = "0.14"
 # Image decoding for metadata/artwork & icons
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }
-base64 = "0.22"
+base64 = "0.23"
 
 # Audio playback
 # rodio 0.22 uses high-level format features that handle both the codec 
 # and the container parser (e.g., isomp4 for m4a).
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "flac", "vorbis", "wav"] }
 # Audio metadata
-lofty = "0.21"
+lofty = "0.25"
 
 # Filesystem globbing
 glob = "0.3"

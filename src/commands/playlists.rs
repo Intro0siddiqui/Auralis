@@ -439,8 +439,8 @@ pub async fn create_smart_playlist(
     });
 
     if matches!(criteria.sort_by, SmartSortField::Random) {
-        use rand::seq::SliceRandom;
-        tracks.shuffle(&mut rand::thread_rng());
+        use rand::prelude::*;
+        tracks.shuffle(&mut rand::rng());
     }
 
     let track_ids = tracks

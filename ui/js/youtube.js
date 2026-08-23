@@ -250,10 +250,12 @@ class YouTubeResolver {
             return all.some((f) => isAudioFormat(f) && Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
         };
 
-        // 1. First attempt: Direct raw player API query with reliable client contexts (IOS, ANDROID, ANDROID_VR, TV, MWEB, WEB)
-        // This directly fetches raw streamingData with unthrottled HTTPS audio stream URLs without parser overhead.
+        // 1. First attempt: Direct raw player API query.
+        // 2026 PO-token enforcement: IOS/ANDROID require poToken for GVS (403 otherwise, empty body),
+        // while TV / ANDROID_VR do not (see yt-dlp PO Token Guide). Prefer no-token clients when opts.poToken missing.
+        const orderedClients = opts.poToken ? ['IOS','ANDROID','ANDROID_VR','TV','MWEB','WEB'] : ['TV','ANDROID_VR','MWEB','WEB','IOS','ANDROID'];
         if (client.actions?.execute) {
-            for (const cl of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
+            for (const cl of orderedClients) {
                 try {
                     const raw = await client.actions.execute('/player', { videoId, client: cl });
                     const st = raw?.data?.playabilityStatus?.status;
@@ -311,20 +313,13 @@ class YouTubeResolver {
             }
         }
 
-        // 2. Second attempt: High-level Innertube getInfo fallback
+        // 2. Second attempt: High-level Innertube getInfo fallback (same PO-token-aware order)
         if (!info) {
-            const clientAttempts = [
-                async () => client.getInfo(videoId, { client: 'IOS' }),
-                async () => client.getInfo(videoId, { client: 'ANDROID' }),
-                async () => client.getInfo(videoId, { client: 'ANDROID_VR' }),
-                async () => client.getInfo(videoId, { client: 'TV' }),
-                async () => client.getInfo(videoId, { client: 'MWEB' }),
-                async () => client.getInfo(videoId, { client: 'WEB' }),
-            ];
+            const clientNames = orderedClients;
+            const clientAttempts = clientNames.map((cl) => async () => client.getInfo(videoId, { client: cl }));
 
             let fallbackInfo = null;
             let fallbackClient = null;
-            const clientNames = ['IOS','ANDROID','ANDROID_VR','TV','MWEB','WEB'];
             for (let i = 0; i < clientAttempts.length; i++) {
                 const attempt = clientAttempts[i];
                 try {

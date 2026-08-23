@@ -217,10 +217,12 @@ pub struct PairingInfo {
 impl PairingInfo {
     /// Generate a new pairing request
     pub fn generate() -> Self {
-        use rand::Rng;
+        use rand::prelude::*;
 
-        let mut rng = rand::thread_rng();
-        let pin: String = (0..6).map(|_| rng.gen_range(0..10).to_string()).collect();
+        let mut rng = rand::rng();
+        let pin: String = (0..6)
+            .map(|_| rng.random_range(0..10).to_string())
+            .collect();
 
         let qr_data = format!("auralis://pair?pin={}", pin);
 

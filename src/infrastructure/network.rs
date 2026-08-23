@@ -742,7 +742,11 @@ async fn handle_swarm_event(
             *last = Some(message.data);
         }
         SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
-            request_response::Event::Message { peer, message },
+            request_response::Event::Message {
+                peer,
+                message,
+                connection_id: _,
+            },
         )) => match message {
             request_response::Message::Request {
                 request, channel, ..
