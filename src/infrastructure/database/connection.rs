@@ -219,7 +219,9 @@ impl Database {
         match self.connection.try_lock() {
             Ok(g) => Some(g),
             Err(_) => {
-                tracing::warn!("Database mutex contended; caller should retry or use blocking lock");
+                tracing::warn!(
+                    "Database mutex contended; caller should retry or use blocking lock"
+                );
                 None
             }
         }

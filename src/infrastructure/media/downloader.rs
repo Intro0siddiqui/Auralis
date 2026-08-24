@@ -92,16 +92,11 @@ fn sanitize_ext(raw: &str, fallback: &str) -> String {
     let t = raw.trim().trim_start_matches('.').to_ascii_lowercase();
     // must be purely alphanumeric and on allow-list — any slash, dot, or
     // control char causes fallback (prevents traversal like "../../etc")
-    let is_clean = !t.is_empty()
-        && t.len() <= 8
-        && t.chars().all(|c| c.is_ascii_alphanumeric());
+    let is_clean = !t.is_empty() && t.len() <= 8 && t.chars().all(|c| c.is_ascii_alphanumeric());
     if is_clean && ALLOWED_EXTS.contains(&t.as_str()) {
         return t;
     }
-    let fb = fallback
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase();
+    let fb = fallback.trim().trim_start_matches('.').to_ascii_lowercase();
     let fb_clean: String = fb.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     if ALLOWED_EXTS.contains(&fb_clean.as_str()) {
         fb_clean
@@ -115,10 +110,7 @@ fn sanitize_ext(raw: &str, fallback: &str) -> String {
 /// limits length to 200 chars. Never returns empty or "." / "..".
 fn sanitize_filename(name: &str) -> String {
     // Take basename only — strip any directory components
-    let base = name
-        .rsplit(&['/', '\\'][..])
-        .next()
-        .unwrap_or(name);
+    let base = name.rsplit(&['/', '\\'][..]).next().unwrap_or(name);
     // Remove control chars then replace unsafe chars
     let filtered: String = base.chars().filter(|c| !c.is_control()).collect();
     let cleaned: String = filtered
@@ -144,9 +136,8 @@ fn sanitize_filename(name: &str) -> String {
     // Windows reserved device names
     let lower = trimmed.to_ascii_lowercase();
     const RESERVED: &[&str] = &[
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6",
-        "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7",
-        "lpt8", "lpt9",
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
     ];
     if RESERVED.contains(&lower.as_str()) {
         return format!("{}_{}", trimmed, "track");

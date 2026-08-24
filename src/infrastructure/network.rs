@@ -404,7 +404,11 @@ impl Discovery {
     }
 
     /// Bind a PairedDevice UUID to a discovered PeerId (in-memory alias).
-    pub async fn link_device_peer(&self, device_id: &str, peer_id_str: &str) -> Result<(), NetworkError> {
+    pub async fn link_device_peer(
+        &self,
+        device_id: &str,
+        peer_id_str: &str,
+    ) -> Result<(), NetworkError> {
         let pid = PeerId::from_str(peer_id_str)
             .map_err(|_| NetworkError::PeerNotFound(peer_id_str.to_string()))?;
         self.runtime
@@ -516,7 +520,11 @@ impl SyncEngine {
 
     /// Bind a PairedDevice UUID to its real PeerId after discovery/pairing.
     /// Required because `PairedDevice.id` is a UUID, not a PeerId.
-    pub async fn link_device_peer(&self, device_id: &str, peer_id_str: &str) -> Result<(), NetworkError> {
+    pub async fn link_device_peer(
+        &self,
+        device_id: &str,
+        peer_id_str: &str,
+    ) -> Result<(), NetworkError> {
         let pid = PeerId::from_str(peer_id_str)
             .map_err(|_| NetworkError::PeerNotFound(peer_id_str.to_string()))?;
         self.runtime
@@ -723,8 +731,11 @@ async fn run_swarm(
     // Shared pending map so timeout tasks can clean up the entry even when the
     // caller dropped its `reply_rx` after a 30s timeout. Previously a timed-out
     // request leaked forever (never removed until a late response arrived).
-    let pending: Arc<TokioMutex<HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>>> =
-        Arc::new(TokioMutex::new(HashMap::new()));
+    let pending: Arc<
+        TokioMutex<
+            HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>,
+        >,
+    > = Arc::new(TokioMutex::new(HashMap::new()));
 
     info!(peer_id = %runtime.local_peer_id, "Swarm event loop started");
     loop {
@@ -801,7 +812,11 @@ async fn run_swarm(
 async fn handle_swarm_event(
     runtime: &Arc<NetworkRuntime>,
     swarm: &mut Swarm<SwarmBehaviour>,
-    pending: &Arc<TokioMutex<HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>>>,
+    pending: &Arc<
+        TokioMutex<
+            HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>,
+        >,
+    >,
     event: SwarmEvent<<SwarmBehaviour as libp2p::swarm::NetworkBehaviour>::ToSwarm>,
 ) {
     match event {

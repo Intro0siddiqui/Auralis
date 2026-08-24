@@ -103,17 +103,14 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
             // guard), fall back to a short MIN_GUARD for unknown-duration
             // streams. This also covers the case where `duration` is zero
             // because metadata was missing.
-            let track_just_ended = was_playing
-                && !is_playing
-                && is_empty
-                && {
-                    let dur = player.duration().await;
-                    let elapsed_opt = player.play_started_elapsed().await;
-                    if !dur.is_zero() {
-                        let pos = player.current_position().await;
-                        pos >= dur.saturating_sub(TRACK_END_EPSILON)
-                            || elapsed_opt.is_some_and(|e| {
-                                e + TRACK_END_EPSILON >= dur
+            let track_just_ended = was_playing && !is_playing && is_empty && {
+                let dur = player.duration().await;
+                let elapsed_opt = player.play_started_elapsed().await;
+                if !dur.is_zero() {
+                    let pos = player.current_position().await;
+                    pos >= dur.saturating_sub(TRACK_END_EPSILON)
+                        || elapsed_opt.is_some_and(|e| {
+                            e + TRACK_END_EPSILON >= dur
                                     // For short tracks, also accept any
                                     // elapsed beyond max(dur - epsilon, MIN_GUARD)
                                     // so a 800 ms clip can still advance.
@@ -121,14 +118,14 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                                         >= dur
                                             .saturating_sub(TRACK_END_EPSILON)
                                             .max(TRACK_END_MIN_GUARD)
-                            })
-                    } else {
-                        // Unknown duration: require at least MIN_GUARD to filter
-                        // the empty-transient after append, but allow sub-1500 ms
-                        // clips to advance.
-                        elapsed_opt.is_some_and(|e| e > TRACK_END_MIN_GUARD)
-                    }
-                };
+                        })
+                } else {
+                    // Unknown duration: require at least MIN_GUARD to filter
+                    // the empty-transient after append, but allow sub-1500 ms
+                    // clips to advance.
+                    elapsed_opt.is_some_and(|e| e > TRACK_END_MIN_GUARD)
+                }
+            };
             was_playing = is_playing;
 
             if track_just_ended {

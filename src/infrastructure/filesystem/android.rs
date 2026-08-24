@@ -89,9 +89,10 @@ impl AndroidScanner {
 
         // Extract metadata using lofty (blocking file I/O + decode) — offload.
         let path_for_extract = file_path.clone();
-        let extract_res = tokio::task::spawn_blocking(move || MetadataExtractor::extract(&path_for_extract))
-            .await
-            .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
+        let extract_res =
+            tokio::task::spawn_blocking(move || MetadataExtractor::extract(&path_for_extract))
+                .await
+                .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
         let mut track = match extract_res {
             Ok(t) => {
                 debug!(file = %file_path.display(), title = %t.title, "Metadata extracted successfully from audio buffer");
@@ -134,7 +135,9 @@ impl AndroidScanner {
         // Also capture file_size for incremental check consistency.
         let path_for_size = file_path.clone();
         track.file_size = tokio::task::spawn_blocking(move || {
-            std::fs::metadata(&path_for_size).map(|m| m.len()).unwrap_or(0)
+            std::fs::metadata(&path_for_size)
+                .map(|m| m.len())
+                .unwrap_or(0)
         })
         .await
         .unwrap_or(0);
@@ -223,9 +226,10 @@ impl AndroidScanner {
 
         // Blocking lofty extraction — offload.
         let path_for_extract = path.to_path_buf();
-        let extract_res = tokio::task::spawn_blocking(move || MetadataExtractor::extract(&path_for_extract))
-            .await
-            .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
+        let extract_res =
+            tokio::task::spawn_blocking(move || MetadataExtractor::extract(&path_for_extract))
+                .await
+                .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
 
         let mut track = match extract_res {
             Ok(t) => t,
@@ -332,9 +336,10 @@ impl AndroidScanner {
                     continue;
                 }
                 let cur_clone = current.clone();
-                let entries_res = tokio::task::spawn_blocking(move || std::fs::read_dir(&cur_clone))
-                    .await
-                    .map_err(|e| ScannerError::IoError(format!("Join error: {e}")))?;
+                let entries_res =
+                    tokio::task::spawn_blocking(move || std::fs::read_dir(&cur_clone))
+                        .await
+                        .map_err(|e| ScannerError::IoError(format!("Join error: {e}")))?;
                 let entries = match entries_res {
                     Ok(e) => e,
                     Err(e) => {

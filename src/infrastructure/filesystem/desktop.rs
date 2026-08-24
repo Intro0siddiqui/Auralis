@@ -373,9 +373,7 @@ impl DesktopScanner {
         let path_str_for_stat = path_str.clone();
         let (mtime, size) = tokio::task::spawn_blocking(move || {
             let meta = std::fs::metadata(&path_for_stat).map_err(|e| {
-                ScannerError::MetadataError(format!(
-                    "Failed to stat {path_str_for_stat}: {e}"
-                ))
+                ScannerError::MetadataError(format!("Failed to stat {path_str_for_stat}: {e}"))
             })?;
             let mtime = meta
                 .modified()

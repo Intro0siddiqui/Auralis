@@ -613,7 +613,8 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
         return Err("Image path is outside the app's managed library folders".to_string());
     }
 
-    let metadata = std::fs::metadata(&canonical).map_err(|e| format!("Failed to stat image: {e}"))?;
+    let metadata =
+        std::fs::metadata(&canonical).map_err(|e| format!("Failed to stat image: {e}"))?;
     if !metadata.is_file() {
         return Err("Requested image path is not a regular file".to_string());
     }
@@ -624,8 +625,7 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
         ));
     }
 
-    let bytes =
-        std::fs::read(&canonical).map_err(|e| format!("Failed to read image: {e}"))?;
+    let bytes = std::fs::read(&canonical).map_err(|e| format!("Failed to read image: {e}"))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{mime};base64,{b64}"))
 }

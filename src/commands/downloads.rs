@@ -333,7 +333,9 @@ fn ensure_not_private_ip_host(host: &str) -> Result<(), String> {
     };
 
     if blocked {
-        Err(format!("Blocked request to private/reserved address '{host}'"))
+        Err(format!(
+            "Blocked request to private/reserved address '{host}'"
+        ))
     } else {
         Ok(())
     }
