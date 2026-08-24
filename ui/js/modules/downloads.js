@@ -4,6 +4,86 @@
  */
 
 export const downloadMethods = {
+    // Pending download contexts for 403 auto-retry (id -> { resolved, opts, originalUrl, format, retryCount })
+    _pendingDownloadContexts: null,
+    _downloadRetryListenerBound: false,
+
+    _ensurePendingMap() {
+        if (!this._pendingDownloadContexts) this._pendingDownloadContexts = new Map();
+        // expose globally so core.js can read same map (both run on same Bridge instance)
+        try { window.__auralisPendingDownloadContexts = this._pendingDownloadContexts; } catch (_) {}
+        return this._pendingDownloadContexts;
+    },
+
+    _ensureDownloadRetryListener() {
+        if (this._downloadRetryListenerBound) return;
+        this._downloadRetryListenerBound = true;
+        // Subscribe to Bridge's download:completed for 403 auto-retry (once, minimal invasive)
+        try {
+            this.on('download:completed', (p) => {
+                // fire-and-forget; internal handler is async
+                this._handle403AutoRetry(p).catch((e) => console.warn('[Downloads] 403 auto-retry handler error', e?.message || e));
+            });
+        } catch (_) {}
+    },
+
+    async _handle403AutoRetry(p) {
+        if (!p || p.status !== 'failed') return;
+        const errRaw = p.error || p.error_message || '';
+        if (!errRaw.includes('403') && !errRaw.includes('Forbidden') && !errRaw.includes('HTTP 403')) return;
+        const map = this._ensurePendingMap();
+        const ctx = map.get(p.id);
+        if (!ctx) return;
+        if (ctx.retryCount >= 1) return; // auto-retry once only
+        const resolved = ctx.resolved;
+        const nextClient = resolved?.retryClients?.[0]
+            || (() => {
+                const oc = resolved?.orderedClients || [];
+                const idx = oc.indexOf(resolved?.client || resolved?.winningClient);
+                return idx >= 0 && idx + 1 < oc.length ? oc[idx + 1] : null;
+            })();
+        if (!nextClient) {
+            console.warn(`[Downloads] 403 auto-retry no next client for ${p.id} winningClient=${resolved?.client}`);
+            return;
+        }
+        // Mark retrying to suppress duplicate toast in core.js
+        ctx.retryCount += 1;
+        ctx._retrying = true;
+        try { window.__auralisDownloadRetryingIds = window.__auralisDownloadRetryingIds || new Set(); window.__auralisDownloadRetryingIds.add(p.id); } catch (_) {}
+        console.warn(`[Downloads] DIAGNOSTIC 403 auto-retry id=${p.id} ${resolved?.client} → ${nextClient} (retry ${ctx.retryCount}/1)`);
+        this.showToast(`403 on ${resolved?.client || 'TV'} (rr1---sn-gwpa-cived), retrying with ${nextClient}…`, 'info', 5000);
+        try {
+            // Build opts for re-resolve: exclude the failing client, force next
+            const baseOpts = ctx.opts || this.getDownloadOptions(document.getElementById('download-form')) || {};
+            // Ensure we keep cookie/poToken from settings but allow minting
+            const retryOpts = {
+                ...baseOpts,
+                forceClient: nextClient,
+                excludeClient: resolved?.client || resolved?.winningClient,
+                // Keep original orderedClients hint so youtube.js can rotate correctly
+                // Also ensure poToken is considered (youtube.js will mint if needed)
+            };
+            // If retrying toward ANDROID/IOS, ensure poToken mint path is taken (youtube.js does it)
+            if (!retryOpts.poToken && (nextClient === 'ANDROID' || nextClient === 'IOS')) {
+                // Trigger poToken mint via youtube.js internal logic (it will import po_token.js)
+                // No extra action needed; youtube.js will attempt generatePoTokenForVideo
+            }
+            const originalUrl = ctx.originalUrl || ctx.resolved?.originalUrl || p.url;
+            if (!originalUrl || !window.AuralisYouTube) throw new Error('No original URL/client for retry');
+            const reResolved = await window.AuralisYouTube.resolve(originalUrl, retryOpts);
+            if (!reResolved || reResolved.kind !== 'track') throw new Error('Re-resolve did not return track');
+            console.log(`[Downloads] 403 retry re-resolved ${originalUrl} via ${nextClient} -> ${reResolved.stream_url?.slice(0,80)}`);
+            // Re-invoke download with new URL; this creates a new download id and new pending entry
+            await this.downloadResolvedTrack(reResolved, ctx.format || 'm4a', retryOpts, originalUrl);
+        } catch (e) {
+            const msg = e?.message || String(e);
+            console.error(`[Downloads] 403 auto-retry re-resolve failed for ${p.id}:`, msg);
+            this.showToast(`Retry with ${nextClient} failed: ${msg}`, 'error', 6000);
+        } finally {
+            ctx._retrying = false;
+        }
+    },
+
     async ensureSettings() {
         if (this.currentSettings) return this.currentSettings;
         try {
@@ -40,13 +120,32 @@ export const downloadMethods = {
         };
     },
 
-    async downloadResolvedTrack(resolved, format) {
+    async downloadResolvedTrack(resolved, format, opts = null, originalUrl = null) {
         if (!resolved || resolved.kind !== 'track') throw new Error('Not a downloadable track');
+        // Ensure 403 auto-retry listener is bound once
+        this._ensureDownloadRetryListener();
         try {
             const payload = this.buildDownloadPayload(resolved, format);
-            console.log('[Downloads] Invoking download_audio', { title: resolved.title, url: resolved.stream_url?.slice(0,120), host: (()=>{try{return new URL(resolved.stream_url).host}catch(_){return 'unknown'}})(), headers: Object.keys(resolved.headers||{}), client: resolved.client });
+            console.log('[Downloads] Invoking download_audio', { title: resolved.title, url: resolved.stream_url?.slice(0,120), host: (()=>{try{return new URL(resolved.stream_url).host}catch(_){return 'unknown'}})(), headers: Object.keys(resolved.headers||{}), client: resolved.client, orderedClients: resolved.orderedClients, retryClients: resolved.retryClients });
             const result = await this.invoke('download_audio', payload);
-            if (result) this.updateDownloadProgressUI(result);
+            if (result) {
+                this.updateDownloadProgressUI(result);
+                // Store context for 403 auto-retry: id -> { resolved, opts, originalUrl, format }
+                try {
+                    const map = this._ensurePendingMap();
+                    const ctxOpts = opts || this.getDownloadOptions(document.getElementById('download-form')) || resolved.resolveOpts || {};
+                    const ctxUrl = originalUrl || resolved.originalUrl || resolved.stream_url;
+                    map.set(result.id, {
+                        resolved: { ...resolved },
+                        opts: { ...ctxOpts },
+                        originalUrl: ctxUrl,
+                        format,
+                        retryCount: 0,
+                        _retrying: false,
+                    });
+                    // Also store reverse lookup by stream_url in case completed payload uses different id? not needed
+                } catch (_) {}
+            }
             return result;
         } catch (err) {
             const msg = typeof err === 'string' ? err : (err && err.message ? err.message : String(err));
@@ -85,12 +184,13 @@ export const downloadMethods = {
             const opts = this.getDownloadOptions(form);
             this.showToast('Resolving source…', 'info');
             try {
+                this._ensureDownloadRetryListener();
                 const resolved = await window.AuralisYouTube.resolve(url, opts);
                 if (resolved.kind === 'playlist') {
                     await this.startPlaylistDownloads(resolved.items, 'm4a', opts, urlInput);
                     return;
                 }
-                const result = await this.downloadResolvedTrack(resolved, 'm4a');
+                const result = await this.downloadResolvedTrack(resolved, 'm4a', opts, url);
                 if (result) {
                     this.showToast('Download started!', 'success');
                     urlInput.value = '';
@@ -165,9 +265,10 @@ export const downloadMethods = {
         const opts = this.getDownloadOptions(form);
         this.showToast('Resolving track…', 'info');
         try {
+            this._ensureDownloadRetryListener();
             const resolved = await window.AuralisYouTube.resolve(item.url, opts);
             if (resolved.kind !== 'track') throw new Error('Not a track');
-            const result = await this.downloadResolvedTrack(resolved, 'm4a');
+            const result = await this.downloadResolvedTrack(resolved, 'm4a', opts, item.url);
             if (result) this.showToast('Download started!', 'success');
         } catch (err) {
             const m = err && err.message ? err.message : String(err);
@@ -185,12 +286,13 @@ export const downloadMethods = {
         const capped = items.slice(0, 20);
         this.showToast(`Resolving playlist (${capped.length} tracks)…`, 'info');
 
+        this._ensureDownloadRetryListener();
         let started = 0;
         for (const item of capped) {
             try {
                 const t = await window.AuralisYouTube.resolve(item.url, opts);
                 if (t.kind !== 'track') continue;
-                const result = await this.downloadResolvedTrack(t, format);
+                const result = await this.downloadResolvedTrack(t, format, opts, item.url);
                 if (result) started++;
             } catch (err) {
                 console.error('Playlist item failed:', err);
@@ -238,7 +340,7 @@ export const downloadMethods = {
             ? `<div style="margin-top:6px;padding:8px 10px;background:rgba(255,77,79,0.08);border:1px solid rgba(255,77,79,0.25);border-radius:8px;font-family:monospace;font-size:11px;line-height:1.4;white-space:pre-wrap;word-break:break-all;user-select:text;max-height:120px;overflow:auto;color:var(--text-2)">${this.escapeHtml(errRaw)}</div>
                <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                  <button type="button" class="btn btn-secondary btn-sm" onclick="navigator.clipboard&&navigator.clipboard.writeText(${JSON.stringify(errRaw).replace(/"/g,'&quot;')}).then(()=>window.Auralis&&window.Auralis.bridge&&window.Auralis.bridge.showToast&&window.Auralis.bridge.showToast('Copied error to clipboard','success')).catch(()=>window.Auralis&&window.Auralis.bridge&&window.Auralis.bridge.showToast&&window.Auralis.bridge.showToast('Copy failed','error'))" title="Copy full error (for bug report)">Copy error</button>
-                 <span style="font-size:11px;color:var(--text-3)">${errRaw.includes('403') ? '403: re-resolve the video (URL expired or UA mismatch). Check Settings → YouTube cookie/PO token.' : errRaw.includes('timeout') || errRaw.includes('stalled') ? 'Network timeout — retry on stable connection.' : errRaw.includes('404') ? 'URL expired — resolve again.' : 'Tap Copy and include in bug report; also check adb logcat chromium.'}</span>
+                  <span style="font-size:11px;color:var(--text-3)">${errRaw.includes('403') ? '403 [rr1---sn-gwpa-cived] Jio now gates TV too — auto-retrying with ANDROID+pot / WEB_SAFARI; if still fails set youtube_po_token via BgUtils mint or Settings cookie.' : errRaw.includes('timeout') || errRaw.includes('stalled') ? 'Network timeout — retry on stable connection.' : errRaw.includes('404') ? 'URL expired — resolve again.' : 'Tap Copy and include in bug report; also check adb logcat chromium.'}</span>
                </div>`
             : '';
         const pctBar = isFailed

@@ -267,8 +267,12 @@ class MediaPlaybackService : Service() {
         return try {
             val f = java.io.File(path)
             if (!f.exists()) return null
-            BitmapFactory.decodeFile(path)
+            // Downsample to avoid ANR/OOM decoding large art on main thread.
+            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+            BitmapFactory.decodeFile(path, opts)
         } catch (_: Exception) {
+            null
+        } catch (_: OutOfMemoryError) {
             null
         }
     }

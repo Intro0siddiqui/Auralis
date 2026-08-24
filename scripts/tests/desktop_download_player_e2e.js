@@ -70,6 +70,17 @@ async function run() {
   if (!driverPath) { const cb = path.join(process.env.HOME || '/root', '.cargo', 'bin', 'tauri-driver'); if (fs.existsSync(cb)) driverPath = cb; }
 
   function smoke(reason) {
+    // Strict gate — mirrors desktop_real_e2e.js E2E_ALLOW_FALLBACK check.
+    // When E2E_STRICT=1 (CI), fallback must throw instead of passing to avoid hiding IPC regressions.
+    if (process.env.E2E_STRICT === '1') {
+      throw new Error(`Strict E2E required (E2E_STRICT=1): fallback smoke check blocked: ${reason}. ` +
+        `Real WebDriver IPC path is mandatory in CI — missing driver is a failure, not a pass.`);
+    }
+    const allowFallback = process.env.E2E_ALLOW_FALLBACK === '1';
+    // If caller did not explicitly allow fallback, warn but still allow locally; CI must use E2E_STRICT=1 to hard-fail.
+    if (!allowFallback) {
+      console.warn(`  ${c.yellow}[STRICT] smoke fallback would be blocked in CI (E2E_STRICT=1): ${reason}${c.reset}`);
+    }
     console.log(`  ${c.yellow}${reason} — smoke check only${c.reset}`);
     const out = execSync(`file ${BINARY}`, { encoding: 'utf8' });
     pass(`Binary type: ${out.trim().slice(0, 80)}`);

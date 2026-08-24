@@ -67,6 +67,21 @@ class PlayerController {
                 this.renderQueuePanel();
             }
         });
+
+        window.Auralis.bridge.on('playback:error', (msg) => {
+            console.error('[playback:error]', msg);
+            if (window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.showToast === 'function') {
+                window.Auralis.bridge.showToast(`Playback failed: ${msg}`, 'error', 7000);
+            }
+            // Keep bar in error state until next successful track
+            try { window.__auralisLastPlaybackError = { at: new Date().toISOString(), msg }; } catch (_) {}
+            // Also surface in player bar subtitle if no track
+            const artistEl = document.getElementById('track-artist');
+            if (artistEl && msg && !this.currentTrack) {
+                artistEl.textContent = String(msg).slice(0, 120);
+                artistEl.style.color = 'var(--danger, #ff4d4f)';
+            }
+        });
     }
 
     cacheElements() {
@@ -436,7 +451,9 @@ class PlayerController {
         this.startTimeTracking();
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('resume').catch((err) => {
-                console.warn('Resume failed, checking if current track can be played:', err);
+                const msg = String(err || 'resume failed');
+                console.warn('Resume failed:', msg);
+                window.Auralis.bridge.showToast(`Resume failed: ${msg}`, 'error', 6000);
                 if (this.currentTrack && this.currentTrack.id) {
                     window.Auralis.bridge.playTrack(this.currentTrack.id);
                 }
@@ -450,7 +467,9 @@ class PlayerController {
         this.stopTimeTracking();
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('pause').catch((err) => {
-                console.warn('Pause failed:', err);
+                const msg = String(err || 'pause failed');
+                console.warn('Pause failed:', msg);
+                window.Auralis.bridge.showToast(`Pause failed: ${msg}`, 'error', 6000);
             });
         }
     }
@@ -458,7 +477,9 @@ class PlayerController {
     next() {
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('next_track').catch((err) => {
-                console.warn('Next track failed:', err);
+                const msg = String(err || 'next failed');
+                console.warn('Next track failed:', msg);
+                window.Auralis.bridge.showToast(`Next failed: ${msg}`, 'error', 6000);
             });
         }
     }
@@ -466,7 +487,9 @@ class PlayerController {
     previous() {
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('previous_track').catch((err) => {
-                console.warn('Previous track failed:', err);
+                const msg = String(err || 'previous failed');
+                console.warn('Previous track failed:', msg);
+                window.Auralis.bridge.showToast(`Previous failed: ${msg}`, 'error', 6000);
             });
         }
     }
@@ -482,7 +505,11 @@ class PlayerController {
         this.updateProgressUI();
         this.updatePositionState();
         if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } }).catch(()=>{});
+            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } }).catch((err)=>{
+                const msg = String(err || 'seek failed');
+                console.warn('Seek failed:', msg);
+                window.Auralis.bridge.showToast(`Seek failed: ${msg}`, 'error', 5000);
+            });
         }
     }
 
@@ -490,7 +517,11 @@ class PlayerController {
         if (!this.duration || this.duration <= 0) return;
         this.updatePositionState();
         if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } }).catch(()=>{});
+            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } }).catch((err)=>{
+                const msg = String(err || 'seek failed');
+                console.warn('Seek (commit) failed:', msg);
+                window.Auralis.bridge.showToast(`Seek failed: ${msg}`, 'error', 5000);
+            });
         }
     }
 
@@ -533,9 +564,8 @@ class PlayerController {
             if (!window.Auralis || !window.Auralis.bridge || typeof window.Auralis.bridge.invoke !== 'function') return;
             let state = null;
             try { state = await window.Auralis.bridge.invoke('get_now_playing'); } catch (_) {}
-            if (!state) {
-                try { state = await window.Auralis.bridge.invoke('get_playback_state'); } catch (_) {}
-            }
+            // get_playback_state not exposed — removed fallback to avoid error spam
+            // (previously invoked non-existent command and relied on silent catch).
             if (!state) return;
             const np = state.track ? state : null;
             if (!np || !np.track) {
@@ -576,17 +606,31 @@ class PlayerController {
         this.shuffle = !this.shuffle;
         this.updateShuffleRepeatUI();
         if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('set_shuffle', { enabled: this.shuffle });
+            window.Auralis.bridge.invoke('set_shuffle', { enabled: this.shuffle }).catch((err)=>{
+                const msg = String(err || 'shuffle failed');
+                console.warn('Shuffle failed:', msg);
+                window.Auralis.bridge.showToast(`Shuffle failed: ${msg}`, 'error', 5000);
+                // rollback UI
+                this.shuffle = !this.shuffle;
+                this.updateShuffleRepeatUI();
+            });
         }
     }
 
     cycleRepeat() {
         const modes = ['off', 'all', 'one'];
         const idx = modes.indexOf(this.repeatMode);
+        const prev = this.repeatMode;
         this.repeatMode = modes[(idx + 1) % modes.length];
         this.updateShuffleRepeatUI();
         if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('set_repeat_mode', { mode: this.repeatMode });
+            window.Auralis.bridge.invoke('set_repeat_mode', { mode: this.repeatMode }).catch((err)=>{
+                const msg = String(err || 'repeat failed');
+                console.warn('Repeat failed:', msg);
+                window.Auralis.bridge.showToast(`Repeat failed: ${msg}`, 'error', 5000);
+                this.repeatMode = prev;
+                this.updateShuffleRepeatUI();
+            });
         }
     }
 
@@ -738,7 +782,11 @@ class PlayerController {
         this.volume = Math.max(0, Math.min(1, vol));
         this.updateVolumeUI();
         if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('set_volume', { volume: this.volume }).catch(() => {});
+            window.Auralis.bridge.invoke('set_volume', { volume: this.volume }).catch((err)=>{
+                const msg = String(err || 'volume failed');
+                console.warn('Set volume failed:', msg);
+                window.Auralis.bridge.showToast(`Volume failed: ${msg}`, 'error', 5000);
+            });
         }
     }
 
@@ -835,7 +883,9 @@ class PlayerController {
                 await window.Auralis.bridge.invoke('clear_queue');
                 this.renderQueuePanel();
             } catch (e) {
-                console.error('Failed to clear queue:', e);
+                const msg = String(e || 'clear queue failed');
+                console.error('Failed to clear queue:', msg);
+                window.Auralis.bridge.showToast(`Clear queue failed: ${msg}`, 'error', 6000);
             }
         }
     }
@@ -846,7 +896,9 @@ class PlayerController {
                 await window.Auralis.bridge.invoke('remove_from_queue', { index });
                 this.renderQueuePanel();
             } catch (e) {
-                console.error('Failed to remove from queue:', e);
+                const msg = String(e || 'remove failed');
+                console.error('Failed to remove from queue:', msg);
+                window.Auralis.bridge.showToast(`Queue remove failed: ${msg}`, 'error', 6000);
             }
         }
     }

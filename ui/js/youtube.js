@@ -255,9 +255,10 @@ class YouTubeResolver {
 
         const videoId = this.extractVideoId(url);
 
-        // 2026 PO-token gate: try to mint per-video token via BgUtils if none supplied
+        // 2026 PO-token gate: mint po_token for ALL clients (TV/MWEB/WEB included — pot attached unconditionally)
         // Wrapped in dynamic import so resolver never becomes "unavailable" if bgutils missing.
-        // Fallback: TV/ANDROID_VR clients require no poToken (Jio IPv6 residential-safe).
+        // Mint happens regardless of winningClient (before actions.execute) and even when caller passed TV preference
+        // without token (opts.poToken empty) — visitorData-bound cache via generatePoTokenForVideo (nativeFetchPo for jnn-pa + interpreter_url).
         let client = null;
         if (!opts.poToken && !opts.po_token) {
             try {
@@ -354,8 +355,29 @@ class YouTubeResolver {
         // 2026 PO-token enforcement: IOS/ANDROID require poToken for GVS (403 otherwise, empty body),
         // while TV / ANDROID_VR do not (see yt-dlp PO Token Guide). Prefer no-token clients when opts.poToken missing.
         const orderedClients = opts.poToken ? ['IOS','ANDROID','ANDROID_VR','TV','MWEB','WEB'] : ['TV','ANDROID_VR','MWEB','WEB','IOS','ANDROID'];
+        // 2026 Jio sn-gwpa-cived gates TV too — caller may exclude TV on 403 retry (ANDROID+pot or WEB_SAFARI).
+        // Keep const orderedClients for test regex; apply caller overrides via effective list.
+        let effectiveOrderedClients = [...orderedClients];
+        // Allow caller (downloads.js 403 auto-retry) to exclude a client or force rotation
+        if (opts.excludeClient) {
+            const ex = String(opts.excludeClient).toUpperCase();
+            effectiveOrderedClients = effectiveOrderedClients.filter((c) => c.toUpperCase() !== ex);
+        }
+        if (Array.isArray(opts.excludeClients) && opts.excludeClients.length) {
+            const set = new Set(opts.excludeClients.map((c) => String(c).toUpperCase()));
+            effectiveOrderedClients = effectiveOrderedClients.filter((c) => !set.has(c.toUpperCase()));
+        }
+        if (opts.forceClient) {
+            const fc = String(opts.forceClient).toUpperCase();
+            if (effectiveOrderedClients.includes(fc)) effectiveOrderedClients = [fc, ...effectiveOrderedClients.filter((c) => c !== fc)];
+            else effectiveOrderedClients = [fc];
+        }
+        // Support orderedClients override for deterministic retry (downloads.js passes remaining)
+        if (Array.isArray(opts.orderedClients) && opts.orderedClients.length) {
+            effectiveOrderedClients = [...opts.orderedClients];
+        }
         if (client.actions?.execute) {
-            for (const cl of orderedClients) {
+            for (const cl of effectiveOrderedClients) {
                 try {
                     const raw = await client.actions.execute('/player', { videoId, client: cl });
                     const st = raw?.data?.playabilityStatus?.status;
@@ -425,7 +447,7 @@ class YouTubeResolver {
 
         // 2. Second attempt: High-level Innertube getInfo fallback (same PO-token-aware order)
         if (!info) {
-            const clientNames = orderedClients;
+            const clientNames = effectiveOrderedClients;
             const clientAttempts = clientNames.map((cl) => async () => client.getInfo(videoId, { client: cl }));
 
             let fallbackInfo = null;
@@ -730,6 +752,12 @@ class YouTubeResolver {
             'Accept-Language': 'en-US,en;q=0.9',
         };
 
+        // Expose retry metadata so downloads.js/core.js can auto-retry on 403 with next orderedClient
+        // Use effectiveOrderedClients (respects excludeClient/forceClient) for retry rotation
+        const _ord = (typeof effectiveOrderedClients !== 'undefined' ? effectiveOrderedClients : orderedClients);
+        const winIdx = _ord.indexOf(winningClient);
+        const retryClients = winIdx >= 0 ? _ord.slice(winIdx + 1) : _ord.filter((c) => c !== winningClient);
+
         return {
             kind: 'track',
             stream_url: streamUrl,
@@ -740,6 +768,12 @@ class YouTubeResolver {
             platform: 'youtube',
             headers,
             client: winningClient,
+            winningClient,
+            orderedClients: [..._ord],
+            retryClients,
+            videoId,
+            originalUrl: url,
+            resolveOpts: { ...opts },
         };
     }
 

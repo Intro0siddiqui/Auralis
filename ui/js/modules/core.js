@@ -50,6 +50,14 @@ export const coreMethods = {
                     this.emit('playback:progress', event.payload);
                 });
 
+                await tauriListen('playback:error', (event) => {
+                    const msg = typeof event.payload === 'string' ? event.payload : JSON.stringify(event.payload);
+                    this.emit('playback:error', msg);
+                    console.error('[playback:error]', msg);
+                    this.showToast(`Playback failed: ${msg}`, 'error', 6000);
+                    try { window.__auralisLastPlaybackError = { at: new Date().toISOString(), msg }; } catch (_) {}
+                });
+
                 await tauriListen('download:progress', (event) => {
                     this.emit('download:progress', event.payload);
                     this.updateDownloadProgressUI(event.payload);
@@ -63,6 +71,30 @@ export const coreMethods = {
                         this.scanLibrary();
                     } else if (p && p.status === 'failed') {
                         const rawErr = p.error || p.error_message || 'Stream error';
+                        // 403 auto-retry: if downloads.js has pending context with retryClients, suppress immediate failure toast
+                        // (downloads.js listener already emitted via this.emit above and will re-resolve with next orderedClient TV→ANDROID+pot→WEB_SAFARI)
+                        const is403 = rawErr.includes('403') || rawErr.includes('Forbidden') || rawErr.includes('HTTP 403');
+                        if (is403) {
+                            try {
+                                const map = this._pendingDownloadContexts || window.__auralisPendingDownloadContexts;
+                                const retrySet = window.__auralisDownloadRetryingIds;
+                                const ctx = map ? map.get(p.id) : null;
+                                const hasRetry = ctx && ctx.retryCount < 1 && (ctx.resolved?.retryClients?.length || ctx.resolved?.orderedClients?.length);
+                                const isRetrying = retrySet ? retrySet.has(p.id) : false;
+                                if (hasRetry || isRetrying) {
+                                    // Defer failure toast: retry is in progress (downloads.js will toast retrying)
+                                    console.warn(`[core] 403 for ${p.id} — suppressing failure toast, auto-retry in progress (hasRetry=${hasRetry}, isRetrying=${isRetrying})`);
+                                    // Still update UI to show retrying state
+                                    if (p) this.updateDownloadProgressUI(p);
+                                    return;
+                                }
+                                // Fallback: if no context but error is 403, attempt direct retry via downloads.js helper if available
+                                if (typeof this._handle403AutoRetry === 'function') {
+                                    // Let the downloads.js handler (already fired via emit) attempt; if it returns without retry, fall through to toast
+                                    // No-op here — handler already ran synchronously via emit
+                                }
+                            } catch (_) {}
+                        }
                         // Fix: backend field is `error`, not `error_message` — support both.
                         // Truncate for toast but keep full error in console/UI.
                         const toastMsg = rawErr.length > 180 ? rawErr.slice(0, 180) + '…' : rawErr;
@@ -86,7 +118,7 @@ export const coreMethods = {
                         });
                         console.error(`Full error: ${rawErr}`);
                         console.error(`URL: ${p.url}`);
-                        console.error(`Hint: ${rawErr.includes('403') ? '403 Forbidden — googlevideo rejected UA/Referer. This download used headers from youtube.js winningClient; check that UA matches InnerTube client. Try re-resolving the video (URL expires ~6h) and retry. If 404/416, URL expired. If stalled, check network.' : rawErr.includes('timeout') ? 'Timeout — network stalled or host unreachable. Check connection & retry.' : 'See error body above; copy the full message from the Downloads list.'}`);
+                        console.error(`Hint: ${rawErr.includes('403') ? '403 Forbidden [rr1---sn-gwpa-cived] — googlevideo rejected UA/Referer/Origin/PO-token or URL expired (2026 Jio now gates TV too). Try re-resolving with ANDROID+pot or WEB_SAFARI; set youtube_po_token via BgUtils mint or Settings cookie. This download used headers from youtube.js winningClient; check that UA matches InnerTube client. URL expires ~6h.' : rawErr.includes('timeout') ? 'Timeout — network stalled or host unreachable. Check connection & retry.' : 'See error body above; copy the full message from the Downloads list.'}`);
                         console.groupEnd();
                         // Keep a persistent in-memory log for "Copy diagnostics" button
                         try {

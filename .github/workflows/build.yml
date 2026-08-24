@@ -7,6 +7,8 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -71,6 +73,8 @@ jobs:
 
       - name: Run Desktop Download → Player E2E (JS, Rust downloader + player)
         run: xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" node scripts/tests/desktop_download_player_e2e.js
+        env:
+          E2E_STRICT: "1"
 
       - name: Package
         # Release artifact bundling is only meaningful on tag pushes. On
@@ -694,10 +698,103 @@ jobs:
           save-if: "false"
 
       - name: Format check
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked || true
+
+      - name: Audit
+        run: cargo audit || echo "::warning::audit failed"
+
+  live-youtube-e2e:
+    name: Live YouTube E2E (player API)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: "false"
+
+      - name: Run Rust tests (--all-features)
+        run: cargo test --all-features
+
+      - name: Run JS unit tests (YouTube resolver)
+        run: node --test scripts/tests/youtube_resolver.test.js
+
+      - name: Live YouTube player API check (7C4-TAWg7QA, Sx8z0U0lkjQ)
+        run: |
+          node <<'NODE'
+          const https = require('https');
+          const ids = ['7C4-TAWg7QA', 'Sx8z0U0lkjQ'];
+          const key = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+          function post(videoId) {
+            return new Promise((resolve, reject) => {
+              const body = JSON.stringify({
+                videoId,
+                context: { client: { clientName: 'ANDROID', clientVersion: '20.10.38' } }
+              });
+              const req = https.request({
+                method: 'POST',
+                hostname: 'www.youtube.com',
+                path: `/youtubei/v1/player?key=${key}`,
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+              }, (res) => {
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => {
+                  try { resolve({ status: res.statusCode, json: JSON.parse(data) }); }
+                  catch (e) { reject(new Error(`JSON parse failed: ${e.message} body=${data.slice(0,500)}`)); }
+                });
+              });
+              req.on('error', reject);
+              req.write(body);
+              req.end();
+            });
+          }
+          (async () => {
+            for (const id of ids) {
+              console.log(`Checking ${id}...`);
+              let retries = 2;
+              let result;
+              while (true) {
+                try { result = await post(id); break; } catch (e) { if (retries-- <= 0) throw e; console.warn(`retry ${id}: ${e.message}`); await new Promise(r => setTimeout(r, 2000)); }
+              }
+              const st = result.json?.playabilityStatus?.status;
+              console.log(`  ${id} -> playabilityStatus: ${st} (http ${result.status})`);
+              if (st !== 'OK') {
+                console.error(`  Expected OK for ${id}, got ${st}`);
+                console.error(JSON.stringify(result.json?.playabilityStatus, null, 2));
+                process.exit(1);
+              }
+              const sd = result.json?.streamingData;
+              const fmtCount = (sd?.adaptiveFormats?.length || 0) + (sd?.formats?.length || 0);
+              console.log(`  formats: ${fmtCount}`);
+            }
+            console.log('All live checks OK');
+          })().catch(e => { console.error(e); process.exit(1); });
+          NODE
+
+  ci:
+    name: CI status
+    if: always()
+    needs: [lint, build-linux, build-android, test-android-e2e]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check required jobs
+        run: |
+          results='${{ toJson(needs) }}'
+          echo "$results" | jq .
+          echo "$results" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' || { echo "::error::One or more required jobs failed"; exit 1; }
+          echo "All required checks passed"
 
   release:
     needs: [build-linux, build-macos, build-windows, build-android, lint]

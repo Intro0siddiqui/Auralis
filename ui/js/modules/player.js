@@ -15,7 +15,18 @@ export const playerMethods = {
                 if (track) this.updatePlayerBar(track);
             }
         } catch (err) {
-            this.showToast(`Playback error: ${err}`, 'error');
+            const msg = String(err || 'unknown playback error');
+            console.error(`[playTrack] failed id=${trackId}:`, msg);
+            try { window.__auralisLastPlaybackError = { at: new Date().toISOString(), trackId, msg }; } catch (_) {}
+            // Show full error, keep on screen longer so user can copy
+            this.showToast(`Playback failed [${String(trackId).slice(0,8)}]: ${msg}`, 'error', 8000);
+            // Also surface in player bar subtitle for persistent visibility
+            const artistEl = document.getElementById('track-artist');
+            if (artistEl) {
+                artistEl.textContent = msg.slice(0, 140);
+                artistEl.style.color = 'var(--danger, #ff4d4f)';
+                artistEl.title = msg;
+            }
         }
     },
 

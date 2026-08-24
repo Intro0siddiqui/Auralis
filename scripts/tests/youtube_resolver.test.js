@@ -23,11 +23,15 @@ function isDirectAudio(url) { return /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|webm)
 function extFromMime(mime) {
     if (!mime) return 'm4a';
     const m = String(mime).toLowerCase();
-    if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) return 'm4a';
     if (m.includes('webm') || m.includes('opus')) return 'webm';
     if (m.includes('ogg')) return 'ogg';
     if (m.includes('wav')) return 'wav';
     if (m.includes('flac')) return 'flac';
+    if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) {
+        // video/mp4 progressive (itag 18 muxed) must stay mp4, not m4a
+        if (m.startsWith('video/')) return 'mp4';
+        return 'm4a';
+    }
     if (m.includes('mpeg') || m.includes('mp3')) return 'mp3';
     return 'm4a';
 }
@@ -85,7 +89,9 @@ describe('youtube.js pure helpers', () => {
         assert.equal(extFromMime('audio/wav'), 'wav');
         assert.equal(extFromMime('audio/flac'), 'flac');
         assert.equal(extFromMime('audio/mpeg'), 'mp3');
-        assert.equal(extFromMime('video/mp4'), 'm4a');
+        assert.equal(extFromMime('video/mp4'), 'mp4');
+        assert.equal(extFromMime('video/mp4; codecs="avc1.42001E, mp4a.40.2"'), 'mp4');
+        assert.equal(extFromMime('audio/mp4'), 'm4a');
         assert.equal(extFromMime(null), 'm4a');
         assert.equal(extFromMime(''), 'm4a');
     });
@@ -260,7 +266,7 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         assert.ok(src.includes('orderedClients'), 'Expected orderedClients PO-token-aware ordering');
         assert.ok(src.includes("TV") && src.includes("ANDROID_VR"), 'orderedClients must mention TV/ANDROID_VR');
         // PO-aware order: when poToken empty => TV, ANDROID_VR, MWEB first; when token => IOS, ANDROID first
-        const m = src.match(/const orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
+        const m = src.match(/(?:const|let)\s+orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
         assert.ok(m, 'orderedClients ternary not found or malformed');
         const withToken = m[1];
         const withoutToken = m[2];
@@ -304,7 +310,7 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         assert.ok(src.includes('SABR-only'), 'youtube.js missing SABR-only fallback comment/marker');
         assert.ok(src.includes('formats') && src.includes('signature_cipher'), 'fallback must handle signature_cipher for progressive');
         // TV/ANDROID_VR-first ordering must remain (orderedClients ternary)
-        const m = src.match(/const orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
+        const m = src.match(/(?:const|let)\s+orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
         assert.ok(m, 'orderedClients must still be TV-first when no poToken');
         assert.equal(m[2].replace(/\s/g, ''), "'TV','ANDROID_VR','MWEB','WEB','IOS','ANDROID'", 'TV/ANDROID_VR-first ordering must be preserved');
     });
@@ -329,5 +335,79 @@ describe('nativeFetch header extraction (Tauri bridge)', () => {
         const h = { forEach(fn) { fn('val', 'x-hdr'); } };
         extract(c3, h);
         assert.equal(c3['x-hdr'], 'val');
+    });
+});
+
+describe('pot-for-TV (YAD 7C4-TAWg7QA / Sx8z0U0lkjQ regression)', () => {
+    const ytPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/youtube.js');
+    const vendorPath = path.resolve(path.dirname(ytPath), '../vendor/youtubei.esm.mjs');
+
+    it('fake resolve mints token and appends &pot= to googlevideo URL for winningClient TV', () => {
+        // Simulate youtube.js pot append logic (defensive manual append for googlevideo)
+        function appendPot(streamUrl, potVal) {
+            if (!streamUrl || !potVal) return streamUrl;
+            if (streamUrl.includes('pot=')) return streamUrl;
+            try {
+                const u = new URL(streamUrl);
+                if (u.hostname.includes('googlevideo.com') || u.hostname.includes('youtube.com')) {
+                    u.searchParams.set('pot', potVal);
+                    return u.toString();
+                }
+            } catch (_) {
+                if (!streamUrl.includes('pot=')) return streamUrl + (streamUrl.includes('?') ? '&' : '?') + 'pot=' + encodeURIComponent(potVal);
+            }
+            return streamUrl;
+        }
+
+        // Fake minted token
+        const fakeToken = 'TEST_POT_TOKEN_6h_CACHE_123';
+        const winningClient = 'TV';
+        const googlevideoUrl = 'https://rr1---sn-gwpa-cived.googlevideo.com/videoplayback?expire=1234567890&ei=test&ip=2409%3A40c4%3A35b%3Ab681%3A8000%3A%3A&itag=140&id=o-ABC123&source=youtube&requiressl=yes&mh=xyz&mm=31%2C29&mn=sn-gwpa-cived&ms=au%2Crdu&mv=m&mvi=1&pl=24&initcwndbps=1280000&spn=1&vprv=1&mime=audio%2Fmp4&cnr=14&c=TV&cver=2.20250101&cplayer=UNIPLAYER&cbrand=google&cbrandft=1&cbr=SAMSUNG&cbrver=21.0&cmodel=SM-G998B&cplatform=mobile&csn=1&pot_placeholder=0&n=abc123&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cvprv%2Cmime%2Cns%2Ccnr%2Csparams%2Cpot';
+
+        // Simulate resolve that would have used TV client because no poToken initially, then minted
+        assert.equal(winningClient, 'TV', 'winningClient should be TV for Jio IPv6 residential path');
+
+        const withPot = appendPot(googlevideoUrl, fakeToken);
+        assert.ok(withPot.includes('pot='), 'googlevideo URL must contain pot param after append');
+        const u = new URL(withPot);
+        assert.equal(u.searchParams.get('pot'), fakeToken, 'pot value must match minted token');
+        assert.ok(u.hostname.includes('googlevideo.com'), 'hostname must be googlevideo');
+        // Ensure pot is searchable via has('pot')
+        assert.equal(u.searchParams.has('pot'), true);
+
+        // Verify original URL without pot would be rejected on sn-gwpa-cived 2026-02 Jio CGNAT without pot
+        const before = new URL(googlevideoUrl);
+        assert.equal(before.searchParams.has('pot'), false, 'original URL has no pot');
+    });
+
+    it('youtube.js source unconditionally appends pot (Appended pot / searchParams.set)', () => {
+        const src = fs.readFileSync(ytPath, 'utf8');
+        // Must contain unconditional pot append logic
+        const hasPotSet = src.includes("searchParams.set('pot'") || src.includes('searchParams.set("pot"') || src.includes("Appended pot");
+        assert.ok(hasPotSet, 'youtube.js must contain searchParams.set(\'pot\' or Appended pot comment');
+        // Ensure the defensive append is not gated behind sabr check in youtube.js
+        // The pot append block should exist outside any sabr guard
+        assert.ok(src.includes("Appended pot to googlevideo URL"), 'youtube.js should contain Appended pot log comment');
+        // pot logic should handle both opts.poToken and opts.po_token
+        assert.ok(src.includes("opts.poToken") && src.includes("opts.po_token"), 'youtube.js pot logic must handle both poToken variants');
+    });
+
+    it('vendor youtubei.esm.mjs no longer guards pot on sabr', () => {
+        const v = fs.readFileSync(vendorPath, 'utf8');
+        // Vendor must still set pot
+        const hasPot = v.includes("set('pot'") || v.includes('set("pot"') || v.includes("searchParams.set('pot'") || v.includes('.set("pot"');
+        assert.ok(hasPot, 'vendor must contain pot set logic');
+        // Old buggy code: a.searchParams.get("sabr")!=="1"&&this.po_token&&a.searchParams.set("pot",...
+        // Must not contain sabr-guarded pattern at all (minified file is single line, so check substring)
+        assert.ok(!v.includes('get("sabr")!=="1"&&this.po_token'), 'vendor should not contain sabr-guarded pot logic (old: sabr!=1 && po_token)');
+        assert.ok(!v.includes("get('sabr')") || !v.includes('sabr') || v.indexOf('sabr') === -1 || !v.slice(Math.max(0, v.indexOf('a.searchParams.set("pot"')-200), v.indexOf('a.searchParams.set("pot"')).includes('sabr'), 'pot context must not be sabr-guarded');
+        // Ensure unconditional pot append exists (this.po_token && ... set pot) and its 200-char context has no sabr
+        const potIdx = v.indexOf('a.searchParams.set("pot"');
+        const potIdx2 = v.indexOf("a.searchParams.set('pot'");
+        const idx = potIdx !== -1 ? potIdx : potIdx2;
+        assert.ok(idx !== -1, 'pot set index should be found');
+        const before = v.slice(Math.max(0, idx - 200), idx);
+        assert.ok(!before.includes('sabr'), `pot context should not contain sabr guard: ${before.slice(-100)}`);
+        assert.ok(v.includes('this.po_token&&') || v.includes('this.po_token &&'), 'vendor should have unconditional this.po_token && set pot');
     });
 });

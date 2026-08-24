@@ -135,6 +135,8 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                     }
                     Err(e) => {
                         warn!(error = %e, "Auto-advance failed");
+                        let msg = e.to_string();
+                        let _ = app.emit("playback:error", &msg);
                         emit_state_changed(&app, &player).await;
                     }
                 }
@@ -173,11 +175,14 @@ pub async fn play(
         player.set_current_index(Some(idx)).await;
     }
 
-    // Play the track
-    player
-        .play_track(track.clone())
-        .await
-        .map_err(|e| format!("Playback error: {e}"))?;
+    // Play the track — log full context so the UI can show exactly why it failed
+    if let Err(e) = player.play_track(track.clone()).await {
+        warn!(%track_id, file_path=%track.file_path, title=%track.title, error=%e, "Playback failed — file missing or undecodable");
+        return Err(format!(
+            "Playback error [{} — {}]: {}",
+            track.title, track.file_path, e
+        ));
+    }
 
     // Build NowPlaying response
     let now_playing = NowPlaying {

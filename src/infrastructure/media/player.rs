@@ -126,9 +126,9 @@ impl AudioPlayer {
         self.stop().await?;
 
         let vol = *self.volume.read().await;
-        let file = File::open(path).map_err(|e| PlayerError::FileError(e.to_string()))?;
+        let file = File::open(path).map_err(|e| PlayerError::FileError(format!("{path}: {e}")))?;
         let source = Decoder::new(BufReader::new(file))
-            .map_err(|e| PlayerError::DecodeError(e.to_string()))?;
+            .map_err(|e| PlayerError::DecodeError(format!("{path}: {e}")))?;
 
         let mixer = self.output_stream_handle().await?;
         let player = Player::connect_new(&mixer);
@@ -172,22 +172,14 @@ impl AudioPlayer {
         debug!("Resuming playback");
         let sink_guard = self.sink.read().await;
         if let Some(s) = sink_guard.as_ref() {
-            // Guard against double resume: if already playing, no-op to avoid resetting anchor.
+            // Guard against double resume: if already playing (anchor Some && !is_paused), no-op.
             let anchor_some = self.play_anchor.read().await.is_some();
             if anchor_some && !s.is_paused() {
                 return Ok(());
             }
             s.play();
-            // If a stale anchor was left (e.g., seek-while-paused leak before fix), fold its
-            // elapsed into `played` before overwriting so we don't discard time.
-            let mut anchor = self.play_anchor.write().await;
-            if let Some(a) = *anchor {
-                let elapsed = a.elapsed();
-                if !elapsed.is_zero() {
-                    *self.played.write().await += elapsed;
-                }
-            }
-            *anchor = Some(Instant::now());
+            // Discard elapsed while paused — do not fold stale anchor into `played`.
+            *self.play_anchor.write().await = Some(Instant::now());
         }
         Ok(())
     }
@@ -504,8 +496,13 @@ impl AudioPlayer {
         self.shuffle_history.write().await.clear();
     }
     pub async fn add_to_queue(&self, track: Track) {
-        self.queue.write().await.push(track);
-        self.shuffle_history.write().await.clear();
+        let new_len = {
+            let mut q = self.queue.write().await;
+            q.push(track);
+            q.len()
+        };
+        // Retain shuffle session; only invalidate out-of-bounds indices.
+        self.shuffle_history.write().await.retain(|i| *i < new_len);
     }
 
     pub async fn remove_from_queue(&self, index: usize) -> Result<Track, PlayerError> {

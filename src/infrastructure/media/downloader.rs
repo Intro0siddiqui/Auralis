@@ -398,7 +398,7 @@ impl Downloader {
                 Err(_) => "(body read timed out)".to_string(),
             };
             let hint = match status.as_u16() {
-                403 => " — 403 Forbidden: googlevideo rejected UA/Referer/Origin/PO-token or URL expired (try re-resolving; TV/ANDROID_VR clients don't need PO-token, IOS/ANDROID do — set youtube_po_token in Settings or switch client)",
+                403 => " — 403 Forbidden: googlevideo rejected UA/Referer/Origin/PO-token or URL expired [rr1---sn-gwpa-cived] — 2026 Jio sn-gwpa-cived now gates TV too (try re-resolving with ANDROID+pot or WEB_SAFARI; set youtube_po_token via BgUtils mint or Settings cookie)",
                 404 => " — 404: URL expired or invalid (re-resolve the video)",
                 416 => " — 416 Range Not Satisfiable: resume offset beyond file size (will retry from 0)",
                 429 => " — 429 Too Many Requests: rate-limited, retry later",
