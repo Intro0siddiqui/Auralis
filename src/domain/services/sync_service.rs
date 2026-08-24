@@ -9,10 +9,75 @@ use crate::domain::models::{
 use crate::domain::repositories::{SettingsRepository, SyncRepository};
 use crate::infrastructure::network::SyncEngine;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Maximum consecutive pairing failures before a peer is locked out.
+const PAIRING_MAX_FAILURES: u32 = 5;
+
+/// How long a peer stays locked out after too many pairing failures.
+const PAIRING_LOCKOUT: Duration = Duration::from_secs(60);
+
+/// In-memory failed-pairing tracker keyed by peer identifier
+/// (`(failure_count, locked_out_until)`).
+#[derive(Default)]
+struct PairingRateLimiter {
+    failures: HashMap<String, (u32, Option<Instant>)>,
+}
+
+impl PairingRateLimiter {
+    /// Returns `true` while the peer is locked out; an expired lockout resets
+    /// the failure counter.
+    fn is_locked_out(&mut self, key: &str) -> bool {
+        match self.failures.get_mut(key) {
+            Some((count, locked_until)) => match *locked_until {
+                Some(until) if Instant::now() < until => true,
+                _ => {
+                    *count = 0;
+                    *locked_until = None;
+                    false
+                }
+            },
+            None => false,
+        }
+    }
+
+    fn record_failure(&mut self, key: &str) {
+        let entry = self.failures.entry(key.to_string()).or_insert((0, None));
+        entry.0 += 1;
+        if entry.0 >= PAIRING_MAX_FAILURES {
+            *entry = (0, Some(Instant::now() + PAIRING_LOCKOUT));
+        }
+    }
+
+    fn clear(&mut self, key: &str) {
+        self.failures.remove(key);
+    }
+}
+
+/// Lock the pairing limiter, recovering a poisoned mutex instead of panicking.
+fn lock_pairing_limiter(
+    limiter: &Mutex<PairingRateLimiter>,
+) -> std::sync::MutexGuard<'_, PairingRateLimiter> {
+    limiter.unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Byte-wise constant-time equality: XOR-accumulates every byte pair and ORs
+/// into a single accumulator so timing cannot reveal how many leading bytes
+/// matched.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 /// Sync service for managing P2P synchronization
 pub struct SyncService {
@@ -23,6 +88,7 @@ pub struct SyncService {
     pending_changes: Arc<RwLock<Vec<SyncChange>>>,
     sync_status: Arc<RwLock<SyncStatus>>,
     active_pairing: Arc<RwLock<Option<PairingInfo>>>,
+    pairing_rate_limiter: Mutex<PairingRateLimiter>,
 }
 
 impl SyncService {
@@ -40,6 +106,7 @@ impl SyncService {
             pending_changes: Arc::new(RwLock::new(Vec::new())),
             sync_status: Arc::new(RwLock::new(SyncStatus::default())),
             active_pairing: Arc::new(RwLock::new(None)),
+            pairing_rate_limiter: Mutex::new(PairingRateLimiter::default()),
         }
     }
 
@@ -115,7 +182,7 @@ impl SyncService {
             *active = Some(pairing_info.clone());
         }
 
-        info!(pin = %pairing_info.pin, "Pairing initiated");
+        info!("Pairing initiated (PIN not logged)");
         Ok(pairing_info)
     }
 
@@ -125,7 +192,17 @@ impl SyncService {
         pin: String,
         device_name: String,
     ) -> Result<PairedDevice, SyncError> {
-        info!(pin = %pin, "Completing pairing");
+        info!(device = %device_name, "Completing pairing");
+
+        // Rate limit failed pairing attempts per peer identifier.
+        let limiter_key = device_name.trim().to_lowercase();
+        {
+            let mut limiter = lock_pairing_limiter(&self.pairing_rate_limiter);
+            if limiter.is_locked_out(&limiter_key) {
+                warn!(device = %device_name, "Pairing locked out after repeated failures");
+                return Err(SyncError::TooManyAttempts);
+            }
+        }
 
         // Check active pairing
         let active = {
@@ -134,8 +211,10 @@ impl SyncService {
         }
         .ok_or(SyncError::NoActivePairing)?;
 
-        // Validate PIN
-        if active.pin != pin {
+        // Validate PIN (constant-time comparison; failures rate limited)
+        if !constant_time_eq(active.pin.as_bytes(), pin.as_bytes()) {
+            warn!(device = %device_name, "Pairing failed: invalid PIN");
+            lock_pairing_limiter(&self.pairing_rate_limiter).record_failure(&limiter_key);
             return Err(SyncError::InvalidPin);
         }
 
@@ -163,6 +242,9 @@ impl SyncService {
             let mut active = self.active_pairing.write().await;
             *active = None;
         }
+
+        // Successful pairing resets the failure counter for this peer.
+        lock_pairing_limiter(&self.pairing_rate_limiter).clear(&limiter_key);
 
         info!(device_id = %device.id, "Pairing completed");
         Ok(device)
@@ -390,6 +472,9 @@ pub enum SyncError {
 
     #[error("Invalid PIN")]
     InvalidPin,
+
+    #[error("Too many failed pairing attempts; try again later")]
+    TooManyAttempts,
 
     #[error("Pairing expired")]
     PairingExpired,

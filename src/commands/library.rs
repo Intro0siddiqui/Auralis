@@ -547,26 +547,85 @@ pub async fn pick_audio_files_and_import(
     }
 }
 
+/// Maximum size of artwork served through `media_data_url`.
+const MEDIA_DATA_URL_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Read a local image file and return it as a `data:` URI so the webview can
 /// render cover art even when the Tauri asset protocol is unavailable.
+///
+/// The requested path is canonicalized and must resolve inside one of the
+/// app's managed library roots (the app data dir plus the OS music/download
+/// folders used by the scanner); only image extensions are accepted and reads
+/// are capped at [`MEDIA_DATA_URL_MAX_BYTES`].
 #[tauri::command]
-pub async fn media_data_url(path: String) -> Result<String, String> {
+pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<String, String> {
     use base64::Engine;
+    use std::path::{Path, PathBuf};
 
-    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
-    let mime = match std::path::Path::new(&path)
+    let extension = Path::new(&path)
         .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("jpg")
-        .to_lowercase()
-        .as_str()
-    {
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    let mime = match extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
         "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => "image/jpeg",
+        other => {
+            tracing::warn!(extension = %other, "Rejected artwork with unsupported image extension");
+            return Err(format!(
+                "Unsupported image extension '{other}': allowed extensions are jpg, jpeg, png, webp"
+            ));
+        }
     };
 
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    // Canonicalize to defeat traversal (`..`) tricks; symlinks are resolved to
+    // their target so escapes out of the roots cannot pass the check below.
+    let canonical = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("Invalid image path: {e}"))?;
+
+    // Allowlist roots mirror the default scan paths of `scan_library_paths`.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(app_dir) = app.path().app_data_dir() {
+        roots.push(app_dir);
+    }
+    if let Some(music) = dirs::audio_dir() {
+        roots.push(music);
+    }
+    if let Some(download) = dirs::download_dir() {
+        roots.push(download);
+    }
+
+    let mut canonical_roots = Vec::with_capacity(roots.len());
+    for root in &roots {
+        if let Ok(canonical_root) = root.canonicalize() {
+            canonical_roots.push(canonical_root);
+        }
+    }
+
+    if canonical_roots.is_empty()
+        || !canonical_roots
+            .iter()
+            .any(|root| canonical.starts_with(root))
+    {
+        tracing::warn!(path = %path, "Blocked artwork read outside managed library roots");
+        return Err("Image path is outside the app's managed library folders".to_string());
+    }
+
+    let metadata = std::fs::metadata(&canonical).map_err(|e| format!("Failed to stat image: {e}"))?;
+    if !metadata.is_file() {
+        return Err("Requested image path is not a regular file".to_string());
+    }
+    if metadata.len() > MEDIA_DATA_URL_MAX_BYTES {
+        return Err(format!(
+            "Image exceeds the {} MB limit",
+            MEDIA_DATA_URL_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let bytes =
+        std::fs::read(&canonical).map_err(|e| format!("Failed to read image: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{mime};base64,{b64}"))
 }

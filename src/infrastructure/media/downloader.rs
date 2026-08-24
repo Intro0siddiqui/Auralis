@@ -82,9 +82,46 @@ pub enum DownloaderError {
     DownloadFailed(String),
 }
 
+const ALLOWED_EXTS: &[&str] = &[
+    "mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "webm", "mp4", "mov", "oga",
+];
+
+/// Whitelist and sanitize an extension string. Returns a safe extension from
+/// the allow-list; falls back to the trusted `fallback` (AudioFormat) or "mp3".
+fn sanitize_ext(raw: &str, fallback: &str) -> String {
+    let t = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    // must be purely alphanumeric and on allow-list — any slash, dot, or
+    // control char causes fallback (prevents traversal like "../../etc")
+    let is_clean = !t.is_empty()
+        && t.len() <= 8
+        && t.chars().all(|c| c.is_ascii_alphanumeric());
+    if is_clean && ALLOWED_EXTS.contains(&t.as_str()) {
+        return t;
+    }
+    let fb = fallback
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    let fb_clean: String = fb.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if ALLOWED_EXTS.contains(&fb_clean.as_str()) {
+        fb_clean
+    } else {
+        "mp3".to_string()
+    }
+}
+
 /// Replace filesystem-unsafe characters so titles produce valid filenames.
+/// Strips path separators, control chars, "..", reserved Windows names, and
+/// limits length to 200 chars. Never returns empty or "." / "..".
 fn sanitize_filename(name: &str) -> String {
-    let cleaned: String = name
+    // Take basename only — strip any directory components
+    let base = name
+        .rsplit(&['/', '\\'][..])
+        .next()
+        .unwrap_or(name);
+    // Remove control chars then replace unsafe chars
+    let filtered: String = base.chars().filter(|c| !c.is_control()).collect();
+    let cleaned: String = filtered
         .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' {
@@ -94,12 +131,34 @@ fn sanitize_filename(name: &str) -> String {
             }
         })
         .collect();
-    let trimmed = cleaned.trim().trim_end_matches('.').to_string();
-    if trimmed.is_empty() {
-        "audio_track".to_string()
-    } else {
-        trimmed
+    let mut trimmed = cleaned.trim().trim_matches('.').to_string();
+    // Collapse any remaining ".." to avoid traversal
+    while trimmed.contains("..") {
+        trimmed = trimmed.replace("..", "_");
     }
+    // Remove any lingering path separators (already mapped to _ but be safe)
+    trimmed = trimmed.replace(['/', '\\'], "_");
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return "audio_track".to_string();
+    }
+    // Windows reserved device names
+    let lower = trimmed.to_ascii_lowercase();
+    const RESERVED: &[&str] = &[
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6",
+        "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7",
+        "lpt8", "lpt9",
+    ];
+    if RESERVED.contains(&lower.as_str()) {
+        return format!("{}_{}", trimmed, "track");
+    }
+    if trimmed.len() > 200 {
+        trimmed.truncate(200);
+        trimmed = trimmed.trim_end_matches('.').to_string();
+        if trimmed.is_empty() {
+            return "audio_track".to_string();
+        }
+    }
+    trimmed
 }
 
 impl Downloader {
@@ -133,13 +192,22 @@ impl Downloader {
         }
 
         let id = Uuid::new_v4();
+        let fallback_ext = req.format.extension().to_string();
         let ext = if req.ext.is_empty() {
-            req.format.extension().to_string()
+            sanitize_ext(&fallback_ext, &fallback_ext)
         } else {
-            req.ext.clone()
+            sanitize_ext(&req.ext, &fallback_ext)
         };
-        let filename = format!("{}.{}", sanitize_filename(&req.title), ext);
-        let path = self.output_dir.join(&filename);
+        let mut filename = format!("{}.{}", sanitize_filename(&req.title), ext);
+        let mut path = self.output_dir.join(&filename);
+        // Deduplicate with short UUID suffix if file already exists; keeps
+        // sidecar `<audio>.jpg` working via with_extension("jpg")
+        if path.exists() {
+            let stem = sanitize_filename(&req.title);
+            let short = id.to_string().chars().take(8).collect::<String>();
+            filename = format!("{}_{}.{}", stem, short, ext);
+            path = self.output_dir.join(&filename);
+        }
 
         let mut progress =
             DownloadProgress::new(req.stream_url.clone(), req.title.clone(), req.format);
@@ -284,7 +352,21 @@ impl Downloader {
             })?;
 
         let status = res.status();
-        let resuming = start_byte > 0 && status.as_u16() == 206;
+        // Use reqwest StatusCode for correctness; 206 = PartialContent
+        let resuming = start_byte > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
+        if start_byte > 0 && status == reqwest::StatusCode::OK {
+            // Server ignored Range — must truncate and restart from 0, otherwise
+            // `downloaded = start_byte` overcounts and file contains duplicate prefix
+            warn!(download_id = %id, start_byte = start_byte, "Range request got 200 not 206 — truncating file and resetting to 0 (server does not support resume)");
+            {
+                let mut guard = active.write().await;
+                if let Some(state) = guard.get_mut(&id) {
+                    state.downloaded_bytes = 0;
+                    state.progress = 0.0;
+                    state.updated_at = Utc::now();
+                }
+            }
+        }
         let ct = res
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -381,7 +463,10 @@ impl Downloader {
         }
 
         let start_instant = Instant::now();
-        let mut downloaded = start_byte;
+        // If server returned 200 to a Range request, we truncated the file —
+        // downloaded must start at 0, not start_byte (otherwise overcount)
+        let effective_start = if resuming { start_byte } else { 0 };
+        let mut downloaded = effective_start;
 
         loop {
             let chunk_opt = tokio::time::timeout(Duration::from_secs(30), res.chunk())
@@ -418,7 +503,7 @@ impl Downloader {
 
             let elapsed = start_instant.elapsed().as_secs_f64();
             let speed = if elapsed > 0.0 {
-                ((downloaded - start_byte) as f64 / elapsed) as u64
+                ((downloaded - effective_start) as f64 / elapsed) as u64
             } else {
                 0
             };

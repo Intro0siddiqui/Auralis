@@ -93,6 +93,11 @@ async function runRealTest() {
     }
 
     function runSmokeCheck(reason) {
+        const allowFallback = process.env.E2E_ALLOW_FALLBACK === '1';
+        if (!allowFallback) {
+            throw new Error(`Fallback smoke check blocked (strict IPC path mandatory): ${reason}. Set E2E_ALLOW_FALLBACK=1 to allow fallback smoke check (hides IPC regressions).`);
+        }
+        console.warn(`  ${colors.yellow}[WARNING] Fallback smoke check engaged: ${reason} — this hides IPC regressions! (E2E_ALLOW_FALLBACK=1)${colors.reset}`);
         console.log(`  ${colors.yellow}${reason} — falling back to binary smoke check${colors.reset}`);
         try {
             const out = execSync(`file ${BINARY}`, { encoding: 'utf8' });

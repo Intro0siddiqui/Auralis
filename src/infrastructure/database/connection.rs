@@ -14,6 +14,34 @@ use tracing::{debug, info};
 /// `RefCell`s). A `std::sync::Mutex<T>` is `Sync` whenever `T: Send`, so
 /// `Arc<Mutex<Connection>>` is `Send + Sync`, which is what Tauri's
 /// `State<...>` requires.
+///
+/// # Contention note — single `Mutex<Connection>` serializes all queries
+///
+/// Auralis intentionally keeps a single `rusqlite::Connection` behind one
+/// `Mutex` rather than a connection pool (`r2d2`, `tokio-rusqlite`, etc.).
+/// Adding a pool would pull in extra crates and require a schema migration
+/// to handle concurrent writers — out of scope for this fix and forbidden by
+/// the task constraints.
+///
+/// Serialization means every `SELECT`/`INSERT`/`UPDATE` holds the mutex for
+/// its entire `prepare` + `execute` window. On desktop this is fine (low
+/// concurrency: UI thread + scanner). On Android the scanner + playback +
+/// sync can contend briefly.
+///
+/// Mitigations in place (no new deps):
+/// - `PRAGMA journal_mode = WAL` — readers do not block writers and writers
+///   do not block readers at the SQLite level; only the Rust mutex serializes.
+/// - `PRAGMA synchronous = NORMAL` with WAL — safe and faster than `FULL`.
+/// - `PRAGMA busy_timeout = 5000` — if SQLite itself would return
+///   `SQLITE_BUSY` (e.g., two writers racing inside the same connection),
+///   it busy-waits up to 5 s instead of failing immediately.
+/// - Callers should keep the `MutexGuard` scope as short as possible and
+///   never hold it across an `.await` (all repo methods do: they lock,
+///   prepare, collect, then drop the guard before returning).
+///
+/// Future (no migration now): consider `tokio::task::spawn_blocking` around
+/// every DB call to avoid blocking the async runtime while the mutex is
+/// held, or a lightweight pool once the app needs true concurrent writes.
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
@@ -171,10 +199,30 @@ impl Database {
     }
 
     /// Get a guard for the connection. Note: blocks the current thread.
+    ///
+    /// Keep the guard scope minimal and never hold it across an `.await`.
     pub fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, DatabaseError> {
         self.connection
             .lock()
             .map_err(|e| DatabaseError::ConnectionError(format!("Mutex poisoned: {e}")))
+    }
+
+    /// Non-blocking attempt to acquire the connection.
+    ///
+    /// Returns `None` if the mutex is currently contended — caller can
+    /// back off, log a `tracing::warn!`, and retry, rather than blocking
+    /// the async runtime. This is the `try_lock` pattern mentioned in the
+    /// task: it does not require a pool and is only used for opportunistic
+    /// background work (scanners should still use `connection()` to guarantee
+    /// progress). Unused by default; exposed for future callers.
+    pub fn try_connection(&self) -> Option<std::sync::MutexGuard<'_, Connection>> {
+        match self.connection.try_lock() {
+            Ok(g) => Some(g),
+            Err(_) => {
+                tracing::warn!("Database mutex contended; caller should retry or use blocking lock");
+                None
+            }
+        }
     }
 }
 

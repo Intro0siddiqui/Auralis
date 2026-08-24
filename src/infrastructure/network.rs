@@ -88,6 +88,14 @@ pub struct NetworkRuntime {
     stats: StdMutex<NetworkStats>,
     last_received: RwLock<Option<SyncRequest>>,
     last_gossip: RwLock<Option<Vec<u8>>>,
+    /// In-memory UUID (PairedDevice.id) -> real libp2p PeerId mapping.
+    /// PairedDevice stores a UUID, not a PeerId, so `PeerId::from_str(UUID)`
+    /// always fails (PeerNotFound). Callers register the mapping after
+    /// discovery/pairing and `resolve_peer` is used before dial.
+    /// NOTE: persistent storage still lacks a `peer_id` column — DB migration
+    /// `ALTER TABLE paired_devices ADD COLUMN peer_id TEXT` is recommended to
+    /// survive restarts; currently this table is in-memory only.
+    device_aliases: RwLock<HashMap<String, PeerId>>,
 }
 
 impl NetworkRuntime {
@@ -104,6 +112,7 @@ impl NetworkRuntime {
             stats: StdMutex::new(NetworkStats::default()),
             last_received: RwLock::new(None),
             last_gossip: RwLock::new(None),
+            device_aliases: RwLock::new(HashMap::new()),
         }
     }
 
@@ -141,6 +150,43 @@ impl NetworkRuntime {
     async fn set_connection(&self, peer_id: PeerId, state: ConnectionState) {
         let mut conns = self.connections.write().await;
         conns.insert(peer_id, state);
+    }
+
+    /// Register an in-memory mapping from a PairedDevice UUID string to its
+    /// real libp2p PeerId discovered via mDNS/gossip. Call after pairing or
+    /// when a device announces `device_id -> peer_id` over gossipsub.
+    pub async fn register_device_alias(&self, device_id: String, peer_id: PeerId) {
+        let mut map = self.device_aliases.write().await;
+        map.insert(device_id, peer_id);
+    }
+
+    /// Resolve a `device_id` (UUID string) or a raw PeerId string to a real
+    /// PeerId. Checks the alias table first, then tries to parse as PeerId.
+    pub async fn resolve_peer_id(&self, id: &str) -> Option<PeerId> {
+        {
+            let map = self.device_aliases.read().await;
+            if let Some(pid) = map.get(id) {
+                return Some(*pid);
+            }
+            // also try lowercased key for UUID case-insensitivity
+            let lower = id.to_ascii_lowercase();
+            if lower != id {
+                if let Some(pid) = map.get(&lower) {
+                    return Some(*pid);
+                }
+            }
+        }
+        PeerId::from_str(id).ok()
+    }
+
+    /// Convenience: alias-aware addresses lookup — resolves `id` then fetches
+    /// known multiaddrs.
+    pub async fn addresses_of_alias(&self, id: &str) -> Vec<Multiaddr> {
+        if let Some(pid) = self.resolve_peer_id(id).await {
+            self.addresses_of(&pid).await
+        } else {
+            Vec::new()
+        }
     }
 
     /// Builds the swarm behaviour from a fresh session and a command channel.
@@ -357,6 +403,19 @@ impl Discovery {
         self.runtime.stats().await
     }
 
+    /// Bind a PairedDevice UUID to a discovered PeerId (in-memory alias).
+    pub async fn link_device_peer(&self, device_id: &str, peer_id_str: &str) -> Result<(), NetworkError> {
+        let pid = PeerId::from_str(peer_id_str)
+            .map_err(|_| NetworkError::PeerNotFound(peer_id_str.to_string()))?;
+        self.runtime
+            .register_device_alias(device_id.to_string(), pid)
+            .await;
+        self.runtime
+            .register_device_alias(device_id.to_ascii_lowercase(), pid)
+            .await;
+        Ok(())
+    }
+
     async fn send_command(&self, command: NetworkCommand) -> Result<(), NetworkError> {
         let tx = self
             .runtime
@@ -455,16 +514,36 @@ impl SyncEngine {
         .map_err(|e| NetworkError::SendError(e.to_string()))
     }
 
+    /// Bind a PairedDevice UUID to its real PeerId after discovery/pairing.
+    /// Required because `PairedDevice.id` is a UUID, not a PeerId.
+    pub async fn link_device_peer(&self, device_id: &str, peer_id_str: &str) -> Result<(), NetworkError> {
+        let pid = PeerId::from_str(peer_id_str)
+            .map_err(|_| NetworkError::PeerNotFound(peer_id_str.to_string()))?;
+        self.runtime
+            .register_device_alias(device_id.to_string(), pid)
+            .await;
+        // also store lowercased variant for UUID case-insensitivity
+        self.runtime
+            .register_device_alias(device_id.to_ascii_lowercase(), pid)
+            .await;
+        Ok(())
+    }
+
     /// Send a sync request to a discovered peer and await its response.
     ///
-    /// The queued payloads are batched into a single request which is sent on
-    /// the request-response protorol. Returns `Err(PeerNotFound)` if the peer
-    /// has not been discovered via mDNS.
+    /// `peer` may be a raw libp2p PeerId string **or** a PairedDevice UUID that
+    /// was previously bound via `link_device_peer` / `Discovery::link_device_peer`.
+    /// The alias table is consulted before parsing as PeerId, fixing the
+    /// `PeerId::from_str(UUID) -> PeerNotFound` bug. Returns `Err(PeerNotFound)`
+    /// if the peer has not been discovered via mDNS and no alias exists.
     pub async fn request_sync(&self, peer: &str) -> Result<(), NetworkError> {
-        let peer_id =
-            PeerId::from_str(peer).map_err(|_| NetworkError::PeerNotFound(peer.to_string()))?;
+        let peer_id = if let Some(pid) = self.runtime.resolve_peer_id(peer).await {
+            pid
+        } else {
+            return Err(NetworkError::PeerNotFound(peer.to_string()));
+        };
 
-        let addresses = if peer == self.peer_id {
+        let addresses = if peer == self.peer_id || peer_id.to_string() == self.peer_id {
             vec![]
         } else {
             self.runtime.addresses_of(&peer_id).await
@@ -641,10 +720,11 @@ async fn run_swarm(
     mut swarm: Swarm<SwarmBehaviour>,
     mut command_rx: mpsc::Receiver<NetworkCommand>,
 ) {
-    let mut pending: HashMap<
-        request_response::OutboundRequestId,
-        oneshot::Sender<Result<(), NetworkError>>,
-    > = HashMap::new();
+    // Shared pending map so timeout tasks can clean up the entry even when the
+    // caller dropped its `reply_rx` after a 30s timeout. Previously a timed-out
+    // request leaked forever (never removed until a late response arrived).
+    let pending: Arc<TokioMutex<HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>>> =
+        Arc::new(TokioMutex::new(HashMap::new()));
 
     info!(peer_id = %runtime.local_peer_id, "Swarm event loop started");
     loop {
@@ -672,7 +752,20 @@ async fn run_swarm(
                         runtime.record_bytes_sent(req_bytes);
                         let request_id =
                             swarm.behaviour_mut().request_response.send_request(&peer_id, request);
-                        pending.insert(request_id, reply);
+                        {
+                            let mut map = pending.lock().await;
+                            map.insert(request_id, reply);
+                        }
+                        // Timeout cleanup: remove pending entry after 30s if no
+                        // response / OutboundFailure cleaned it already.
+                        let pending_clone = pending.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            let mut map = pending_clone.lock().await;
+                            if let Some(sender) = map.remove(&request_id) {
+                                let _ = sender.send(Err(NetworkError::Timeout));
+                            }
+                        });
                     }
                     Some(NetworkCommand::Publish { topic, data }) => {
                         let msg_len = data.len() as u64;
@@ -690,7 +783,7 @@ async fn run_swarm(
             event = swarm.next() => {
                 match event {
                     Some(event) => {
-                        handle_swarm_event(&runtime, &mut swarm, &mut pending, event).await;
+                        handle_swarm_event(&runtime, &mut swarm, &pending, event).await;
                     }
                     None => break,
                 }
@@ -708,10 +801,7 @@ async fn run_swarm(
 async fn handle_swarm_event(
     runtime: &Arc<NetworkRuntime>,
     swarm: &mut Swarm<SwarmBehaviour>,
-    pending: &mut HashMap<
-        request_response::OutboundRequestId,
-        oneshot::Sender<Result<(), NetworkError>>,
-    >,
+    pending: &Arc<TokioMutex<HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>>>,
     event: SwarmEvent<<SwarmBehaviour as libp2p::swarm::NetworkBehaviour>::ToSwarm>,
 ) {
     match event {
@@ -738,8 +828,9 @@ async fn handle_swarm_event(
             ..
         })) => {
             info!(topic = %message.topic, len = message.data.len(), "Received gossipsub message");
-            let mut last = runtime.last_gossip.blocking_write();
-            *last = Some(message.data);
+            // Clone data before acquiring async lock — avoids holding guard across await
+            let data = message.data.clone();
+            *runtime.last_gossip.write().await = Some(data);
         }
         SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
             request_response::Event::Message {
@@ -752,8 +843,9 @@ async fn handle_swarm_event(
                 request, channel, ..
             } => {
                 info!(%peer, "Received sync request");
-                let mut last = runtime.last_received.blocking_write();
-                *last = Some(request.clone());
+                // Clone before await to not hold guard across await
+                let req_clone = request.clone();
+                *runtime.last_received.write().await = Some(req_clone);
                 let response = SyncResponse {
                     ok: true,
                     message: format!("ack from {}", runtime.local_peer_id),
@@ -767,7 +859,11 @@ async fn handle_swarm_event(
                 request_id,
                 response,
             } => {
-                if let Some(reply) = pending.remove(&request_id) {
+                let reply = {
+                    let mut map = pending.lock().await;
+                    map.remove(&request_id)
+                };
+                if let Some(reply) = reply {
                     let result = if response.ok {
                         Ok(())
                     } else {
@@ -783,7 +879,11 @@ async fn handle_swarm_event(
                 request_id, error, ..
             },
         )) => {
-            if let Some(reply) = pending.remove(&request_id) {
+            let reply = {
+                let mut map = pending.lock().await;
+                map.remove(&request_id)
+            };
+            if let Some(reply) = reply {
                 let _ = reply.send(Err(NetworkError::ConnectionError(format!(
                     "outbound sync failed: {error:?}"
                 ))));

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::params;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 // ============================================================================
@@ -63,11 +63,24 @@ impl SqliteTrackRepository {
 /// Build the `WHERE` clause and ordered param bindings shared by `find_all`
 /// and `count_filtered`. Returns the SQL fragment (starting with `WHERE`) and
 /// the params to bind in the same order.
+///
+/// NOTE: `LIKE '%term%'` with a leading `%` defeats the `idx_tracks_title`
+/// (and `idx_tracks_artist`/`album`) B-tree indexes — SQLite must do a full
+/// scan for that clause. For short `term` values we could use a prefix
+/// pattern `term%` that *does* use the index, but that changes semantics
+/// (substring vs prefix). The correct future fix is an `FTS5` virtual table
+/// or a `COLLATE NOCASE` trigram index, which requires a schema migration.
+/// We intentionally do **not** migrate now (per task constraints) and keep
+/// the substring search, but the comment documents the trade-off. If we
+/// ever re-enable prefix optimization for `term.len() > 2`, it would be:
+/// `title LIKE 'term%' OR title LIKE '%term%'` with a `UNION` or `OR` — not
+/// done here to avoid surprising results.
 fn track_filter_where(filter: &TrackFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut sql = String::from("WHERE 1=1");
     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(search) = &filter.search {
+        // Leading `%` defeats index — see doc comment above. No migration now.
         sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
         let pattern = format!("%{}%", search);
         params_vec.push(Box::new(pattern.clone()));
@@ -143,7 +156,13 @@ impl TrackRepository for SqliteTrackRepository {
 
         let tracks = stmt
             .query_map(params_refs.as_slice(), Self::row_to_track)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map track row; skipping");
+                    None
+                }
+            })
             .collect();
 
         Ok(tracks)
@@ -212,7 +231,13 @@ impl TrackRepository for SqliteTrackRepository {
 
         let tracks = stmt
             .query_map(params![format!("%{}%", artist)], Self::row_to_track)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map track row in find_by_artist; skipping");
+                    None
+                }
+            })
             .collect();
 
         Ok(tracks)
@@ -232,7 +257,13 @@ impl TrackRepository for SqliteTrackRepository {
 
         let tracks = stmt
             .query_map(params![format!("%{}%", album)], Self::row_to_track)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map track row in find_by_album; skipping");
+                    None
+                }
+            })
             .collect();
 
         Ok(tracks)
@@ -253,7 +284,13 @@ impl TrackRepository for SqliteTrackRepository {
 
         let tracks = stmt
             .query_map(params![&pattern, &pattern, &pattern], Self::row_to_track)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map track row in search; skipping");
+                    None
+                }
+            })
             .collect();
 
         Ok(tracks)
@@ -355,16 +392,27 @@ impl TrackRepository for SqliteTrackRepository {
         &self,
         ids: Vec<Uuid>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if ids.is_empty() {
+            return Ok(());
+        }
         let conn = self
             .db
             .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        // Chunk to avoid SQLITE_MAX_VARIABLE_NUMBER (default 999, some
+        // builds 32766). 500 is safely below both and keeps the SQL string
+        // small for the query planner.
+        const CHUNK_SIZE: usize = 500;
         let ids_str: Vec<String> = ids.iter().map(|u| u.to_string()).collect();
-        let placeholders = ids_str.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        conn.execute(
-            &format!("DELETE FROM tracks WHERE id IN ({})", placeholders),
-            rusqlite::params_from_iter(&ids_str),
-        )?;
+        for chunk in ids_str.chunks(CHUNK_SIZE) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!("DELETE FROM tracks WHERE id IN ({})", placeholders);
+            conn.execute(&sql, rusqlite::params_from_iter(chunk))?;
+            debug!(count = chunk.len(), "Deleted chunk of tracks");
+        }
         Ok(())
     }
 
@@ -401,7 +449,13 @@ impl TrackRepository for SqliteTrackRepository {
         let mut stmt = conn.prepare("SELECT * FROM tracks ORDER BY date_added DESC LIMIT ?")?;
         let tracks = stmt
             .query_map(params![limit], Self::row_to_track)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map track row in recent; skipping");
+                    None
+                }
+            })
             .collect();
         Ok(tracks)
     }
@@ -419,7 +473,13 @@ impl TrackRepository for SqliteTrackRepository {
         )?;
         let tracks = stmt
             .query_map(params![limit], Self::row_to_track)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map track row in most_played; skipping");
+                    None
+                }
+            })
             .collect();
         Ok(tracks)
     }
@@ -486,7 +546,13 @@ impl PlaylistRepository for SqlitePlaylistRepository {
 
         let playlists = stmt
             .query_map([], Self::row_to_playlist)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map playlist row; skipping");
+                    None
+                }
+            })
             .collect();
 
         Ok(playlists)
@@ -768,7 +834,13 @@ impl SyncRepository for SqliteSyncRepository {
 
         let devices = stmt
             .query_map([], Self::row_to_device)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map paired device row; skipping");
+                    None
+                }
+            })
             .collect();
 
         Ok(devices)
@@ -848,7 +920,13 @@ impl SyncRepository for SqliteSyncRepository {
 
         let changes = stmt
             .query_map([], Self::row_to_change)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map sync change row; skipping");
+                    None
+                }
+            })
             .collect();
 
         Ok(changes)

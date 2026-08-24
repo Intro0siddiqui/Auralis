@@ -60,6 +60,15 @@ const IDLE_INTERVAL: Duration = Duration::from_secs(2);
 #[allow(dead_code)]
 const TRACK_END_GUARD: Duration = Duration::from_millis(1500);
 
+/// Epsilon for `position >= duration - epsilon` comparison when duration is
+/// known. Covers scheduler jitter and the 250 ms watcher cadence.
+const TRACK_END_EPSILON: Duration = Duration::from_millis(350);
+
+/// Fallback guard for unknown-duration tracks (e.g., streams). Short enough
+/// to allow < 1.5 s clips to advance, long enough to avoid the
+/// just-appended empty transient.
+const TRACK_END_MIN_GUARD: Duration = Duration::from_millis(300);
+
 /// Spawn a background task that:
 ///
 /// - emits `playback:progress` every [`WATCHER_INTERVAL`] **while playing**
@@ -76,7 +85,10 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
         loop {
             interval.tick().await;
 
-            let is_playing = player.is_playing().await;
+            // Single atomic snapshot avoids TOCTOU between `is_playing` and
+            // `is_sink_empty` (two separate `RwLock` reads could interleave
+            // with a `play()` that swaps the sink).
+            let (is_playing, is_empty) = player.sink_snapshot().await;
 
             if is_playing {
                 let progress = PlaybackProgress {
@@ -86,13 +98,37 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                 let _ = app.emit("playback:progress", &progress);
             }
 
+            // Track-end detection: prefer duration-vs-position when known
+            // (handles < 1.5 s tracks that never exceed the old 1500 ms
+            // guard), fall back to a short MIN_GUARD for unknown-duration
+            // streams. This also covers the case where `duration` is zero
+            // because metadata was missing.
             let track_just_ended = was_playing
                 && !is_playing
-                && player.is_sink_empty().await
-                && player
-                    .play_started_elapsed()
-                    .await
-                    .is_some_and(|elapsed| elapsed > TRACK_END_GUARD);
+                && is_empty
+                && {
+                    let dur = player.duration().await;
+                    let elapsed_opt = player.play_started_elapsed().await;
+                    if !dur.is_zero() {
+                        let pos = player.current_position().await;
+                        pos >= dur.saturating_sub(TRACK_END_EPSILON)
+                            || elapsed_opt.is_some_and(|e| {
+                                e + TRACK_END_EPSILON >= dur
+                                    // For short tracks, also accept any
+                                    // elapsed beyond max(dur - epsilon, MIN_GUARD)
+                                    // so a 800 ms clip can still advance.
+                                    || e
+                                        >= dur
+                                            .saturating_sub(TRACK_END_EPSILON)
+                                            .max(TRACK_END_MIN_GUARD)
+                            })
+                    } else {
+                        // Unknown duration: require at least MIN_GUARD to filter
+                        // the empty-transient after append, but allow sub-1500 ms
+                        // clips to advance.
+                        elapsed_opt.is_some_and(|e| e > TRACK_END_MIN_GUARD)
+                    }
+                };
             was_playing = is_playing;
 
             if track_just_ended {

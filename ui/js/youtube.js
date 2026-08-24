@@ -121,8 +121,19 @@ class YouTubeResolver {
                 ...Platform.shim,
                 fetch: nativeFetch,
                 eval: async (data, env) => {
-                    const fn = new Function(...Object.keys(env || {}), data.output);
-                    return fn(...Object.values(env || {}));
+                    try {
+                        const fn = new Function(...Object.keys(env || {}), data.output);
+                        return fn(...Object.values(env || {}));
+                    } catch (e) {
+                        const msg = e?.message || String(e);
+                        if (msg.includes('unsafe-eval') || msg.includes('CSP') || msg.includes('Refused to evaluate')) {
+                            throw new Error(`YouTube signature decipher blocked by CSP: 'unsafe-eval' is required for youtube.js decipher (new Function). Current script-src lacks 'unsafe-eval' — add it to tauri.conf.json security.csp or fall back to TV/ANDROID_VR clients which need no decipher. Original: ${msg}`);
+                        }
+                        if (msg.includes('Function')) {
+                            throw new Error(`YouTube decipher eval failed — signature may have changed or CSP blocked unsafe-eval. Try TV/ANDROID_VR fallback or update youtubei.js. Original: ${msg}`);
+                        }
+                        throw e;
+                    }
                 }
             });
         }
@@ -474,7 +485,6 @@ class YouTubeResolver {
                 let url = params.get('url');
                 const s = params.get('s');
                 const sp = params.get('sp') || 'sig';
-                const n = params.get('n') ? null : null; // n lives in url, handled below
                 if (url) {
                     url = decodeURIComponent(url);
                     if (s && client.session?.player) {

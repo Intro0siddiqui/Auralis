@@ -154,6 +154,15 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         // orderedClients must be defined (TV/ANDROID_VR-first when no poToken)
         assert.ok(src.includes('orderedClients'), 'Expected orderedClients PO-token-aware ordering');
         assert.ok(src.includes("TV") && src.includes("ANDROID_VR"), 'orderedClients must mention TV/ANDROID_VR');
+        // PO-aware order: when poToken empty => TV, ANDROID_VR, MWEB first; when token => IOS, ANDROID first
+        const m = src.match(/const orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
+        assert.ok(m, 'orderedClients ternary not found or malformed');
+        const withToken = m[1];
+        const withoutToken = m[2];
+        assert.ok(withToken.includes("'IOS'") && withToken.includes("'ANDROID'") && withToken.indexOf("'IOS'") < withToken.indexOf("'ANDROID'"), 'with poToken order should start IOS, ANDROID');
+        assert.ok(withToken.indexOf("'IOS'") < withToken.indexOf("'TV'"), 'with poToken IOS must come before TV');
+        assert.equal(withToken.replace(/\s/g, ''), "'IOS','ANDROID','ANDROID_VR','TV','MWEB','WEB'", 'with poToken branch exact order');
+        assert.equal(withoutToken.replace(/\s/g, ''), "'TV','ANDROID_VR','MWEB','WEB','IOS','ANDROID'", 'without poToken branch exact order: TV, ANDROID_VR, MWEB first');
     });
 
     it('getInfo fallback tries 6 clients', () => {

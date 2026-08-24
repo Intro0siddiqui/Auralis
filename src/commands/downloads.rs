@@ -274,9 +274,96 @@ pub struct HttpFetchResponse {
     pub body: String,
 }
 
+/// Hosts the frontend is allowed to reach through native HTTP fetch.
+/// Exact-match hosts.
+const HTTP_FETCH_ALLOWED_HOSTS: &[&str] = &[
+    "www.youtube.com",
+    "music.youtube.com",
+    "youtubei.googleapis.com",
+    "i.ytimg.com",
+];
+/// Subdomain-suffix hosts (`<anything>.suffix`).
+const HTTP_FETCH_ALLOWED_SUFFIXES: &[&str] = &["googlevideo.com", "ytimg.com", "youtube.com"];
+
+/// Check whether `host` is on the native-fetch egress allowlist
+/// (dot-boundary suffix match; case-insensitive; trailing dot tolerated).
+fn host_is_allowed_egress(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if HTTP_FETCH_ALLOWED_HOSTS.contains(&host.as_str()) {
+        return true;
+    }
+    HTTP_FETCH_ALLOWED_SUFFIXES.iter().any(|suffix| {
+        host.len() > suffix.len()
+            && host.ends_with(suffix)
+            && host.as_bytes()[host.len() - suffix.len() - 1] == b'.'
+    })
+}
+
+/// Reject hosts that are literal private/loopback/link-local IP addresses
+/// (cloud metadata endpoints, internal services, localhost).
+fn ensure_not_private_ip_host(host: &str) -> Result<(), String> {
+    use std::net::IpAddr;
+
+    let is_private_v4 = |ip: std::net::Ipv4Addr| {
+        ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || ip.is_unspecified()
+            || ip.is_broadcast()
+    };
+
+    let stripped = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let Ok(ip) = stripped.parse::<IpAddr>() else {
+        return Ok(()); // regular hostname — allowlist above governs it
+    };
+
+    let blocked = match ip {
+        IpAddr::V4(v4) => is_private_v4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                is_private_v4(v4)
+            } else {
+                let seg = v6.segments();
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                    || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
+            }
+        }
+    };
+
+    if blocked {
+        Err(format!("Blocked request to private/reserved address '{host}'"))
+    } else {
+        Ok(())
+    }
+}
+
 /// Native HTTP fetch command executed via reqwest without browser CORS restrictions.
+///
+/// Egress is restricted to the YouTube/InnerTube infrastructure the frontend
+/// resolver legitimately needs (see `ui/js/youtube.js`) to prevent the command
+/// from being abused as an SSRF primitive against internal/metadata endpoints.
 #[tauri::command]
 pub async fn http_fetch(request: HttpFetchRequest) -> Result<HttpFetchResponse, String> {
+    let url = reqwest::Url::parse(&request.url)
+        .map_err(|e| format!("Invalid URL '{}': {e}", request.url))?;
+    if url.scheme() != "https" {
+        warn!(url = %request.url, "Rejected non-HTTPS native fetch");
+        return Err("Only HTTPS URLs are permitted for native fetch".to_string());
+    }
+    let host = url.host_str().unwrap_or_default();
+    if host.is_empty() {
+        return Err("URL has no host".to_string());
+    }
+    if !host_is_allowed_egress(host) {
+        warn!(host = %host, "Blocked native fetch to non-allowlisted host");
+        return Err(format!(
+            "Host '{host}' is not on the native fetch allowlist"
+        ));
+    }
+    ensure_not_private_ip_host(host)?;
+
     let client = reqwest::Client::builder()
         .use_rustls_tls()
         .user_agent("Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")

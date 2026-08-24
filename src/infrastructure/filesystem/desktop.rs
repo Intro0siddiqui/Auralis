@@ -51,10 +51,19 @@ impl DesktopScanner {
     }
 
     /// Recursively scan a directory or file path for audio files
+    ///
+    /// Uses `tokio::task::spawn_blocking` for `read_dir` so the async runtime
+    /// is not blocked, and protects against symlink loops via a visited
+    /// canonical-dir set + depth limit + symlink skip.
     pub async fn scan(&self, path: &Path) -> Result<Vec<PathBuf>, ScannerError> {
         info!(path = %path.display(), "Scanning desktop filesystem path");
 
-        if !path.exists() {
+        // Existence check offloaded to blocking pool as well.
+        let path_owned = path.to_path_buf();
+        let exists = tokio::task::spawn_blocking(move || path_owned.exists())
+            .await
+            .map_err(|e| ScannerError::IoError(format!("Join error: {e}")))?;
+        if !exists {
             warn!(path = %path.display(), "Directory does not exist");
             return Ok(Vec::new());
         }
@@ -66,11 +75,32 @@ impl DesktopScanner {
             return Ok(Vec::new());
         }
 
+        const MAX_DEPTH: usize = 64;
         let mut files = Vec::new();
-        let mut dirs_to_visit = vec![path.to_path_buf()];
+        let mut dirs_to_visit: Vec<(PathBuf, usize)> = vec![(path.to_path_buf(), 0)];
+        let mut visited: HashSet<PathBuf> = HashSet::new();
+        // Seed visited with canonical root to avoid revisiting via symlink.
+        if let Ok(canonical) = tokio::task::spawn_blocking({
+            let p = path.to_path_buf();
+            move || std::fs::canonicalize(&p)
+        })
+        .await
+        .unwrap_or(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+        {
+            visited.insert(canonical);
+        }
 
-        while let Some(current_dir) = dirs_to_visit.pop() {
-            let entries = match std::fs::read_dir(&current_dir) {
+        while let Some((current_dir, depth)) = dirs_to_visit.pop() {
+            if depth > MAX_DEPTH {
+                warn!(path = %current_dir.display(), depth, "Max depth exceeded; skipping");
+                continue;
+            }
+            // `read_dir` is blocking — offload to the blocking pool.
+            let dir_clone = current_dir.clone();
+            let entries_res = tokio::task::spawn_blocking(move || std::fs::read_dir(&dir_clone))
+                .await
+                .map_err(|e| ScannerError::IoError(format!("Join error: {e}")))?;
+            let entries = match entries_res {
                 Ok(entries) => entries,
                 Err(e) => {
                     warn!(path = %current_dir.display(), error = %e, "Cannot read directory");
@@ -102,8 +132,42 @@ impl DesktopScanner {
                     continue;
                 }
 
+                // Symlink protection: skip symlinked dirs entirely to avoid
+                // loops (e.g., `ln -s ..` or circular mounts). We check
+                // `symlink_metadata` without following, then decide.
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if ft.is_symlink() {
+                    // Resolve symlink target and check if it points to a dir —
+                    // if so, skip to avoid loops. Files are handled via the
+                    // is_file branch below after following? We intentionally
+                    // skip symlinked dirs only; symlinked files are allowed
+                    // if they are audio files but we still validate canonical.
+                    if entry_path.is_dir() {
+                        debug!(path = %entry_path.display(), "Skipping symlinked directory");
+                        continue;
+                    }
+                }
+
                 if entry_path.is_dir() {
-                    dirs_to_visit.push(entry_path);
+                    // Canonicalize and check visited set to prevent loops via
+                    // hard links / bind mounts that are not symlinks.
+                    let canon = tokio::task::spawn_blocking({
+                        let p = entry_path.clone();
+                        move || std::fs::canonicalize(&p)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                    if let Some(c) = canon {
+                        if !visited.insert(c) {
+                            debug!(path = %entry_path.display(), "Skipping already-visited directory (symlink loop)");
+                            continue;
+                        }
+                    }
+                    dirs_to_visit.push((entry_path, depth + 1));
                 } else if entry_path.is_file()
                     && Self::is_audio_file(&entry_path)
                     && !self.is_excluded(&entry_path)
@@ -285,6 +349,11 @@ impl DesktopScanner {
     }
 
     /// Process single audio file and update repository
+    ///
+    /// `std::fs::metadata` and `lofty` parsing are blocking — both are
+    /// offloaded via `tokio::task::spawn_blocking` so the async executor is
+    /// not stalled. Shares the same mtime+size incremental check as
+    /// `AndroidScanner::process_file` (see `file_mtime_size` helper).
     async fn process_file(
         &self,
         path: &Path,
@@ -297,19 +366,29 @@ impl DesktopScanner {
             .await
             .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
 
-        // Incremental scan: if the file's mtime and size match what we last
-        // indexed, the metadata cannot have changed — skip the expensive
-        // re-parse entirely. Stat is O(1) and cheap compared to decoding
-        // the audio header on every scan.
-        let file_meta = std::fs::metadata(path)
-            .map_err(|e| ScannerError::MetadataError(format!("Failed to stat {path_str}: {e}")))?;
-        let mtime = file_meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let size = file_meta.len() as u64;
+        // Incremental scan: stat via spawn_blocking (shared logic with
+        // android.rs — see `file_mtime_size` in scanner.rs). If mtime and
+        // size match the indexed row, skip the expensive lofty re-parse.
+        let path_for_stat = path.to_path_buf();
+        let path_str_for_stat = path_str.clone();
+        let (mtime, size) = tokio::task::spawn_blocking(move || {
+            let meta = std::fs::metadata(&path_for_stat).map_err(|e| {
+                ScannerError::MetadataError(format!(
+                    "Failed to stat {path_str_for_stat}: {e}"
+                ))
+            })?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let size = meta.len() as u64;
+            Ok::<(i64, u64), ScannerError>((mtime, size))
+        })
+        .await
+        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?
+        .map_err(|e| e)?;
 
         if let Some(existing_track) = existing.as_ref() {
             if existing_track.mtime == mtime && existing_track.file_size == size {
@@ -318,9 +397,19 @@ impl DesktopScanner {
             }
         }
 
-        let mut track = MetadataExtractor::extract(path).map_err(|e| {
-            ScannerError::MetadataError(format!("Failed to extract metadata from {path_str}: {e}"))
-        })?;
+        // Lofty extraction is blocking (file I/O + header decode) — offload.
+        let path_for_extract = path.to_path_buf();
+        let path_str_for_extract = path_str.clone();
+        let mut track = tokio::task::spawn_blocking(move || {
+            MetadataExtractor::extract(&path_for_extract).map_err(|e| {
+                ScannerError::MetadataError(format!(
+                    "Failed to extract metadata from {path_str_for_extract}: {e}"
+                ))
+            })
+        })
+        .await
+        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?
+        .map_err(|e| e)?;
         track.mtime = mtime;
 
         if let Some(existing_track) = existing {

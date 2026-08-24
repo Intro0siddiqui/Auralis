@@ -12,6 +12,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  TAURI_CLI_VERSION: "2.11.4"
+
 jobs:
   build-linux:
     runs-on: ubuntu-22.04
@@ -101,7 +104,7 @@ jobs:
           save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
 
       - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli@^2.0.0
+        run: npm install -g @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }}
         shell: bash
 
       - name: Build (compile gate)
@@ -109,7 +112,7 @@ jobs:
 
       - name: Bundle (.app / .dmg)
         if: startsWith(github.ref, 'refs/tags/')
-        run: npx @tauri-apps/cli build
+        run: npx @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/')
@@ -135,7 +138,7 @@ jobs:
           save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
 
       - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli@^2.0.0
+        run: npm install -g @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }}
         shell: bash
 
       - name: Build (compile gate)
@@ -143,7 +146,7 @@ jobs:
 
       - name: Bundle (.msi / .exe installer)
         if: startsWith(github.ref, 'refs/tags/')
-        run: npx @tauri-apps/cli build
+        run: npx @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/')
@@ -231,12 +234,12 @@ jobs:
 
       - name: Install Tauri CLI
         # npm ships a prebuilt binary — cargo install would compile for ~2 min
-        run: npm install -g @tauri-apps/cli@2.11.4
+        run: npm install -g @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }}
 
       - name: Init Android project
         run: |
           if [ ! -f gen/android/app/build.gradle.kts ]; then
-            npx @tauri-apps/cli android init
+            npx @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} android init
           else
             echo "gen/android already present — skipping init"
           fi
@@ -338,7 +341,7 @@ jobs:
           SYSROOT_LIB_X64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/26"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_ARM64"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_X64"
-          npx @tauri-apps/cli android build --apk --target aarch64 x86_64 --split-per-abi
+          npx @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} android build --apk --target aarch64 x86_64 --split-per-abi
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
@@ -455,7 +458,7 @@ jobs:
   test-android-e2e:
     name: Android E2E Download & Playback Test (x86_64 KVM)
     runs-on: ubuntu-22.04
-    continue-on-error: true
+    continue-on-error: false
     steps:
       - uses: actions/checkout@v4
 
@@ -530,10 +533,10 @@ jobs:
       - name: Install dependencies & Tauri CLI
         run: |
           npm install
-          npm install -g @tauri-apps/cli@2.11.4
+          npm install -g @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }}
 
       - name: Init Android project
-        run: npx --yes @tauri-apps/cli@2.11.4 android init || true
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} android init || true
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
@@ -613,7 +616,7 @@ jobs:
         run: |
           SYSROOT_LIB_X64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/26"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_X64"
-          npx --yes @tauri-apps/cli@2.11.4 android build --apk --target x86_64
+          npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} android build --apk --target x86_64
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018

@@ -11,6 +11,8 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::domain::models::{RepeatMode, Track};
+use rand::prelude::SliceRandom;
+use rand::Rng;
 
 /// Holds the lazily-opened audio output stream.
 struct OutputStreamHolder {
@@ -18,9 +20,22 @@ struct OutputStreamHolder {
     stream: Option<MixerDeviceSink>,
 }
 
-// SAFETY: every access to the held `MixerDeviceSink` happens inside a short
-// synchronous `Mutex` section (never across an `await`), and the stream is
-// only ever stored/read on the thread that opened it.
+// SAFETY: `MixerDeviceSink` wraps an `Arc` to the cpal/ALSA/CoreAudio output
+// stream. rodio's sink is `Send` but not `Sync`; we wrap it in a
+// `std::sync::Mutex` and document the following invariants:
+//
+// 1. Every access to the inner `MixerDeviceSink` is through a short,
+//    synchronous `Mutex::lock()` critical section that never holds the guard
+//    across an `.await` point (see `output_stream_sync`). This prevents the
+//    non-`Sync` interior from being shared concurrently.
+// 2. The sink is opened lazily on first `play()` and then never moved between
+//    threads except via the `Arc<Mutex<_>>` — the underlying OS handle is
+//    thread-safe for the operations we perform (`mixer().clone()` only).
+// 3. `OutputStreamHolder` is only `Send + Sync` because `Mutex<T>` is `Sync`
+//    when `T: Send`; the `MixerDeviceSink` itself is `Send`.
+//
+// If rodio ever makes `MixerDeviceSink: !Send`, this impl must be removed and
+// audio I/O confined to a dedicated thread via a channel.
 unsafe impl Send for OutputStreamHolder {}
 unsafe impl Sync for OutputStreamHolder {}
 
@@ -44,6 +59,13 @@ pub struct AudioPlayer {
     track_duration: Arc<RwLock<Duration>>,
 }
 
+// SAFETY: `AudioPlayer` is a bag of `Arc<RwLock<_>>` / `Arc<Mutex<_>>`
+// around `Send` primitives (`Duration`, `Track`, `Player`, `bool`, etc.)
+// and the `OutputStreamHolder` above, which is itself documented as
+// `Send + Sync` under the invariants noted there. All interior state is
+// behind `Arc` + synchronization primitives, so sharing `&AudioPlayer`
+// across threads (as Tauri's `State` requires) is sound. No `&mut self`
+// aliasing is exposed.
 unsafe impl Send for AudioPlayer {}
 unsafe impl Sync for AudioPlayer {}
 
@@ -210,12 +232,37 @@ impl AudioPlayer {
         let repeat = *self.repeat_mode.read().await;
         let shuffle = *self.shuffle_enabled.read().await;
 
-        let next_index = match (current_idx, repeat, shuffle) {
-            (Some(idx), RepeatMode::One, _) => Some(idx),
-            (Some(idx), RepeatMode::All, _) if idx + 1 >= queue.len() => Some(0),
-            (Some(idx), RepeatMode::Off, _) if idx + 1 >= queue.len() => None,
-            (Some(idx), _, _) => Some(idx + 1),
-            (None, _, _) => Some(0),
+        let next_index = if repeat == RepeatMode::One {
+            current_idx.or(Some(0))
+        } else if shuffle {
+            if queue.len() == 1 {
+                match (current_idx, repeat) {
+                    (Some(_), RepeatMode::Off) => None,
+                    _ => Some(0),
+                }
+            } else {
+                // Real shuffle: pick a random index distinct from current when
+                // possible, using rand 0.10 (`rand::rng()` + `Rng::random_range`
+                // + `SliceRandom::shuffle` via the helper below to avoid bias
+                // on small queues).
+                let mut rng = rand::rng();
+                // Use SliceRandom::shuffle on a candidate list to get a uniform
+                // permutation, then pick the first element not equal to current.
+                let mut candidates: Vec<usize> = (0..queue.len()).collect();
+                candidates.shuffle(&mut rng);
+                let idx = candidates
+                    .into_iter()
+                    .find(|&i| Some(i) != current_idx)
+                    .unwrap_or_else(|| rng.random_range(0..queue.len()));
+                Some(idx)
+            }
+        } else {
+            match (current_idx, repeat) {
+                (Some(idx), RepeatMode::All) if idx + 1 >= queue.len() => Some(0),
+                (Some(idx), RepeatMode::Off) if idx + 1 >= queue.len() => None,
+                (Some(idx), _) => Some(idx + 1),
+                (None, _) => Some(0),
+            }
         };
 
         match next_index {
@@ -242,13 +289,31 @@ impl AudioPlayer {
 
         let current_idx = *self.current_index.read().await;
         let repeat = *self.repeat_mode.read().await;
+        let shuffle = *self.shuffle_enabled.read().await;
 
-        let prev_index = match (current_idx, repeat) {
-            (Some(_), RepeatMode::One) => current_idx,
-            (Some(0), RepeatMode::All) => Some(queue.len() - 1),
-            (Some(0), RepeatMode::Off) => Some(0),
-            (Some(idx), _) => Some(idx - 1),
-            (None, _) => Some(0),
+        let prev_index = if repeat == RepeatMode::One {
+            current_idx
+        } else if shuffle {
+            if queue.len() == 1 {
+                Some(0)
+            } else {
+                let mut rng = rand::rng();
+                let mut candidates: Vec<usize> = (0..queue.len()).collect();
+                candidates.shuffle(&mut rng);
+                let idx = candidates
+                    .into_iter()
+                    .find(|&i| Some(i) != current_idx)
+                    .unwrap_or_else(|| rng.random_range(0..queue.len()));
+                Some(idx)
+            }
+        } else {
+            match (current_idx, repeat) {
+                (Some(_), RepeatMode::One) => current_idx,
+                (Some(0), RepeatMode::All) => Some(queue.len() - 1),
+                (Some(0), RepeatMode::Off) => Some(0),
+                (Some(idx), _) => Some(idx - 1),
+                (None, _) => Some(0),
+            }
         };
 
         match prev_index {
@@ -296,6 +361,18 @@ impl AudioPlayer {
             .as_ref()
             .map(|s| s.empty())
             .unwrap_or(true)
+    }
+
+    /// Atomically snapshot `(is_playing, is_empty)` under a single `RwLock`
+    /// read guard to avoid the TOCTOU race between separate
+    /// `is_playing()` + `is_sink_empty()` calls (the sink could transition
+    /// between the two awaits).
+    pub async fn sink_snapshot(&self) -> (bool, bool) {
+        let guard = self.sink.read().await;
+        match guard.as_ref() {
+            Some(s) => (!s.is_paused() && !s.empty(), s.empty()),
+            None => (false, true),
+        }
     }
 
     pub async fn play_started_elapsed(&self) -> Option<Duration> {

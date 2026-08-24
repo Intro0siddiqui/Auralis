@@ -57,25 +57,42 @@ impl AndroidScanner {
     ) -> Result<Track, ScannerError> {
         debug!(name = %name, bytes_len = bytes.len(), target_dir = %target_dir.display(), "Ingesting audio buffer into sandboxed storage");
 
-        std::fs::create_dir_all(target_dir).map_err(|e| {
-            error!(dir = %target_dir.display(), error = %e, "Failed to create sandboxed destination directory");
-            ScannerError::IoError(format!(
-                "Failed to create sandboxed destination directory {}: {e}",
-                target_dir.display()
-            ))
-        })?;
+        // `create_dir_all` and `write` are blocking — offload to the
+        // blocking pool so the async runtime is not stalled. We clone
+        // `bytes` into an owned Vec for the `spawn_blocking` closure.
+        let dir_owned = target_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&dir_owned))
+            .await
+            .map_err(|e| ScannerError::IoError(format!("Join error: {e}")))?
+            .map_err(|e| {
+                error!(dir = %target_dir.display(), error = %e, "Failed to create sandboxed destination directory");
+                ScannerError::IoError(format!(
+                    "Failed to create sandboxed destination directory {}: {e}",
+                    target_dir.display()
+                ))
+            })?;
 
         let file_path = target_dir.join(name);
-        std::fs::write(&file_path, bytes).map_err(|e| {
-            error!(file = %file_path.display(), bytes = bytes.len(), error = %e, "Failed to write audio buffer to sandbox");
-            ScannerError::IoError(format!(
-                "Failed to write audio buffer to sandbox {}: {e}",
-                file_path.display()
-            ))
-        })?;
+        let file_path_clone = file_path.clone();
+        let bytes_owned = bytes.to_vec();
+        let bytes_len = bytes_owned.len();
+        tokio::task::spawn_blocking(move || std::fs::write(&file_path_clone, &bytes_owned))
+            .await
+            .map_err(|e| ScannerError::IoError(format!("Join error: {e}")))?
+            .map_err(|e| {
+                error!(file = %file_path.display(), bytes = bytes_len, error = %e, "Failed to write audio buffer to sandbox");
+                ScannerError::IoError(format!(
+                    "Failed to write audio buffer to sandbox {}: {e}",
+                    file_path.display()
+                ))
+            })?;
 
-        // Extract metadata using lofty; fallback gracefully if metadata is missing/corrupt
-        let mut track = match MetadataExtractor::extract(&file_path) {
+        // Extract metadata using lofty (blocking file I/O + decode) — offload.
+        let path_for_extract = file_path.clone();
+        let extract_res = tokio::task::spawn_blocking(move || MetadataExtractor::extract(&path_for_extract))
+            .await
+            .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
+        let mut track = match extract_res {
             Ok(t) => {
                 debug!(file = %file_path.display(), title = %t.title, "Metadata extracted successfully from audio buffer");
                 t
@@ -102,12 +119,25 @@ impl AndroidScanner {
 
         // Record the file's modification time so an incremental re-scan of
         // the sandbox dir can skip this file without re-parsing metadata.
-        track.mtime = std::fs::metadata(&file_path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        // `metadata` is blocking — offload. Shared logic with desktop.rs.
+        let path_for_meta = file_path.clone();
+        track.mtime = tokio::task::spawn_blocking(move || {
+            std::fs::metadata(&path_for_meta)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        })
+        .await
+        .unwrap_or(0);
+        // Also capture file_size for incremental check consistency.
+        let path_for_size = file_path.clone();
+        track.file_size = tokio::task::spawn_blocking(move || {
+            std::fs::metadata(&path_for_size).map(|m| m.len()).unwrap_or(0)
+        })
+        .await
+        .unwrap_or(0);
 
         let path_str = file_path.to_string_lossy().to_string();
         let existing = track_repo.find_by_path(&path_str).await.map_err(|e| {
@@ -149,6 +179,10 @@ impl AndroidScanner {
     }
 
     /// Process single sandboxed audio file and update/insert in repository
+    ///
+    /// Mirrors `DesktopScanner::process_file` incremental logic (mtime + size)
+    /// so re-scans of the sandbox skip unchanged files. All blocking I/O
+    /// (`metadata` + `lofty`) is offloaded via `spawn_blocking`.
     async fn process_file(
         &self,
         path: &Path,
@@ -161,7 +195,39 @@ impl AndroidScanner {
             .await
             .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
 
-        let mut track = match MetadataExtractor::extract(path) {
+        // Incremental check — shared with desktop.rs (mtime + size). Stat
+        // via spawn_blocking so we don't block the runtime.
+        let path_for_stat = path.to_path_buf();
+        let (mtime, size) = tokio::task::spawn_blocking(move || {
+            let meta = std::fs::metadata(&path_for_stat)
+                .map_err(|e| ScannerError::MetadataError(format!("Failed to stat: {e}")))?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let size = meta.len() as u64;
+            Ok::<(i64, u64), ScannerError>((mtime, size))
+        })
+        .await
+        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?
+        .map_err(|e| e)?;
+
+        if let Some(existing_track) = existing.as_ref() {
+            if existing_track.mtime == mtime && existing_track.file_size == size {
+                debug!(path = %path_str, "File unchanged, skipping");
+                return Ok(crate::infrastructure::filesystem::scanner::ScanResult::Skipped);
+            }
+        }
+
+        // Blocking lofty extraction — offload.
+        let path_for_extract = path.to_path_buf();
+        let extract_res = tokio::task::spawn_blocking(move || MetadataExtractor::extract(&path_for_extract))
+            .await
+            .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
+
+        let mut track = match extract_res {
             Ok(t) => t,
             Err(e) => {
                 warn!(file = %path_str, error = %e, "Metadata extraction failed; using fallback");
@@ -180,6 +246,8 @@ impl AndroidScanner {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
         }
+        track.mtime = mtime;
+        track.file_size = size;
 
         if let Some(existing_track) = existing {
             let mut updated_track = track;
@@ -235,15 +303,40 @@ impl AndroidScanner {
         let mut found_files: HashSet<PathBuf> = HashSet::new();
         let mut all_audio_files: Vec<PathBuf> = Vec::new();
 
+        const MAX_DEPTH: usize = 64;
         for root in sandboxed_dirs {
-            if !root.exists() {
+            // Existence check via spawn_blocking to avoid blocking runtime.
+            let root_clone = root.clone();
+            let exists = tokio::task::spawn_blocking(move || root_clone.exists())
+                .await
+                .unwrap_or(false);
+            if !exists {
                 continue;
             }
 
-            let mut dirs_to_visit = vec![root.clone()];
-            while let Some(current) = dirs_to_visit.pop() {
-                let entries = match std::fs::read_dir(&current) {
-                    Ok(entries) => entries,
+            let mut dirs_to_visit: Vec<(PathBuf, usize)> = vec![(root.clone(), 0)];
+            let mut visited: HashSet<PathBuf> = HashSet::new();
+            if let Ok(canonical) = tokio::task::spawn_blocking({
+                let p = root.clone();
+                move || std::fs::canonicalize(&p)
+            })
+            .await
+            .unwrap_or(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+            {
+                visited.insert(canonical);
+            }
+
+            while let Some((current, depth)) = dirs_to_visit.pop() {
+                if depth > MAX_DEPTH {
+                    warn!(path = %current.display(), depth, "Max depth exceeded; skipping");
+                    continue;
+                }
+                let cur_clone = current.clone();
+                let entries_res = tokio::task::spawn_blocking(move || std::fs::read_dir(&cur_clone))
+                    .await
+                    .map_err(|e| ScannerError::IoError(format!("Join error: {e}")))?;
+                let entries = match entries_res {
+                    Ok(e) => e,
                     Err(e) => {
                         warn!(path = %current.display(), error = %e, "Failed to read sandboxed directory");
                         continue;
@@ -258,8 +351,31 @@ impl AndroidScanner {
                         continue;
                     }
 
+                    // Symlink loop protection — skip symlinked dirs.
+                    let ft = match entry.file_type() {
+                        Ok(ft) => ft,
+                        Err(_) => continue,
+                    };
+                    if ft.is_symlink() && entry_path.is_dir() {
+                        debug!(path = %entry_path.display(), "Skipping symlinked directory");
+                        continue;
+                    }
+
                     if entry_path.is_dir() {
-                        dirs_to_visit.push(entry_path);
+                        let canon = tokio::task::spawn_blocking({
+                            let p = entry_path.clone();
+                            move || std::fs::canonicalize(&p)
+                        })
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
+                        if let Some(c) = canon {
+                            if !visited.insert(c) {
+                                debug!(path = %entry_path.display(), "Skipping already-visited directory (symlink loop)");
+                                continue;
+                            }
+                        }
+                        dirs_to_visit.push((entry_path, depth + 1));
                     } else if entry_path.is_file()
                         && is_audio_file(&entry_path)
                         && found_files.insert(entry_path.clone())
