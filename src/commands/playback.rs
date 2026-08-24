@@ -41,7 +41,6 @@ pub struct PlaybackProgress {
 /// 250 ms is the only cadence the frontend needs — the progress bar is
 /// event-driven and snaps optimistically on seek, so finer ticks would only
 /// burn battery on Android with no visible benefit.
-#[allow(dead_code)]
 const WATCHER_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Polling interval while paused or idle.
@@ -49,16 +48,7 @@ const WATCHER_INTERVAL: Duration = Duration::from_millis(250);
 /// The watcher has nothing to report then (`state_changed` events already
 /// carry the frozen position), so it just sleeps — keeping the app at ~1
 /// wakeup per 2 s instead of 4 per second when the user isn't listening.
-#[allow(dead_code)]
 const IDLE_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Minimum session age before an empty sink is treated as a finished track.
-///
-/// Guards against the race where a freshly appended source has not started
-/// producing samples yet (and would briefly look "empty"), and against
-/// files that decode to nothing.
-#[allow(dead_code)]
-const TRACK_END_GUARD: Duration = Duration::from_millis(1500);
 
 /// Epsilon for `position >= duration - epsilon` comparison when duration is
 /// known. Covers scheduler jitter and the 250 ms watcher cadence.
@@ -76,7 +66,6 @@ const TRACK_END_MIN_GUARD: Duration = Duration::from_millis(300);
 ///   pause/seek commands already report the frozen position), and
 /// - auto-advances the queue (honoring repeat/shuffle) when the current
 ///   track finishes, emitting `playback:track_changed` + `playback:state_changed`.
-#[allow(dead_code)]
 pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(WATCHER_INTERVAL);
@@ -108,7 +97,9 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                 let elapsed_opt = player.play_started_elapsed().await;
                 if !dur.is_zero() {
                     let pos = player.current_position().await;
-                    pos >= dur.saturating_sub(TRACK_END_EPSILON)
+                    // Require elapsed_opt.is_some() to avoid false trigger after stop()
+                    // zeroes position (0 >= 0 for dur <= 350ms would otherwise be true).
+                    (elapsed_opt.is_some() && pos >= dur.saturating_sub(TRACK_END_EPSILON))
                         || elapsed_opt.is_some_and(|e| {
                             e + TRACK_END_EPSILON >= dur
                                     // For short tracks, also accept any
@@ -130,7 +121,7 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
 
             if track_just_ended {
                 info!("Current track ended; advancing playback");
-                match player.next().await {
+                match player.next_for_auto_advance().await {
                     Ok(Some(track)) => {
                         emit_track_changed(&app, &player).await;
                         emit_state_changed(&app, &player).await;
@@ -280,6 +271,8 @@ pub async fn next_track(
             Ok(Some(now_playing))
         }
         None => {
+            emit_state_changed(&app, &player).await;
+            background_service::stop_service();
             info!("Reached end of queue");
             Ok(None)
         }
@@ -317,7 +310,11 @@ pub async fn previous_track(
 
 /// Seek to a position within the current track.
 #[tauri::command]
-pub async fn seek(request: SeekRequest, player: State<'_, AudioPlayer>) -> Result<(), String> {
+pub async fn seek(
+    request: SeekRequest,
+    app: AppHandle,
+    player: State<'_, AudioPlayer>,
+) -> Result<(), String> {
     info!(
         position_secs = request.position_secs,
         "Seek command received"
@@ -330,6 +327,7 @@ pub async fn seek(request: SeekRequest, player: State<'_, AudioPlayer>) -> Resul
         .await
         .map_err(|e| format!("Seek error: {e}"))?;
 
+    emit_state_changed(&app, &player).await;
     background_service::push_now_playing(&player).await;
 
     debug!(position_secs = request.position_secs, "Seek completed");

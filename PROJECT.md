@@ -1,7 +1,7 @@
 # Auralis — Project Knowledge File
 
 > Living reference for the Auralis codebase, build/release pipeline, device
-> environment, and the Android crash-debugging saga. Updated 2026-08-23 (v2.5.2 — PO-token-aware YouTube + diagnostics).
+> environment, and the Android crash-debugging saga. Updated 2026-08-24 (v2.5.6 — PO-token-aware YouTube + diagnostics).
 
 ---
 
@@ -56,9 +56,9 @@ App identifier: `com.auralis.v2`.
   - `cargo check --target aarch64-linux-android --lib` ✅ (fetches android std +
     deps; needs no NDK system libs to type-check, only to link).
 - **`gh` CLI is authenticated** as `Intro0siddiqui` (scopes: `repo`,
-  `workflow`, `delete_repo`). You can push, tag, and inspect CI, but the
-  workflow has **no `workflow_dispatch`** — a release/APK build is triggered
-  **only by pushing a `v*` tag**.
+  `workflow`, `delete_repo`). You can push, tag, and inspect CI; the
+  workflow supports `workflow_dispatch` for manual runs, and a release/APK build is triggered
+  by pushing a `v*` tag or via manual dispatch.
 - The `aarch64-linux-android` rust target is installed locally
   (`rustup target list --installed`).
 - User installed `rg` (ripgrep) and `fd` for faster searching — prefer them
@@ -70,11 +70,12 @@ App identifier: `com.auralis.v2`.
 
 ### Trigger
 `.github/workflows/build.yml` runs on:
-- `push: tags: ["v*"]`  ← **release builds (APK) only on tags**
-- `pull_request`       ← PRs build too (CI validation), but produce no release
+- `push: branches: [main], tags: ["v*"]`
+- `pull_request: branches: [main]` ← PRs build too (CI validation), but produce no release
+- `workflow_dispatch` ← manual trigger (also builds release artifacts when dispatched)
 
-So **a tag push = one CI run that builds everything including the signed
-Android APK**. A plain `main` push does NOT build the APK.
+So **a tag push or manual dispatch = one CI run that builds everything including the signed
+Android APK**. A plain `main` push builds but does not create a GitHub Release.
 
 ### What the workflow does (per tag run)
 Jobs: `lint`, `build-linux`, `build-macos`, `build-windows`, `test`,
@@ -254,7 +255,7 @@ here — the rule below is what matters.)
 | `.cargo/config.toml` | `-C link-arg=-lc++_shared` for the 4 android targets (fixes `DT_NEEDED`). |
 | `Cargo.toml` | android-only deps `jni`/`ndk-context`; `crate-type = ["staticlib","cdylib","rlib"]`; `[profile.release] panic = "abort"`. |
 | `Cargo.lock` | `auralis` version entry must match `Cargo.toml` + `tauri.conf.json`. |
-| `tauri.conf.json` | app `version` (`2.5.2`), `identifier = com.auralis.v2`, CSP (`default-src https: + script-src unsafe-inline + connect-src https:` for `youtubei`/`googlevideo`, vendored `ui/vendor/`). |
+| `tauri.conf.json` | app `version` (`2.5.6`), `identifier = com.auralis.v2`, CSP (`default-src https: + script-src unsafe-inline + connect-src https:` for `youtubei`/`googlevideo`, vendored `ui/vendor/`). |
 | `src/lib.rs` | `setup` init chain (android-context seed → db → network → sync → audio → settings → downloader); `#[cfg_attr(mobile, tauri::mobile_entry_point)]`; android `android_jni` module: `JNI_OnLoad` VM capture + null-safe `ndk_context` seed, with a `setup`-time `try_seed` fallback. |
 | `src/infrastructure/media/player.rs` | `AudioPlayer::new()` → `OutputStream::try_default()` — the cpal/oboe path that needs `ndk_context`. |
 | `src/commands/sync.rs` | `build_sync_service(db, sync_engine)` (2-arg). |
@@ -296,7 +297,7 @@ logcat -b crash -d | grep -iE "AndroidRuntime|FATAL|abort|auralis|libauralis|sig
 
 ---
 
-## 9. Current Status (2026-08-23, v2.5.1)
+## 9. Current Status (2026-08-24, v2.5.6)
 
 The app is feature-complete on the core set and ships signed APKs via CI tag
 builds. The Android launch crashes documented in §4 are all resolved. Recent
@@ -330,6 +331,7 @@ milestones from `git log`:
 - **v2.5.0** — **YouTube 403 fix**: `youtube.js` widens InnerTube to 6 clients (`IOS`,`ANDROID`,`ANDROID_VR`,`TV`,`MWEB`,`WEB`) + client-matched `User-Agent`/`Referer`/`Origin` headers to `downloader.rs` (`reqwest`); `googlevideo` 403 on Jio IPv6 fixed for `VILLAINS` etc. Dual `--split-per-abi` APKs (`arm64` + `x86_64`) + `sccache`, JS E2E `node --test youtube_resolver.test.js` + `desktop_download_player_e2e.js` + Android `e2e_download_test.js`.
 - **v2.5.1** — **Download failure diagnostics**: `downloader.rs` verbose `HTTP 403 [host] 403 + body snip + hint + DIAGNOSTIC` tag, `downloads.rs` emits `download:diagnostic`, `core.js` fixes `p.error` vs `p.error_message`, shows `8000ms` toast + red copyable error box with `navigator.clipboard`, `youtube.js` warns for `PlayerErrorCommand` suppression.
 - **v2.5.2** — **PO-token-aware resolver (2026 gate)**: `youtube.js` prefers `TV`/`ANDROID_VR`/`MWEB` (no `poToken` required) when `youtube_po_token` empty, else `IOS`/`ANDROID`; `downloader.rs` hint adds `PO-token` guidance. Vendor `youtubei.js@18.0.0` verified latest (no newer `18.0.0` > `2026-08-13`).
+- **v2.5.6** — Version sync (2.5.6) + `workflow_dispatch` docs + PO-token bgUtils retry/path fixes + DB Mutex phone doc.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,
@@ -349,7 +351,7 @@ milestones from `git log`:
   (no `webkit2gtk-4.1`) or the Android target (no NDK). `cargo check --lib`
   works for the host and is the local verification loop.
 - Smart playlists: criteria model exists; built-in presets not pre-defined.
-- No `workflow_dispatch` on CI — releases are tag-push only.
+- Manual CI runs available via `workflow_dispatch` in addition to tag pushes.
 
 ### Release & Sideload Workflow
 1. Push a `v*` tag → CI builds Linux/macOS/Windows + signed **dual `arm64` + `x86_64` APKs** (`--split-per-abi`) and creates GitHub Release with all artifacts (~11m).
@@ -409,5 +411,4 @@ Audited 2026-08-15 against Android and Tauri distribution guidelines. The
   the android targets; CI also copies `libc++_shared.so` into `jniLibs`.
 - `JValue::l()` in jni 0.21 returns something `.unwrap_or(JObject::null())`
   handles — keep that guard in case `currentApplication()` is null.
-- `gh` is authenticated but **cannot** trigger CI manually (no
-  `workflow_dispatch`); push a `v*` tag to build + sign the APK.
+- `gh` is authenticated and **can** trigger CI manually via `workflow_dispatch` or by pushing a `v*` tag to build + sign the APK (see `.github/workflows/build.yml` `on: workflow_dispatch`).

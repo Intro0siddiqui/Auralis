@@ -252,6 +252,11 @@ impl AuralisApp {
             .map(|state| state.inner().clone())
             .ok_or("Network not initialized; sync service requires SyncEngine")?;
 
+        // Wire DB to network runtime for alias persistence (HIGH fix)
+        // Keeps RwLock for runtime but hydrates from DB and persists on register.
+        let db_arc = std::sync::Arc::new(db.clone());
+        tauri::async_runtime::block_on(sync_engine.runtime().set_persistent_store(db_arc));
+
         let service = commands::sync::build_sync_service(&db, sync_engine);
 
         tauri::async_runtime::block_on(service.init())?;
@@ -289,7 +294,18 @@ impl AuralisApp {
         let config_path = app_dir.join("settings.toml");
 
         let settings = Settings::load_from_path(&config_path).unwrap_or_default();
+        let volume = settings.audio.volume.clamp(0.0, 1.0);
         app_handle.manage(settings);
+        // Hydrate player volume from persisted settings (player defaults 0.8, fallback clamp)
+        if let Some(player_state) = app_handle.try_state::<AudioPlayer>() {
+            let player = player_state.inner().clone();
+            let _ = tauri::async_runtime::block_on(player.set_volume(volume));
+            info!(volume, "Hydrated player volume from settings");
+        } else if let Some(player_arc_state) = app_handle.try_state::<Arc<AudioPlayer>>() {
+            let player = player_arc_state.inner().clone();
+            let _ = tauri::async_runtime::block_on(player.set_volume(volume));
+            info!(volume, "Hydrated player volume from settings (arc)");
+        }
 
         Ok(())
     }

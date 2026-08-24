@@ -281,9 +281,17 @@ const HTTP_FETCH_ALLOWED_HOSTS: &[&str] = &[
     "music.youtube.com",
     "youtubei.googleapis.com",
     "i.ytimg.com",
+    "jnn-pa.googleapis.com",
+    "www.google.com",
 ];
 /// Subdomain-suffix hosts (`<anything>.suffix`).
-const HTTP_FETCH_ALLOWED_SUFFIXES: &[&str] = &["googlevideo.com", "ytimg.com", "youtube.com"];
+const HTTP_FETCH_ALLOWED_SUFFIXES: &[&str] = &[
+    "googlevideo.com",
+    "ytimg.com",
+    "youtube.com",
+    "google.com",
+    "googleapis.com",
+];
 
 /// Check whether `host` is on the native-fetch egress allowlist
 /// (dot-boundary suffix match; case-insensitive; trailing dot tolerated).

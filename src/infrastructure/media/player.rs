@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::domain::models::{RepeatMode, Track};
 use rand::prelude::SliceRandom;
-use rand::Rng;
+use rand::RngExt;
 
 /// Holds the lazily-opened audio output stream.
 struct OutputStreamHolder {
@@ -50,6 +50,9 @@ pub struct AudioPlayer {
     current_index: Arc<RwLock<Option<usize>>>,
     repeat_mode: Arc<RwLock<RepeatMode>>,
     shuffle_enabled: Arc<RwLock<bool>>,
+    /// History stack for shuffle playback (visited indices in order, last is current).
+    /// Used to implement exhaust-on-RepeatOff and previous-with-history.
+    shuffle_history: Arc<RwLock<Vec<usize>>>,
     /// Playback time accumulated before the current play session.
     played: Arc<RwLock<Duration>>,
     /// `Some` while the sink is actively playing.
@@ -81,6 +84,7 @@ impl AudioPlayer {
             current_index: Arc::new(RwLock::new(None)),
             repeat_mode: Arc::new(RwLock::new(RepeatMode::Off)),
             shuffle_enabled: Arc::new(RwLock::new(false)),
+            shuffle_history: Arc::new(RwLock::new(Vec::new())),
             played: Arc::new(RwLock::new(Duration::ZERO)),
             play_anchor: Arc::new(RwLock::new(None)),
             play_started_at: Arc::new(RwLock::new(None)),
@@ -166,9 +170,24 @@ impl AudioPlayer {
 
     pub async fn resume(&self) -> Result<(), PlayerError> {
         debug!("Resuming playback");
-        if let Some(s) = self.sink.read().await.as_ref() {
+        let sink_guard = self.sink.read().await;
+        if let Some(s) = sink_guard.as_ref() {
+            // Guard against double resume: if already playing, no-op to avoid resetting anchor.
+            let anchor_some = self.play_anchor.read().await.is_some();
+            if anchor_some && !s.is_paused() {
+                return Ok(());
+            }
             s.play();
-            *self.play_anchor.write().await = Some(Instant::now());
+            // If a stale anchor was left (e.g., seek-while-paused leak before fix), fold its
+            // elapsed into `played` before overwriting so we don't discard time.
+            let mut anchor = self.play_anchor.write().await;
+            if let Some(a) = *anchor {
+                let elapsed = a.elapsed();
+                if !elapsed.is_zero() {
+                    *self.played.write().await += elapsed;
+                }
+            }
+            *anchor = Some(Instant::now());
         }
         Ok(())
     }
@@ -197,6 +216,8 @@ impl AudioPlayer {
 
         let sink_guard = self.sink.read().await;
         if let Some(player) = sink_guard.as_ref() {
+            let was_paused = player.is_paused();
+            // Anchor presence mirrors paused state, but check sink to be authoritative.
             player
                 .try_seek(position)
                 .map_err(|e| PlayerError::StateError(format!("Seek failed: {e}")))?;
@@ -204,7 +225,12 @@ impl AudioPlayer {
             // Reset time tracking to the new position
             drop(sink_guard);
             *self.played.write().await = position;
-            *self.play_anchor.write().await = Some(Instant::now());
+            if was_paused {
+                // Keep anchor None so position stays frozen while paused
+                *self.play_anchor.write().await = None;
+            } else {
+                *self.play_anchor.write().await = Some(Instant::now());
+            }
         } else {
             return Err(PlayerError::StateError("No active playback".into()));
         }
@@ -223,6 +249,16 @@ impl AudioPlayer {
     }
 
     pub async fn next(&self) -> Result<Option<Track>, PlayerError> {
+        self.next_internal(false).await
+    }
+
+    /// Auto-advance variant used by the playback watcher on natural track end.
+    /// Honors `RepeatOne` by repeating the current track; manual `next()` always advances.
+    pub async fn next_for_auto_advance(&self) -> Result<Option<Track>, PlayerError> {
+        self.next_internal(true).await
+    }
+
+    async fn next_internal(&self, for_auto_advance: bool) -> Result<Option<Track>, PlayerError> {
         let queue = self.queue.read().await;
         if queue.is_empty() {
             return Ok(None);
@@ -232,7 +268,7 @@ impl AudioPlayer {
         let repeat = *self.repeat_mode.read().await;
         let shuffle = *self.shuffle_enabled.read().await;
 
-        let next_index = if repeat == RepeatMode::One {
+        let next_index = if for_auto_advance && repeat == RepeatMode::One {
             current_idx.or(Some(0))
         } else if shuffle {
             if queue.len() == 1 {
@@ -240,14 +276,43 @@ impl AudioPlayer {
                     (Some(_), RepeatMode::Off) => None,
                     _ => Some(0),
                 }
+            } else if repeat == RepeatMode::Off {
+                // Shuffle + RepeatOff: exhaust when all tracks have been visited.
+                let history = self.shuffle_history.read().await;
+                let mut visited = history.clone();
+                if let Some(ci) = current_idx {
+                    if !visited.contains(&ci) {
+                        visited.push(ci);
+                    }
+                }
+                let mut uniq = visited.clone();
+                uniq.sort_unstable();
+                uniq.dedup();
+                if uniq.len() >= queue.len() {
+                    None
+                } else {
+                    // Prefer an unvisited track, fall back to any not-current.
+                    let visited_set: std::collections::HashSet<usize> =
+                        visited.into_iter().collect();
+                    let mut rng = rand::rng();
+                    let mut candidates: Vec<usize> = (0..queue.len()).collect();
+                    candidates.shuffle(&mut rng);
+                    let idx = candidates
+                        .iter()
+                        .find(|i| !visited_set.contains(i))
+                        .copied()
+                        .or_else(|| {
+                            candidates
+                                .iter()
+                                .find(|i| Some(**i) != current_idx)
+                                .copied()
+                        })
+                        .unwrap_or_else(|| rng.random_range(0..queue.len()));
+                    Some(idx)
+                }
             } else {
-                // Real shuffle: pick a random index distinct from current when
-                // possible, using rand 0.10 (`rand::rng()` + `Rng::random_range`
-                // + `SliceRandom::shuffle` via the helper below to avoid bias
-                // on small queues).
+                // Shuffle + RepeatAll (or RepeatOne manual): pick random != current
                 let mut rng = rand::rng();
-                // Use SliceRandom::shuffle on a candidate list to get a uniform
-                // permutation, then pick the first element not equal to current.
                 let mut candidates: Vec<usize> = (0..queue.len()).collect();
                 candidates.shuffle(&mut rng);
                 let idx = candidates
@@ -260,6 +325,7 @@ impl AudioPlayer {
             match (current_idx, repeat) {
                 (Some(idx), RepeatMode::All) if idx + 1 >= queue.len() => Some(0),
                 (Some(idx), RepeatMode::Off) if idx + 1 >= queue.len() => None,
+                (Some(idx), RepeatMode::One) if idx + 1 >= queue.len() => None,
                 (Some(idx), _) => Some(idx + 1),
                 (None, _) => Some(0),
             }
@@ -269,12 +335,29 @@ impl AudioPlayer {
             Some(idx) => {
                 let track = queue[idx].clone();
                 drop(queue);
-                *self.current_index.write().await = Some(idx);
+                // Only update current_index after play_track succeeds to avoid divergence
                 self.play_track(track.clone()).await?;
+                *self.current_index.write().await = Some(idx);
+                // Maintain shuffle history (visited stack) for exhaust/previous
+                if shuffle {
+                    let mut hist = self.shuffle_history.write().await;
+                    if let Some(ci) = current_idx {
+                        if !hist.contains(&ci) {
+                            hist.push(ci);
+                        }
+                    }
+                    if hist.last().copied() != Some(idx) {
+                        hist.push(idx);
+                    }
+                }
                 Ok(Some(track))
             }
             None => {
                 drop(queue);
+                // Clear shuffle history on exhaustion (session complete)
+                if shuffle {
+                    self.shuffle_history.write().await.clear();
+                }
                 self.stop().await?;
                 Ok(None)
             }
@@ -297,18 +380,34 @@ impl AudioPlayer {
             if queue.len() == 1 {
                 Some(0)
             } else {
-                let mut rng = rand::rng();
-                let mut candidates: Vec<usize> = (0..queue.len()).collect();
-                candidates.shuffle(&mut rng);
-                let idx = candidates
-                    .into_iter()
-                    .find(|&i| Some(i) != current_idx)
-                    .unwrap_or_else(|| rng.random_range(0..queue.len()));
-                Some(idx)
+                // Use history stack to go back: pop current, return previous.
+                let mut hist = self.shuffle_history.write().await;
+                if hist.len() > 1 {
+                    // Last is current, pop it and return new last
+                    hist.pop();
+                    let prev = hist.last().copied();
+                    // Keep hist pointing at prev (do not push again)
+                    prev
+                } else if hist.len() == 1 && hist[0] != current_idx.unwrap_or(usize::MAX) {
+                    // History has single entry not matching current (edge), use it
+                    let prev = hist[0];
+                    // hist already at prev
+                    Some(prev)
+                } else {
+                    // No history to pop — fallback to random distinct
+                    drop(hist);
+                    let mut rng = rand::rng();
+                    let mut candidates: Vec<usize> = (0..queue.len()).collect();
+                    candidates.shuffle(&mut rng);
+                    let idx = candidates
+                        .into_iter()
+                        .find(|&i| Some(i) != current_idx)
+                        .unwrap_or_else(|| rng.random_range(0..queue.len()));
+                    Some(idx)
+                }
             }
         } else {
             match (current_idx, repeat) {
-                (Some(_), RepeatMode::One) => current_idx,
                 (Some(0), RepeatMode::All) => Some(queue.len() - 1),
                 (Some(0), RepeatMode::Off) => Some(0),
                 (Some(idx), _) => Some(idx - 1),
@@ -320,8 +419,9 @@ impl AudioPlayer {
             Some(idx) => {
                 let track = queue[idx].clone();
                 drop(queue);
-                *self.current_index.write().await = Some(idx);
+                // Only update index after successful play
                 self.play_track(track.clone()).await?;
+                *self.current_index.write().await = Some(idx);
                 Ok(Some(track))
             }
             None => Ok(None),
@@ -400,9 +500,12 @@ impl AudioPlayer {
     }
     pub async fn set_queue(&self, tracks: Vec<Track>) {
         *self.queue.write().await = tracks;
+        // Shuffle session invalidated by queue change
+        self.shuffle_history.write().await.clear();
     }
     pub async fn add_to_queue(&self, track: Track) {
         self.queue.write().await.push(track);
+        self.shuffle_history.write().await.clear();
     }
 
     pub async fn remove_from_queue(&self, index: usize) -> Result<Track, PlayerError> {
@@ -422,12 +525,15 @@ impl AudioPlayer {
                 };
             }
         }
+        drop(queue);
+        self.shuffle_history.write().await.clear();
         Ok(track)
     }
 
     pub async fn clear_queue(&self) {
         self.queue.write().await.clear();
         *self.current_index.write().await = None;
+        self.shuffle_history.write().await.clear();
     }
 
     pub async fn get_current_index(&self) -> Option<usize> {
@@ -441,12 +547,22 @@ impl AudioPlayer {
     }
     pub async fn set_repeat_mode(&self, mode: RepeatMode) {
         *self.repeat_mode.write().await = mode;
+        self.shuffle_history.write().await.clear();
     }
     pub async fn get_shuffle(&self) -> bool {
         *self.shuffle_enabled.read().await
     }
     pub async fn set_shuffle(&self, enabled: bool) {
         *self.shuffle_enabled.write().await = enabled;
+        let current = *self.current_index.read().await;
+        let mut hist = self.shuffle_history.write().await;
+        hist.clear();
+        // Seed history with current index when shuffle is enabled so previous has a base
+        if enabled {
+            if let Some(idx) = current {
+                hist.push(idx);
+            }
+        }
     }
 }
 

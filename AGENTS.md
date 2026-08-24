@@ -158,12 +158,12 @@ Notes from the audit/upgrade pass:
 
 - `bundle.targets` is `["deb", "app", "dmg", "msi", "nsis"]` (no `"all"`).
 - `identifier` is `com.auralis.v2` (was `com.auralis.app`).
-- `version` is `2.5.2` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
+- `version` is `2.5.6` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
 - CSP is `default-src 'self' tauri: https: data: blob: ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https:;` — all third-party JS vendored under `ui/vendor/` (no CDN), `https:` kept for `youtubei`/`googlevideo` `connect-src` (see `scripts/tests/youtube_resolver.test.js`). `unsafe-eval` is required for `youtube.js` `new Function` decipher (BotGuard) — noted as intentional.
 
 ### 4.3 Android CI Optimization (`.github/workflows/build.yml`) — ✅ DONE (2026-08-23)
 
-- APKs are built for **both `aarch64` and `x86_64` via `--split-per-abi`** (`cargo tauri android build --apk --split-per-abi`, `auralis-v2.5.2-android-arm64.apk` + `-x86_64.apk`); `x86_64` powers emulator E2E `pixel_6 api33 google_apis`.
+- APKs are built for **both `aarch64` and `x86_64` via `--split-per-abi`** (`cargo tauri android build --apk --split-per-abi`, `auralis-v2.5.6-android-arm64.apk` + `-x86_64.apk`); `x86_64` powers emulator E2E `pixel_6 api33 google_apis`.
 - `cargo tauri android init` is guarded with `|| true` before build — harmless idempotent.
 - NDK is pinned to **`27.2.12479018` (r27)** — 16KB-page-size capable; `compileSdk`/`targetSdk` sed'd to **36** in `build.gradle.kts`; `tauri-cli` pinned to **`2.11.4`** (via `npm install -g @tauri-apps/cli@2.11.4` + `~/.cargo` cache).
 - `libc++_shared.so` is bundled for **both** `arm64-v8a` + `x86_64` via `.cargo/config.toml` (`-lc++_shared` per target) and copied into `jniLibs` during CI.
@@ -222,7 +222,7 @@ Unit tests exist across domain models (`PairingInfo::generate`, `SyncChange::new
 
 ## 7. CI/CD Pipeline
 
-The CI workflow (`.github/workflows/build.yml`) runs on every push/PR to `main` and on tags `v*` (no `workflow_dispatch` — releases are triggered only by tag pushes):
+The CI workflow (`.github/workflows/build.yml`) runs on every push/PR to `main`, on tags `v*`, and via `workflow_dispatch` (releases are triggered by tag pushes or manual dispatch):
 
 | Job | Purpose |
 |-----|---------|

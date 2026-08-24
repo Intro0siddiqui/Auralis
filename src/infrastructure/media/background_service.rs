@@ -113,10 +113,11 @@ fn notify(track: &Track, position: Duration, is_playing: bool) {
         let class = env.find_class(SERVICE_CLASS)?;
         let title = env.new_string(track.title.as_str())?;
         let artist = env.new_string(track.artist.clone().unwrap_or_default().as_str())?;
+        let art_path = env.new_string(track.album_art_path.clone().unwrap_or_default().as_str())?;
         env.call_static_method(
             class,
             "start",
-            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;IIZ)V",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;IIZLjava/lang/String;)V",
             &[
                 JValue::Object(&ctx),
                 JValue::Object(&title),
@@ -124,6 +125,7 @@ fn notify(track: &Track, position: Duration, is_playing: bool) {
                 JValue::Int(track.duration_secs as i32),
                 JValue::Int(position.as_secs().min(i32::MAX as u64) as i32),
                 JValue::Bool(is_playing as u8),
+                JValue::Object(&art_path),
             ],
         )?;
         Ok(())
@@ -154,7 +156,19 @@ fn cached_vm() -> Option<&'static JavaVM> {
 fn with_attached_env<T>(f: impl FnOnce(&mut JNIEnv<'_>) -> jni::errors::Result<T>) -> Option<T> {
     let vm = cached_vm()?;
     let mut guard = vm.attach_current_thread().ok()?;
-    f(&mut guard).ok()
+    match f(&mut guard) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            // Clear any pending JNI exception (e.g. ForegroundServiceStartNotAllowedException
+            // when startForegroundService is throttled in the background) so future JNI
+            // calls are not poisoned.
+            if guard.exception_check().unwrap_or(false) {
+                let _ = guard.exception_clear();
+            }
+            warn!(error = %e, "JNI call failed");
+            None
+        }
+    }
 }
 
 /// The global `Context` (the Android `Activity`) registered by `JNI_OnLoad`.

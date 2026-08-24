@@ -88,14 +88,16 @@ pub struct NetworkRuntime {
     stats: StdMutex<NetworkStats>,
     last_received: RwLock<Option<SyncRequest>>,
     last_gossip: RwLock<Option<Vec<u8>>>,
-    /// In-memory UUID (PairedDevice.id) -> real libp2p PeerId mapping.
-    /// PairedDevice stores a UUID, not a PeerId, so `PeerId::from_str(UUID)`
-    /// always fails (PeerNotFound). Callers register the mapping after
-    /// discovery/pairing and `resolve_peer` is used before dial.
-    /// NOTE: persistent storage still lacks a `peer_id` column — DB migration
-    /// `ALTER TABLE paired_devices ADD COLUMN peer_id TEXT` is recommended to
-    /// survive restarts; currently this table is in-memory only.
+    /// UUID (PairedDevice.id) -> real libp2p PeerId mapping.
+    ///
+    /// Kept in-memory for fast runtime lookups (`RwLock`) but hydrated from
+    /// the `paired_devices.peer_id` column on startup and persisted on every
+    /// `register_device_alias` when a persistent store is attached. This fixes
+    /// the HIGH deficiency where aliases were lost on restart.
     device_aliases: RwLock<HashMap<String, PeerId>>,
+    /// Optional persistent backing for aliases (`paired_devices.peer_id`).
+    /// `None` means in-memory only (e.g., before `init_network` wires the DB).
+    alias_db: RwLock<Option<Arc<crate::infrastructure::database::Database>>>,
 }
 
 impl NetworkRuntime {
@@ -113,6 +115,90 @@ impl NetworkRuntime {
             last_received: RwLock::new(None),
             last_gossip: RwLock::new(None),
             device_aliases: RwLock::new(HashMap::new()),
+            alias_db: RwLock::new(None),
+        }
+    }
+
+    /// Attach a persistent store for alias hydration/persistence.
+    /// Call once after DB is ready; eagerly hydrates existing aliases.
+    pub async fn set_persistent_store(&self, db: Arc<crate::infrastructure::database::Database>) {
+        *self.alias_db.write().await = Some(db.clone());
+        // best-effort hydrate; failures are logged but not fatal
+        if let Err(e) = self.hydrate_aliases_from_db(&db).await {
+            warn!(error = %e, "Failed to hydrate device aliases from DB");
+        }
+    }
+
+    /// Load all `peer_id` values from `paired_devices` into the in-memory map.
+    /// Keeps the `RwLock` for runtime speed but survives restarts.
+    pub async fn hydrate_aliases_from_db(
+        &self,
+        db: &crate::infrastructure::database::Database,
+    ) -> Result<usize, NetworkError> {
+        // Use try_connection where appropriate (MEDIUM): non-blocking attempt
+        // for this background hydration; fallback to blocking lock if contended.
+        // Collect into vec first so we don't hold the MutexGuard across an await.
+        let pairs: Vec<(String, String)> = {
+            // Prefer try_connection to avoid blocking the async runtime.
+            let conn_guard = match db.try_connection() {
+                Some(g) => g,
+                None => db
+                    .connection()
+                    .map_err(|e| NetworkError::ConnectionError(e.to_string()))?,
+            };
+            // Gracefully handle missing column (pre-migration DBs)
+            let mut stmt = match conn_guard
+                .prepare("SELECT id, peer_id FROM paired_devices WHERE peer_id IS NOT NULL AND peer_id != ''")
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!(error = %e, "paired_devices.peer_id column missing; skipping hydration (migration will add it)");
+                    return Ok(0);
+                }
+            };
+            let rows = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let pid: Option<String> = row.get(1)?;
+                    Ok((id, pid))
+                })
+                .map_err(|e| NetworkError::ConnectionError(e.to_string()))?;
+            let mut out = Vec::new();
+            for r in rows {
+                if let Ok((id, Some(pid_str))) = r {
+                    // Validate peer_id eagerly; skip malformed entries
+                    if PeerId::from_str(&pid_str).is_ok() {
+                        out.push((id, pid_str));
+                    } else {
+                        warn!(device_id = %id, "Skipping invalid peer_id in DB");
+                    }
+                }
+            }
+            out
+        }; // MutexGuard dropped here, before await
+
+        let mut count = 0usize;
+        if !pairs.is_empty() {
+            let mut map = self.device_aliases.write().await;
+            for (id, pid_str) in pairs {
+                if let Ok(pid) = PeerId::from_str(&pid_str) {
+                    map.insert(id.clone(), pid);
+                    map.insert(id.to_ascii_lowercase(), pid);
+                    count += 1;
+                }
+            }
+        }
+        info!(count, "Hydrated device aliases from DB");
+        Ok(count)
+    }
+
+    /// Public helper to hydrate from the attached store (if any).
+    pub async fn hydrate_aliases(&self) -> Result<usize, NetworkError> {
+        let db = self.alias_db.read().await.clone();
+        if let Some(db) = db {
+            self.hydrate_aliases_from_db(&db).await
+        } else {
+            Ok(0)
         }
     }
 
@@ -155,20 +241,74 @@ impl NetworkRuntime {
     /// Register an in-memory mapping from a PairedDevice UUID string to its
     /// real libp2p PeerId discovered via mDNS/gossip. Call after pairing or
     /// when a device announces `device_id -> peer_id` over gossipsub.
+    ///
+    /// Persists to `paired_devices.peer_id` when a persistent store is attached
+    /// (keeps `RwLock` for runtime but survives restarts). Uses `try_connection`
+    /// where appropriate (MEDIUM) to avoid blocking the async runtime.
     pub async fn register_device_alias(&self, device_id: String, peer_id: PeerId) {
-        let mut map = self.device_aliases.write().await;
-        map.insert(device_id, peer_id);
+        // Keep in-memory map hydrated (both original and lowercased for UUID case-insensitivity)
+        {
+            let mut map = self.device_aliases.write().await;
+            map.insert(device_id.clone(), peer_id);
+            map.insert(device_id.to_ascii_lowercase(), peer_id);
+        }
+
+        // Persist to DB if attached
+        let db_opt = self.alias_db.read().await.clone();
+        if let Some(db) = db_opt {
+            let peer_str = peer_id.to_string();
+            // Brief blocking section: never hold across await
+            let result = {
+                // Prefer non-blocking try_connection for persistence
+                let conn_guard = if let Some(g) = db.try_connection() {
+                    Some(g)
+                } else {
+                    match db.connection() {
+                        Ok(g) => Some(g),
+                        Err(e) => {
+                            warn!(error = %e, "Failed to acquire DB connection for alias persistence");
+                            None
+                        }
+                    }
+                };
+                if let Some(conn) = conn_guard {
+                    // UPDATE handles existing paired_devices rows; no INSERT needed
+                    // (pairing creates the row via SyncRepository). Use both cases.
+                    let res = conn.execute(
+                        "UPDATE paired_devices SET peer_id = ?1 WHERE id = ?2 OR lower(id) = lower(?2)",
+                        rusqlite::params![peer_str, device_id],
+                    );
+                    match res {
+                        Ok(0) => {
+                            debug!(device_id = %device_id, "No paired_devices row to persist peer_id (device not yet paired)");
+                            Ok::<_, String>(())
+                        }
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(e.to_string()),
+                    }
+                } else {
+                    Err("DB contention".to_string())
+                }
+            };
+            if let Err(e) = result {
+                warn!(device_id = %device_id, error = %e, "Failed to persist device alias");
+            } else {
+                debug!(device_id = %device_id, peer_id = %peer_str, "Persisted device alias");
+            }
+        }
     }
 
     /// Resolve a `device_id` (UUID string) or a raw PeerId string to a real
-    /// PeerId. Checks the alias table first, then tries to parse as PeerId.
+    /// PeerId. Checks the alias table first, then the DB (if alias missing),
+    /// then tries to parse as PeerId. DB fallback ensures `request_sync` works
+    /// after restarts even before the in-memory map is hydrated for a peer.
     pub async fn resolve_peer_id(&self, id: &str) -> Option<PeerId> {
+        // 1. In-memory check
         {
             let map = self.device_aliases.read().await;
             if let Some(pid) = map.get(id) {
                 return Some(*pid);
             }
-            // also try lowercased key for UUID case-insensitivity
             let lower = id.to_ascii_lowercase();
             if lower != id {
                 if let Some(pid) = map.get(&lower) {
@@ -176,6 +316,44 @@ impl NetworkRuntime {
                 }
             }
         }
+        // 2. DB fallback (if persistent store attached) — enables survival across restarts
+        if let Some(db) = self.alias_db.read().await.clone() {
+            let db_result: Option<PeerId> = {
+                // Scope the MutexGuard so it's dropped before any await
+                let conn_guard = match db.try_connection() {
+                    Some(g) => Some(g),
+                    None => db.connection().ok(),
+                };
+                if let Some(conn) = conn_guard {
+                    // Try exact then lowercased id via SQL lower()
+                    let peer_opt: Option<String> = (|| {
+                        let mut stmt = conn
+                            .prepare(
+                                "SELECT peer_id FROM paired_devices WHERE id = ?1 OR lower(id) = lower(?1) LIMIT 1",
+                            )
+                            .ok()?;
+                        stmt.query_row(rusqlite::params![id], |row| row.get::<_, Option<String>>(0))
+                            .ok()
+                            .flatten()
+                    })();
+                    if let Some(s) = peer_opt {
+                        PeerId::from_str(&s).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(pid) = db_result {
+                // Cache for next lookup
+                let mut map = self.device_aliases.write().await;
+                map.insert(id.to_string(), pid);
+                map.insert(id.to_ascii_lowercase(), pid);
+                return Some(pid);
+            }
+        }
+        // 3. Raw PeerId string
         PeerId::from_str(id).ok()
     }
 

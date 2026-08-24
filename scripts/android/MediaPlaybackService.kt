@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -15,6 +17,7 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 
 /**
  * JNI bridge into the Rust audio engine (libauralis_lib.so).
@@ -61,7 +64,8 @@ class MediaPlaybackService : Service() {
             artist: String,
             durationSecs: Int,
             positionSecs: Int,
-            isPlaying: Boolean
+            isPlaying: Boolean,
+            artPath: String
         ) {
             val intent = Intent(context, MediaPlaybackService::class.java).apply {
                 putExtra("title", title)
@@ -69,6 +73,7 @@ class MediaPlaybackService : Service() {
                 putExtra("durationSecs", durationSecs)
                 putExtra("positionSecs", positionSecs)
                 putExtra("isPlaying", isPlaying)
+                putExtra("artPath", artPath)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -87,6 +92,8 @@ class MediaPlaybackService : Service() {
     private var mediaSession: MediaSession? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
+    private var pausedByFocusLoss: Boolean = false
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -96,31 +103,49 @@ class MediaPlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_PLAY -> NativeBridge.command("play")
-            ACTION_PAUSE -> NativeBridge.command("pause")
-            ACTION_NEXT -> NativeBridge.command("next")
-            ACTION_PREVIOUS -> NativeBridge.command("previous")
+        // Handle media-button intents forwarded via PendingIntent (no track extras).
+        val action = intent?.action
+        if (action != null) {
+            when (action) {
+                ACTION_PLAY -> { pausedByFocusLoss = false; NativeBridge.command("play") }
+                ACTION_PAUSE -> { pausedByFocusLoss = false; NativeBridge.command("pause") }
+                ACTION_NEXT -> NativeBridge.command("next")
+                ACTION_PREVIOUS -> NativeBridge.command("previous")
+            }
+            // Don't rebuild notification with default title/isPlaying=true; Rust will
+            // push the corrected state asynchronously via start().
+            return START_NOT_STICKY
+        }
+        if (intent == null) {
+            // System restarted service after process death without Tauri runtime — cannot
+            // resume audio; avoid ghost notification with stale defaults.
+            return START_NOT_STICKY
         }
 
-        val title = intent?.getStringExtra("title") ?: "Auralis"
-        val artist = intent?.getStringExtra("artist").orEmpty()
-        val durationSecs = intent?.getIntExtra("durationSecs", 0) ?: 0
-        val positionSecs = intent?.getIntExtra("positionSecs", 0) ?: 0
-        val isPlaying = intent?.getBooleanExtra("isPlaying", true) ?: true
+        val title = intent.getStringExtra("title") ?: "Auralis"
+        val artist = intent.getStringExtra("artist").orEmpty()
+        val durationSecs = intent.getIntExtra("durationSecs", 0)
+        val positionSecs = intent.getIntExtra("positionSecs", 0)
+        val isPlaying = intent.getBooleanExtra("isPlaying", true)
+        val artPath = intent.getStringExtra("artPath").orEmpty()
 
         if (isPlaying) {
             requestAudioFocus()
+            acquireWakeLock()
+        } else {
+            releaseWakeLock()
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification(title, artist, isPlaying))
-        updateMediaSession(title, artist, durationSecs, positionSecs, isPlaying)
+        val art = loadArtBitmap(artPath)
+        startForeground(NOTIFICATION_ID, buildNotification(title, artist, isPlaying, art))
+        updateMediaSession(title, artist, durationSecs, positionSecs, isPlaying, art)
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        releaseWakeLock()
         abandonAudioFocus()
         mediaSession?.isActive = false
         mediaSession?.release()
@@ -141,8 +166,21 @@ class MediaPlaybackService : Service() {
                 .setOnAudioFocusChangeListener { focusChange ->
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS,
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> NativeBridge.command("pause")
-                        AudioManager.AUDIOFOCUS_GAIN -> NativeBridge.command("play")
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                            pausedByFocusLoss = true
+                            NativeBridge.command("pause")
+                        }
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                            // Duck rather than pause — keep playing at lower volume.
+                            // Rust/rodio volume ducking would require player affinity; for
+                            // minimal fix we simply avoid pausing (audio continues).
+                        }
+                        AudioManager.AUDIOFOCUS_GAIN -> {
+                            if (pausedByFocusLoss) {
+                                pausedByFocusLoss = false
+                                NativeBridge.command("play")
+                            }
+                        }
                     }
                 }
                 .build()
@@ -154,8 +192,19 @@ class MediaPlaybackService : Service() {
                 { focusChange ->
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS,
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> NativeBridge.command("pause")
-                        AudioManager.AUDIOFOCUS_GAIN -> NativeBridge.command("play")
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                            pausedByFocusLoss = true
+                            NativeBridge.command("pause")
+                        }
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                            // Duck — do not pause.
+                        }
+                        AudioManager.AUDIOFOCUS_GAIN -> {
+                            if (pausedByFocusLoss) {
+                                pausedByFocusLoss = false
+                                NativeBridge.command("play")
+                            }
+                        }
                     }
                 },
                 AudioManager.STREAM_MUSIC,
@@ -213,19 +262,48 @@ class MediaPlaybackService : Service() {
         mediaSession = session
     }
 
+    private fun loadArtBitmap(path: String): Bitmap? {
+        if (path.isEmpty()) return null
+        return try {
+            val f = java.io.File(path)
+            if (!f.exists()) return null
+            BitmapFactory.decodeFile(path)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Auralis:PlaybackWakeLock")
+        wl.acquire(10 * 60 * 1000L) // 10 min timeout as safety; renewed on each play push
+        wakeLock = wl
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+    }
+
     private fun updateMediaSession(
         title: String,
         artist: String,
         durationSecs: Int,
         positionSecs: Int,
-        isPlaying: Boolean
+        isPlaying: Boolean,
+        art: Bitmap? = null
     ) {
         val session = mediaSession ?: return
-        val metadata = MediaMetadata.Builder()
+        val metadataBuilder = MediaMetadata.Builder()
             .putString(MediaMetadata.METADATA_KEY_TITLE, title)
             .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
             .putLong(MediaMetadata.METADATA_KEY_DURATION, durationSecs * 1000L)
-            .build()
+        if (art != null) {
+            metadataBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art)
+            metadataBuilder.putBitmap(MediaMetadata.METADATA_KEY_ART, art)
+        }
+        val metadata = metadataBuilder.build()
         val actions = PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
             PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT or
             PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_SEEK_TO
@@ -242,7 +320,7 @@ class MediaPlaybackService : Service() {
         session.isActive = true
     }
 
-    private fun buildNotification(title: String, artist: String, isPlaying: Boolean): Notification {
+    private fun buildNotification(title: String, artist: String, isPlaying: Boolean, art: Bitmap? = null): Notification {
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -261,6 +339,9 @@ class MediaPlaybackService : Service() {
                 "Play",
                 pendingServiceIntent(ACTION_PLAY)
             ).build()
+        }
+        if (art != null) {
+            builder.setLargeIcon(art)
         }
         return builder
             .setContentTitle(title)

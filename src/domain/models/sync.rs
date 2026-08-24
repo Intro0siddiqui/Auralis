@@ -33,6 +33,13 @@ pub struct PairedDevice {
 
     /// Shared library version for conflict detection
     pub library_version: u64,
+
+    /// Persisted libp2p PeerId string for this device (if known).
+    /// Bridges the UUID `id` (used by the app) to the network's `PeerId`
+    /// so aliases survive restarts. `None` until the device is discovered
+    /// or explicitly linked via `register_device_alias`.
+    #[serde(default)]
+    pub peer_id: Option<String>,
 }
 
 impl PairedDevice {
@@ -47,6 +54,22 @@ impl PairedDevice {
             last_sync: None,
             status: DeviceStatus::Disconnected,
             library_version: 0,
+            peer_id: None,
+        }
+    }
+
+    /// Create a new paired device with a known PeerId
+    pub fn with_peer_id(name: String, device_type: DeviceType, peer_id: String) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name,
+            device_type,
+            ip_address: None,
+            paired_at: Utc::now(),
+            last_sync: None,
+            status: DeviceStatus::Disconnected,
+            library_version: 0,
+            peer_id: Some(peer_id),
         }
     }
 

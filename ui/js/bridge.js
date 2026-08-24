@@ -30,18 +30,22 @@ window.Auralis.bridge = new Bridge();
 window.Auralis.assetUrl = (path) => window.Auralis.bridge.assetUrl(path);
 
 // Auto-initialize
+function _wirePlayer() {
+    const p = window.Auralis && window.Auralis.player;
+    if (p && typeof p.initBridgeListeners === 'function') p.initBridgeListeners();
+    if (p && typeof p.hydrateState === 'function') p.hydrateState().catch(()=>{});
+}
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
         window.Auralis.bridge.init();
-        if (window.Auralis.player && typeof window.Auralis.player.initBridgeListeners === 'function') {
-            window.Auralis.player.initBridgeListeners();
-        }
+        _wirePlayer();
+        // Retry shortly for case where player.js loaded after this module
+        setTimeout(_wirePlayer, 300);
     });
 } else {
     window.Auralis.bridge.init();
-    if (window.Auralis.player && typeof window.Auralis.player.initBridgeListeners === 'function') {
-        window.Auralis.player.initBridgeListeners();
-    }
+    _wirePlayer();
+    setTimeout(_wirePlayer, 300);
 }
 
 export { Bridge };

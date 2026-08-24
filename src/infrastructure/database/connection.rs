@@ -25,8 +25,11 @@ use tracing::{debug, info};
 ///
 /// Serialization means every `SELECT`/`INSERT`/`UPDATE` holds the mutex for
 /// its entire `prepare` + `execute` window. On desktop this is fine (low
-/// concurrency: UI thread + scanner). On Android the scanner + playback +
-/// sync can contend briefly.
+/// concurrency: UI thread + scanner). On Android (phone) the scanner + playback +
+/// sync can contend briefly, but this is a single-user device with low write
+/// concurrency — a single `Mutex` is acceptable (see `try_connection()` for
+/// non-blocking probe: background/opportunistic tasks should use
+/// `try_connection()` and retry/backoff instead of blocking the async runtime).
 ///
 /// Mitigations in place (no new deps):
 /// - `PRAGMA journal_mode = WAL` — readers do not block writers and writers
@@ -151,7 +154,8 @@ impl Database {
                     paired_at TEXT NOT NULL,
                     last_sync TEXT,
                     status TEXT NOT NULL DEFAULT 'disconnected',
-                    library_version INTEGER NOT NULL DEFAULT 0
+                    library_version INTEGER NOT NULL DEFAULT 0,
+                    peer_id TEXT
                 );
 
                 -- Sync changes table
@@ -195,6 +199,8 @@ impl Database {
             "ALTER TABLE tracks ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // Ensure peer_id column exists for device alias persistence (HIGH deficiency fix)
+        let _ = connection.execute("ALTER TABLE paired_devices ADD COLUMN peer_id TEXT", []);
         Ok(())
     }
 

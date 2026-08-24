@@ -62,7 +62,9 @@ impl PairingRateLimiter {
 fn lock_pairing_limiter(
     limiter: &Mutex<PairingRateLimiter>,
 ) -> std::sync::MutexGuard<'_, PairingRateLimiter> {
-    limiter.unwrap_or_else(std::sync::PoisonError::into_inner)
+    limiter
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Byte-wise constant-time equality: XOR-accumulates every byte pair and ORs
@@ -126,9 +128,30 @@ impl SyncService {
 
         {
             let mut paired = self.paired_devices.write().await;
-            for device in devices {
+            for device in devices.clone() {
                 paired.insert(device.id, device);
             }
+        }
+
+        // Hydrate in-memory alias map from persisted peer_id column (survives restarts)
+        // Keeps RwLock for runtime speed but DB is source of truth.
+        for device in &devices {
+            if let Some(peer_str) = &device.peer_id {
+                if let Ok(pid) = peer_str.parse::<libp2p::PeerId>() {
+                    self.sync_engine
+                        .runtime()
+                        .register_device_alias(device.id.to_string(), pid)
+                        .await;
+                    // also cache lowercased variant (register does both, but explicit)
+                } else {
+                    warn!(device_id = %device.id, peer_id = %peer_str, "Invalid persisted peer_id; skipping hydrate");
+                }
+            }
+        }
+        // Also attempt full DB hydration via NetworkRuntime's alias_db if attached
+        // (covers devices that may have been updated directly via SQL)
+        if let Err(e) = self.sync_engine.runtime().hydrate_aliases().await {
+            debug!(error = %e, "Network alias hydration from DB failed (non-fatal)");
         }
 
         // Load pending changes
@@ -321,7 +344,19 @@ impl SyncService {
             }
         }
 
+        // Ensure alias map is warmed from persisted peer_id (HIGH fix: survives restarts)
+        // If device has a persisted peer_id, make sure the in-memory map has it.
+        if let Some(peer_str) = &device.peer_id {
+            if let Ok(pid) = peer_str.parse::<libp2p::PeerId>() {
+                self.sync_engine
+                    .runtime()
+                    .register_device_alias(device_id.to_string(), pid)
+                    .await;
+            }
+        }
+
         // 3. Perform the actual request-response sync via libp2p
+        // request_sync resolves via in-memory map, then DB peer_id column, then raw PeerId
         let peer_id = device_id.to_string();
         if let Err(e) = self.sync_engine.request_sync(&peer_id).await {
             warn!(device_id = %device_id, error = %e, "Sync transfer failed; keeping pending changes in queue");
@@ -336,10 +371,34 @@ impl SyncService {
         // 4. Clear pending changes on the local side only after successful sync
         self.clear_pending_changes().await.ok();
 
-        // Update device sync time
+        // Update device sync time (preserve peer_id — don't overwrite persisted alias with None)
+        // Resolve any persisted peer_id without holding the write guard across await
+        let resolved_peer: Option<String> = {
+            let need = {
+                let devices = self.paired_devices.read().await;
+                devices
+                    .get(&device_id)
+                    .and_then(|d| d.peer_id.clone())
+                    .is_none()
+            };
+            if need {
+                self.sync_engine
+                    .runtime()
+                    .resolve_peer_id(&device_id.to_string())
+                    .await
+                    .map(|p| p.to_string())
+            } else {
+                None
+            }
+        };
         {
             let mut devices = self.paired_devices.write().await;
             if let Some(d) = devices.get_mut(&device_id) {
+                if d.peer_id.is_none() {
+                    if let Some(pid_str) = resolved_peer.clone() {
+                        d.peer_id = Some(pid_str);
+                    }
+                }
                 d.mark_synced();
                 self.sync_repository
                     .save_paired_device(d)

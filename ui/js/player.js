@@ -10,6 +10,7 @@ class PlayerController {
         this.repeatMode = 'off';
         this.shuffle = false;
         this.progressInterval = null;
+        this.isSeeking = false;
         this.init();
     }
 
@@ -21,6 +22,7 @@ class PlayerController {
         this.bindKeyboard();
         this.bindFullScreenPlayerListeners();
         this.initBridgeListeners();
+        this.hydrateState();
     }
 
     initBridgeListeners() {
@@ -45,15 +47,19 @@ class PlayerController {
             this.updateProgressUI();
             this.updatePlayButton();
             this.updateFullScreenMetadata();
+            this.updateMediaSessionMetadata(track);
+            this.updatePositionState();
             if (this.queuePanel && this.queuePanel.classList.contains('open')) {
                 this.renderQueuePanel();
             }
         });
 
         window.Auralis.bridge.on('playback:progress', (data) => {
+            if (this.isSeeking) return;
             this.progress = data.position;
             this.duration = data.duration;
             this.updateProgressUI();
+            this.updatePositionState();
         });
 
         window.Auralis.bridge.on('playback:queue', () => {
@@ -122,15 +128,28 @@ class PlayerController {
 
         const startSeek = (e) => {
             isSeeking = true;
-            this.seekToPercent(getPercent(e));
+            this.isSeeking = true;
+            const pct = getPercent(e);
+            this.progress = pct * (this.duration || 0);
+            this.updateProgressUI();
+            this.updatePositionState();
         };
 
         const moveSeek = (e) => {
-            if (isSeeking) this.seekToPercent(getPercent(e));
+            if (isSeeking) {
+                const pct = getPercent(e);
+                this.progress = pct * (this.duration || 0);
+                this.updateProgressUI();
+                this.updatePositionState();
+            }
         };
 
         const endSeek = () => {
-            isSeeking = false;
+            if (isSeeking) {
+                isSeeking = false;
+                this.isSeeking = false;
+                this.commitSeek();
+            }
         };
 
         this.progressTrack.addEventListener('mousedown', startSeek);
@@ -255,13 +274,26 @@ class PlayerController {
 
             const startSeek = (e) => {
                 isSeeking = true;
-                this.seekToPercent(getPercent(e));
+                this.isSeeking = true;
+                const pct = getPercent(e);
+                this.progress = pct * (this.duration || 0);
+                this.updateProgressUI();
+                this.updatePositionState();
             };
             const moveSeek = (e) => {
-                if (isSeeking) this.seekToPercent(getPercent(e));
+                if (isSeeking) {
+                    const pct = getPercent(e);
+                    this.progress = pct * (this.duration || 0);
+                    this.updateProgressUI();
+                    this.updatePositionState();
+                }
             };
             const endSeek = () => {
-                isSeeking = false;
+                if (isSeeking) {
+                    isSeeking = false;
+                    this.isSeeking = false;
+                    this.commitSeek();
+                }
             };
 
             fullProgress.addEventListener('mousedown', startSeek);
@@ -348,10 +380,12 @@ class PlayerController {
                     else this.seekRelative(5);
                     break;
                 case 'ArrowUp':
+                    if (!e.ctrlKey && !e.metaKey && !e.altKey) return;
                     e.preventDefault();
                     this.setVolumeLevel(Math.min(1, this.volume + 0.05));
                     break;
                 case 'ArrowDown':
+                    if (!e.ctrlKey && !e.metaKey && !e.altKey) return;
                     e.preventDefault();
                     this.setVolumeLevel(Math.max(0, this.volume - 0.05));
                     break;
@@ -380,6 +414,9 @@ class PlayerController {
                     this.seek(details.seekTime);
                 }
             });
+            try { navigator.mediaSession.setActionHandler('seekbackward', (details) => { const off = (details && details.seekOffset) || 10; this.seekRelative(-off); }); } catch (_) {}
+            try { navigator.mediaSession.setActionHandler('seekforward', (details) => { const off = (details && details.seekOffset) || 10; this.seekRelative(off); }); } catch (_) {}
+            try { navigator.mediaSession.setActionHandler('stop', () => { if (window.Auralis && window.Auralis.bridge) window.Auralis.bridge.invoke('stop').catch(()=>{}); this.isPlaying = false; this.updatePlayButton(); }); } catch (_) {}
         } catch (err) {
             console.warn('MediaSession handler error:', err);
         }
@@ -443,8 +480,89 @@ class PlayerController {
     seekToPercent(pct) {
         this.progress = pct * (this.duration || 0);
         this.updateProgressUI();
+        this.updatePositionState();
         if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } });
+            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } }).catch(()=>{});
+        }
+    }
+
+    commitSeek() {
+        if (!this.duration || this.duration <= 0) return;
+        this.updatePositionState();
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } }).catch(()=>{});
+        }
+    }
+
+    updateMediaSessionMetadata(track) {
+        if (!('mediaSession' in navigator) || !track) return;
+        try {
+            const title = track.title || 'Unknown Title';
+            const artist = track.artist || 'Unknown Artist';
+            const album = track.album || '';
+            let artwork = [];
+            if (track.album_art_path) {
+                const src = (window.Auralis && window.Auralis.assetUrl) ? window.Auralis.assetUrl(track.album_art_path) : track.album_art_path;
+                artwork.push({ src, sizes: '512x512', type: 'image/jpeg' });
+            }
+            navigator.mediaSession.metadata = new MediaMetadata({ title, artist, album, artwork });
+            if (track.album_art_path && window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.invoke === 'function') {
+                window.Auralis.bridge.invoke('media_data_url', { path: track.album_art_path }).then((dataUrl) => {
+                    if (dataUrl && typeof dataUrl === 'string' && dataUrl.startsWith('data:')) {
+                        try {
+                            navigator.mediaSession.metadata = new MediaMetadata({ title, artist, album, artwork: [{ src: dataUrl, sizes: '512x512', type: 'image/jpeg' }] });
+                        } catch (_) {}
+                    }
+                }).catch(()=>{});
+            }
+        } catch (err) {
+            console.warn('MediaSession metadata error:', err);
+        }
+    }
+
+    updatePositionState() {
+        if (!('mediaSession' in navigator) || typeof navigator.mediaSession.setPositionState !== 'function') return;
+        try {
+            if (!this.duration || this.duration <= 0 || !isFinite(this.duration) || !isFinite(this.progress)) return;
+            navigator.mediaSession.setPositionState({ duration: this.duration, playbackRate: 1, position: Math.min(Math.max(0, this.progress), this.duration) });
+        } catch (_) {}
+    }
+
+    async hydrateState() {
+        try {
+            if (!window.Auralis || !window.Auralis.bridge || typeof window.Auralis.bridge.invoke !== 'function') return;
+            let state = null;
+            try { state = await window.Auralis.bridge.invoke('get_now_playing'); } catch (_) {}
+            if (!state) {
+                try { state = await window.Auralis.bridge.invoke('get_playback_state'); } catch (_) {}
+            }
+            if (!state) return;
+            const np = state.track ? state : null;
+            if (!np || !np.track) {
+                if (typeof state.volume === 'number') { this.volume = state.volume; this.updateVolumeUI(); }
+                if (typeof state.shuffle_enabled === 'boolean') { this.shuffle = state.shuffle_enabled; }
+                if (state.repeat_mode) { this.repeatMode = state.repeat_mode; this.updateShuffleRepeatUI(); }
+                return;
+            }
+            this.currentTrack = np.track;
+            this.duration = np.track.duration_secs || 0;
+            this.progress = typeof np.position_secs === 'number' ? np.position_secs : 0;
+            if (typeof np.volume === 'number') this.volume = np.volume;
+            if (typeof np.shuffle_enabled === 'boolean') this.shuffle = np.shuffle_enabled;
+            if (np.repeat_mode) this.repeatMode = np.repeat_mode;
+            this.isPlaying = !!np.is_playing;
+            this.isLiked = Boolean(np.track.is_favorite);
+            if (window.Auralis.bridge.updatePlayerBar) window.Auralis.bridge.updatePlayerBar(np.track);
+            this.updateProgressUI();
+            this.updateVolumeUI();
+            this.updateShuffleRepeatUI();
+            this.updatePlayButton();
+            this.updateLikeUI();
+            this.updateFullScreenMetadata();
+            this.updateMediaSessionMetadata(np.track);
+            this.updatePositionState();
+        } catch (e) {
+            console.warn('hydrateState failed', e);
         }
     }
 

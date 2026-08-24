@@ -774,6 +774,14 @@ impl SqliteSyncRepository {
         let device_type_str: String = row.get(2)?;
         let status_str: String = row.get(6)?;
 
+        // peer_id is at index 8 after migration; handle gracefully for old rows / SELECT *
+        // and also via column name lookup to survive column reordering.
+        let peer_id: Option<String> = row
+            .get::<_, Option<String>>("peer_id")
+            .ok()
+            .flatten()
+            .or_else(|| row.get::<_, Option<String>>(8).ok().flatten());
+
         Ok(PairedDevice {
             id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::new_v4()),
             name: row.get(1)?,
@@ -791,6 +799,7 @@ impl SqliteSyncRepository {
                 _ => DeviceStatus::Disconnected,
             },
             library_version: row.get::<_, i64>(7)? as u64,
+            peer_id,
         })
     }
 
@@ -874,8 +883,8 @@ impl SyncRepository for SqliteSyncRepository {
 
         conn.execute(
             r#"INSERT OR REPLACE INTO paired_devices (
-                id, name, device_type, ip_address, paired_at, last_sync, status, library_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+                id, name, device_type, ip_address, paired_at, last_sync, status, library_version, peer_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             params![
                 device.id.to_string(),
                 device.name,
@@ -885,6 +894,7 @@ impl SyncRepository for SqliteSyncRepository {
                 device.last_sync.map(|d| d.to_rfc3339()),
                 device.status.to_string(),
                 device.library_version as i64,
+                device.peer_id,
             ],
         )?;
 

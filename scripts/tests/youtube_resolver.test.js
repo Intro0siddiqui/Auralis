@@ -60,6 +60,12 @@ function hasDirectOrDecipherableAudio(r) {
     const all = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
     return all.some((f) => isAudioFormat(f) && Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
 }
+function hasLegacyProgressiveFallback(r) {
+    if (!r || !r.streaming_data) return false;
+    const fmts = r.streaming_data.formats || [];
+    if (!fmts.length) return false;
+    return fmts.some((f) => Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
+}
 
 // ── Tests ──
 describe('youtube.js pure helpers', () => {
@@ -136,6 +142,105 @@ describe('streaming_data audio detection', () => {
     });
 });
 
+describe('SABR-only fallback (FreeTube#6977)', () => {
+    it('rejects SABR-only adaptive_formats with no URL but accepts legacy progressive via fallback', () => {
+        // 2026 WEB SABR-only: adaptive_formats have no url/cipher, only serverAbrStreamingUrl (not parsed)
+        // Legacy 18 may have has_audio false due to mapping bug (video/mp4 + missing audioQuality) — isAudioFormat fails, but fallback must still pass
+        const sabrOnly = {
+            streaming_data: {
+                adaptive_formats: [
+                    { has_audio: true, mime_type: 'audio/webm', url: undefined, signature_cipher: undefined },
+                    { has_audio: true, mime_type: 'audio/mp4', url: undefined }
+                ],
+                formats: [
+                    { itag: 18, mime_type: 'video/mp4', has_audio: false, has_video: true, url: 'https://googlevideo.com/videoplayback?itag=18' }
+                ]
+            }
+        };
+        // isAudioFormat requires has_audio true, so progressive with has_audio false fails hasDirectOrDecipherableAudio
+        assert.equal(hasDirectOrDecipherableAudio(sabrOnly), false, 'adaptive SABR-only should fail when progressive has_audio false mapping');
+        // Legacy fallback must succeed even though isAudioFormat gating would not cover progressive has_audio false case (FreeTube#6977)
+        assert.equal(hasLegacyProgressiveFallback(sabrOnly), true);
+
+        // Also verify that when has_audio true, hasDirect would already succeed — fallback is extra safety
+        const sabrWithAudioFlag = {
+            streaming_data: {
+                adaptive_formats: [{ has_audio: true, mime_type: 'audio/webm', url: undefined }],
+                formats: [{ itag: 18, mime_type: 'video/mp4', has_audio: true, url: 'https://googlevideo.com/videoplayback?itag=18' }]
+            }
+        };
+        assert.equal(hasDirectOrDecipherableAudio(sabrWithAudioFlag), true);
+        assert.equal(hasLegacyProgressiveFallback(sabrWithAudioFlag), true);
+    });
+
+    it('accepts legacy progressive with signature_cipher (decipher needed)', () => {
+        // Cipher case with has_audio false mapping — hasDirect fails, fallback passes and decipher path must work
+        const cipherSabr = {
+            streaming_data: {
+                adaptive_formats: [{ has_audio: true, mime_type: 'audio/mp4', url: undefined }],
+                formats: [{ itag: 18, mime_type: 'video/mp4', has_audio: false, signature_cipher: 's=abc&url=https%3A%2F%2Fgooglevideo.com%2Fvideoplayback' }]
+            }
+        };
+        assert.equal(hasDirectOrDecipherableAudio(cipherSabr), false);
+        assert.equal(hasLegacyProgressiveFallback(cipherSabr), true);
+        // When has_audio true, hasDirect would be true via isAudioFormat + cipher
+        const cipherWithAudio = {
+            streaming_data: {
+                adaptive_formats: [{ has_audio: true, mime_type: 'audio/mp4', url: undefined }],
+                formats: [{ itag: 18, mime_type: 'video/mp4', has_audio: true, signature_cipher: 's=abc&url=https%3A%2F%2Fgooglevideo.com%2Fvideoplayback' }]
+            }
+        };
+        assert.equal(hasDirectOrDecipherableAudio(cipherWithAudio), true);
+        assert.equal(hasLegacyProgressiveFallback(cipherWithAudio), true);
+    });
+
+    it('accepts legacy with decipher function', () => {
+        const decipherSabr = {
+            streaming_data: {
+                adaptive_formats: [{ has_audio: true, mime_type: 'audio/mp4' }],
+                formats: [{ itag: 18, mime_type: 'video/mp4', has_audio: true, decipher: () => 'https://googlevideo.com/deciphered' }]
+            }
+        };
+        assert.equal(hasLegacyProgressiveFallback(decipherSabr), true);
+    });
+
+    it('rejects when both adaptive and formats lack decipherable URL', () => {
+        const empty = {
+            streaming_data: {
+                adaptive_formats: [{ has_audio: true, mime_type: 'audio/mp4' }],
+                formats: [{ itag: 18, mime_type: 'video/mp4' }]
+            }
+        };
+        assert.equal(hasDirectOrDecipherableAudio(empty), false);
+        assert.equal(hasLegacyProgressiveFallback(empty), false);
+    });
+
+    it('regression: KGQG5Fv4Yrw_E-like WEB SABR-only must not throw No audio stream found', () => {
+        // Simulate final fmt selection fallback: if audioCandidates empty but formats has legacy, fallback should pick it
+        function isAudio(f) { return isAudioFormat(f); }
+        const sd = {
+            adaptive_formats: [{ has_audio: true, mime_type: 'audio/webm' }], // SABR no url
+            formats: [{ itag: 18, mime_type: 'video/mp4', has_audio: true, has_video: true, url: 'https://googlevideo.com/legacy18' }]
+        };
+        const allCandidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
+        const audioCandidates = allCandidates.filter(isAudio);
+        // audioCandidates will contain the progressive? has_audio true so yes, but if mapping bug made has_audio false, fallback still needed
+        // Test the explicit legacy fallback path used in youtube.js after allCandidates[0] check
+        let fmt = null;
+        if (!fmt && audioCandidates.length > 0) {
+            fmt = audioCandidates.find((f) => f.url && f.mime_type?.includes('mp4')) || audioCandidates.find((f) => f.url) || audioCandidates[0];
+        }
+        if (!fmt) fmt = allCandidates.find((f) => f && f.has_audio) || allCandidates[0];
+        // Now apply SABR final fallback as in youtube.js
+        if ((!fmt || (!fmt.url && !fmt.signature_cipher && !fmt.cipher)) && sd.formats && sd.formats.length) {
+            const legacy = sd.formats.find((f) => f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function') || sd.formats[0];
+            if (legacy) fmt = legacy;
+        }
+        assert.ok(fmt && fmt.url.includes('googlevideo'), 'legacy progressive should be selected for SABR-only');
+        assert.equal(fmt.itag, 18);
+    });
+});
+
 describe('regression: 6-client fallback must be present in youtube.js', () => {
     const ytPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/youtube.js');
     const src = fs.readFileSync(ytPath, 'utf8');
@@ -192,6 +297,16 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         assert.ok(src.includes("headers") && src.includes("User-Agent"), 'youtube.js must return headers with User-Agent');
         assert.ok(src.includes("winningClient") && src.includes("uaMap"), 'youtube.js must map winningClient -> UA');
         assert.ok(src.includes("Referer") && src.includes("Origin"), 'headers must include Referer/Origin');
+    });
+
+    it('SABR-only fallback must be present (FreeTube#6977)', () => {
+        assert.ok(src.includes('hasLegacyProgressiveFallback'), 'youtube.js missing hasLegacyProgressiveFallback helper');
+        assert.ok(src.includes('SABR-only'), 'youtube.js missing SABR-only fallback comment/marker');
+        assert.ok(src.includes('formats') && src.includes('signature_cipher'), 'fallback must handle signature_cipher for progressive');
+        // TV/ANDROID_VR-first ordering must remain (orderedClients ternary)
+        const m = src.match(/const orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
+        assert.ok(m, 'orderedClients must still be TV-first when no poToken');
+        assert.equal(m[2].replace(/\s/g, ''), "'TV','ANDROID_VR','MWEB','WEB','IOS','ANDROID'", 'TV/ANDROID_VR-first ordering must be preserved');
     });
 });
 

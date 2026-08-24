@@ -58,7 +58,7 @@
         
         <!-- Player Bar - static, not HTMX swapped -->
         <footer id="player-bar" class="neu-glass player-bar">
-            <div class="player-track">
+            <div class="player-track" hx-get="/partials/player-full.html" hx-target="#overlay-root" hx-swap="innerHTML" style="cursor:pointer">
                 <div class="track-artwork" id="current-artwork">
                     <div class="artwork-placeholder">
                         <i data-lucide="disc"></i>
@@ -68,7 +68,7 @@
                     <div class="track-title" id="track-title">No track playing</div>
                     <div class="track-artist" id="track-artist">Select a song</div>
                 </div>
-                <button class="track-like" id="track-like" aria-label="Like">
+                <button class="track-like" id="track-like" aria-label="Like" onclick="event.stopPropagation()">
                     <i data-lucide="heart"></i>
                 </button>
             </div>

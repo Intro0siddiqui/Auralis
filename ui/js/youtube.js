@@ -136,13 +136,23 @@ class YouTubeResolver {
             });
         }
 
-        const key = [opts.cookie || '', opts.poToken || ''].join('|');
+        const vd = opts.visitorData || opts.visitor_data || '';
+        const key = [opts.cookie || '', opts.poToken || opts.po_token || '', vd].join('|');
         if (!this._clients[key]) {
             const cfg = {
                 retrieve_player: false,
             };
             if (opts.cookie) cfg.cookie = opts.cookie;
-            if (opts.poToken) cfg.poToken = opts.poToken;
+            // Wire poToken + visitorData for PO (youtubei expects po_token / visitor_data, also accepts camelCase)
+            if (opts.poToken || opts.po_token) {
+                const tok = opts.poToken || opts.po_token;
+                cfg.poToken = tok;
+                cfg.po_token = tok;
+            }
+            if (vd) {
+                cfg.visitorData = vd;
+                cfg.visitor_data = vd;
+            }
 
             try {
                 if (typeof Ctor.create === 'function') {
@@ -169,11 +179,15 @@ class YouTubeResolver {
     extFromMime(mime) {
         if (!mime) return 'm4a';
         const m = String(mime).toLowerCase();
-        if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) return 'm4a';
         if (m.includes('webm') || m.includes('opus')) return 'webm';
         if (m.includes('ogg')) return 'ogg';
         if (m.includes('wav')) return 'wav';
         if (m.includes('flac')) return 'flac';
+        if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) {
+            // video/mp4 progressive (itag 18 muxed) must stay mp4, not m4a
+            if (m.startsWith('video/')) return 'mp4';
+            return 'm4a';
+        }
         if (m.includes('mpeg') || m.includes('mp3')) return 'mp3';
         return 'm4a';
     }
@@ -243,21 +257,28 @@ class YouTubeResolver {
 
         // 2026 PO-token gate: try to mint per-video token via BgUtils if none supplied
         // Wrapped in dynamic import so resolver never becomes "unavailable" if bgutils missing.
+        // Fallback: TV/ANDROID_VR clients require no poToken (Jio IPv6 residential-safe).
         let client = null;
-        if (!opts.poToken) {
+        if (!opts.poToken && !opts.po_token) {
             try {
                 const poMod = await import('./modules/po_token.js').catch(() => import('./po_token.js')).catch(() => null);
                 if (poMod) {
                     const { getCachedPoToken, setCachedPoToken, generatePoTokenForVideo } = poMod;
-                    const cached = getCachedPoToken ? getCachedPoToken(videoId) : null;
+                    // visitorData-bound cache: use session visitorData if available
+                    let vdForCache = opts.visitorData || opts.visitor_data || null;
+                    try {
+                        const tmpForVd = await this._client(opts);
+                        vdForCache = tmpForVd?.session?.context?.client?.visitorData || vdForCache;
+                    } catch (_) {}
+                    const cached = getCachedPoToken ? getCachedPoToken(videoId, vdForCache) : null;
                     if (cached) {
-                        opts = { ...opts, poToken: cached.poToken, visitorData: cached.visitorData || opts.visitorData };
+                        opts = { ...opts, poToken: cached.poToken, po_token: cached.poToken, visitorData: cached.visitorData || vdForCache || opts.visitorData, visitor_data: cached.visitorData || vdForCache };
                         console.log(`[YouTubeResolver] Using cached PO token for ${videoId}`);
                     } else if (generatePoTokenForVideo) {
                         const tmpClient = await this._client(opts);
                         const minted = await generatePoTokenForVideo(tmpClient, videoId).catch(() => null);
                         if (minted?.poToken) {
-                            opts = { ...opts, poToken: minted.poToken, visitorData: minted.visitorData || opts.visitorData };
+                            opts = { ...opts, poToken: minted.poToken, po_token: minted.poToken, visitorData: minted.visitorData || vdForCache || opts.visitorData, visitor_data: minted.visitorData || vdForCache };
                             if (setCachedPoToken) setCachedPoToken(videoId, minted);
                             console.log(`[YouTubeResolver] Minted PO token for ${videoId}`);
                         } else {
@@ -269,7 +290,13 @@ class YouTubeResolver {
                 console.warn('[YouTubeResolver] PO token import/mint skipped:', e?.message || e);
             }
         }
-        client = await this._client(opts);
+        try {
+            client = await this._client(opts);
+        } catch (e) {
+            console.warn('[YouTubeResolver] _client init failed, falling back to TV client:', e?.message || e);
+            // Ensure window.AuralisYouTube never becomes unavailable
+            try { client = await this._client({}); } catch (_) { throw e; }
+        }
 
         let info = null;
         let winningClient = null;
@@ -283,11 +310,44 @@ class YouTubeResolver {
             return false;
         };
 
+        const isDecipherable = (f) => Boolean(f && (f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
+        const isAudioOnlyProgressive = (f) => Boolean(f && f.has_audio && !f.has_video);
+
+        // Prefer audio-only progressive (e.g., itag 140 m4a) over muxed video+audio (itag 18) — avoids 360p remux waste
+        const pickLegacyProgressive = (fmts) => {
+            if (!fmts || !fmts.length) return null;
+            const decipherable = fmts.filter(isDecipherable);
+            if (!decipherable.length) return null;
+            // Keep isAudioFormat filtering but add explicit check for legacy audio-only before video+audio
+            const audioOnly = decipherable.filter((f) => isAudioFormat(f) && isAudioOnlyProgressive(f));
+            if (audioOnly.length) return [...audioOnly].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+            const audioMimeOnly = decipherable.filter((f) => isAudioFormat(f) && !f.has_video);
+            if (audioMimeOnly.length) return [...audioMimeOnly].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+            // No audio-only progressive: fallback to muxed (has_audio) — caller must set ext correctly and log muxed
+            const muxed = decipherable.filter((f) => f.has_audio);
+            if (muxed.length) return [...muxed].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+            return decipherable[0];
+        };
+
         const hasDirectOrDecipherableAudio = (r) => {
             if (!r || !r.streaming_data) return false;
             const sd = r.streaming_data;
             const all = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
-            return all.some((f) => isAudioFormat(f) && Boolean(f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
+            return all.some((f) => isAudioFormat(f) && isDecipherable(f));
+        };
+
+        // F7 SABR-only fallback: 2026 WEB client often returns SABR-only (only
+        // serverAbrStreamingUrl, adaptive_formats URLs missing) but legacy
+        // progressive formats[18] (360p) remain usable. FreeTube#6977.
+        const hasLegacyProgressiveFallback = (r) => {
+            if (!r || !r.streaming_data) return false;
+            const fmts = r.streaming_data.formats || [];
+            if (!fmts.length) return false;
+            // Explicit check: prefer audio-only progressive if available (e.g., itag 140 m4a audio) over video+audio 18
+            if (fmts.some((f) => isAudioFormat(f) && isAudioOnlyProgressive(f) && isDecipherable(f))) return true;
+            if (fmts.some((f) => isAudioFormat(f) && !f.has_video && isDecipherable(f))) return true;
+            // Fallback: any decipherable progressive (muxed itag 18) — handles WEB mapping where has_audio may be false (video/mp4)
+            return fmts.some(isDecipherable);
         };
 
         // 1. First attempt: Direct raw player API query.
@@ -345,6 +405,16 @@ class YouTubeResolver {
                             winningClient = cl;
                             break;
                         }
+                        // SABR-only fallback: allow legacy progressive formats[18] even
+                        // when adaptive_formats URLs are missing (FreeTube#6977).
+                        // WEB 2026 often returns only serverAbrStreamingUrl for DASH,
+                        // but formats still contains 360p progressive with url/cipher.
+                        if (hasLegacyProgressiveFallback(parsed)) {
+                            console.log(`[YouTubeResolver] actions.execute('${cl}') SABR-only fallback: using legacy progressive formats`);
+                            info = parsed;
+                            winningClient = cl;
+                            break;
+                        }
                     }
                 } catch (e) {
                     console.error(`[YouTubeResolver] actions.execute('${cl}') error:`, e.message);
@@ -370,6 +440,13 @@ class YouTubeResolver {
                         if (candidates.length > 0) {
                             if (!fallbackInfo) { fallbackInfo = res; fallbackClient = clientNames[i]; }
                             if (hasDirectOrDecipherableAudio(res)) {
+                                info = res;
+                                winningClient = clientNames[i];
+                                break;
+                            }
+                            // SABR-only fallback for getInfo path too (FreeTube#6977)
+                            if (hasLegacyProgressiveFallback(res)) {
+                                console.log(`[YouTubeResolver] getInfo('${clientNames[i]}') SABR-only fallback: using legacy progressive formats`);
                                 info = res;
                                 winningClient = clientNames[i];
                                 break;
@@ -414,7 +491,8 @@ class YouTubeResolver {
         let fmt = null;
 
         if (typeof info.chooseFormat === 'function') {
-            const attempts = container ? [container, null] : ['mp4', null];
+            // Prefer webm/opus (higher bitrate, more efficient) when available
+            const attempts = container ? [container, null] : ['webm', 'mp4', null];
             for (const c of attempts) {
                 if (fmt) break;
                 const attempt = { type: 'audio', quality };
@@ -427,16 +505,36 @@ class YouTubeResolver {
         }
 
         if (!fmt && audioCandidates.length > 0) {
-            fmt =
-                audioCandidates.find((f) => f.url && f.mime_type?.includes('mp4')) ||
-                audioCandidates.find((f) => f.url) ||
-                audioCandidates.find((f) => !f.has_video && f.mime_type?.includes('mp4')) ||
-                audioCandidates.find((f) => !f.has_video) ||
-                audioCandidates[0];
+            // Prefer webm/opus (higher bitrate, more efficient) when available — sorted by bitrate desc
+            const byBitrate = (a, b) => (b.bitrate || 0) - (a.bitrate || 0);
+            const withUrl = audioCandidates.filter((f) => f.url);
+            const webmOpusWithUrl = withUrl.filter((f) => f.mime_type?.includes('opus') || f.mime_type?.includes('webm')).sort(byBitrate);
+            const sortedWithUrl = [...withUrl].sort(byBitrate);
+            const withCipher = audioCandidates.filter((f) => f.signature_cipher || f.cipher || typeof f.decipher === 'function').sort(byBitrate);
+            const webmOpusWithCipher = withCipher.filter((f) => f.mime_type?.includes('opus') || f.mime_type?.includes('webm'));
+            const audioOnlyWithCipher = withCipher.filter((f) => !f.has_video);
+            const sortedAll = [...audioCandidates].sort(byBitrate);
+            fmt = webmOpusWithUrl[0] || sortedWithUrl[0] || webmOpusWithCipher[0] || audioOnlyWithCipher[0] || sortedAll[0];
         }
 
         if (!fmt) {
             fmt = allCandidates.find((f) => f && f.has_audio) || allCandidates[0];
+        }
+
+        // SABR-only final fallback: WEB 2026 may have adaptive_formats with no URLs
+        // (only serverAbrStreamingUrl) but legacy progressive formats remain decipherable.
+        // Prefer audio-only progressive (e.g., itag 140 m4a) over muxed video+audio (itag 18 360p, wasteful).
+        if ((!fmt || (!fmt.url && !fmt.signature_cipher && !fmt.cipher && typeof fmt.decipher !== 'function')) && sd.formats && sd.formats.length) {
+            const legacy = pickLegacyProgressive(sd.formats);
+            if (legacy && isDecipherable(legacy)) {
+                const isMuxed = Boolean(legacy.has_video);
+                if (isMuxed) {
+                    console.warn(`[YouTubeResolver] SABR-only final fallback: using MUXED progressive itag=${legacy.itag} mime=${legacy.mime_type} (video+audio 360p remux — wasteful, ext will be mp4)`);
+                } else {
+                    console.log(`[YouTubeResolver] SABR-only final fallback: using legacy progressive itag=${legacy.itag} mime=${legacy.mime_type}`);
+                }
+                fmt = legacy;
+            }
         }
 
         if (!fmt) {
@@ -473,6 +571,55 @@ class YouTubeResolver {
                             }
                         } catch (_) {}
                     }
+                }
+            }
+        }
+
+        // SABR-only second fallback: if still no URL, try legacy progressive formats
+        // directly. Prefer audio-only progressive over muxed video+audio (itag 18).
+        if (!streamUrl && sd.formats && sd.formats.length) {
+            const orderedLegacy = (() => {
+                const best = pickLegacyProgressive(sd.formats);
+                if (!best) return [];
+                const rest = sd.formats.filter((f) => f !== best && isDecipherable(f));
+                const score = (f) => {
+                    if (isAudioFormat(f) && isAudioOnlyProgressive(f)) return 0;
+                    if (isAudioFormat(f) && !f.has_video) return 1;
+                    if (f.has_audio) return 2;
+                    return 3;
+                };
+                rest.sort((a, b) => score(a) - score(b) || (b.bitrate || 0) - (a.bitrate || 0));
+                return [best, ...rest];
+            })();
+            for (const candidate of orderedLegacy) {
+                if (!candidate) continue;
+                const isMuxed = Boolean(candidate.has_video);
+                if (candidate.url) {
+                    if (isMuxed) console.warn(`[YouTubeResolver] SABR-only streamUrl fallback: using MUXED progressive url itag=${candidate.itag} mime=${candidate.mime_type} (video+audio, ext mp4 — wasteful)`);
+                    else console.log(`[YouTubeResolver] SABR-only streamUrl fallback: using legacy progressive url itag=${candidate.itag}`);
+                    streamUrl = candidate.url;
+                    fmt = candidate;
+                    break;
+                }
+                if (typeof candidate.decipher === 'function' && client.session?.player) {
+                    try {
+                        const deciphered = await candidate.decipher(client.session.player);
+                        if (deciphered) {
+                            if (isMuxed) console.warn(`[YouTubeResolver] SABR-only streamUrl fallback: deciphered MUXED progressive itag=${candidate.itag} (muxed, ext mp4 — wasteful)`);
+                            else console.log(`[YouTubeResolver] SABR-only streamUrl fallback: deciphered legacy progressive itag=${candidate.itag}`);
+                            streamUrl = deciphered;
+                            fmt = candidate;
+                            break;
+                        }
+                    } catch (_) {}
+                }
+                // signature_cipher case is handled in the next block via fmt.cipher,
+                // but we can also try to promote candidate to fmt for that block
+                if (candidate.signature_cipher || candidate.cipher) {
+                    if (isMuxed) console.warn(`[YouTubeResolver] SABR-only streamUrl fallback: promoting MUXED progressive cipher itag=${candidate.itag} (muxed, ext mp4 — wasteful)`);
+                    else console.log(`[YouTubeResolver] SABR-only streamUrl fallback: promoting legacy progressive cipher itag=${candidate.itag}`);
+                    fmt = candidate;
+                    break;
                 }
             }
         }
@@ -530,6 +677,27 @@ class YouTubeResolver {
                     }
                 }
             } catch (_) {}
+        }
+
+        // Ensure pot is appended as &pot= on googlevideo URL via Player.decipher (youtubei.esm.mjs)
+        // Player.decipher already appends pot when session.player.po_token is set; add defensive manual append
+        // so Jio IPv6 residential (no datacenter proxy) succeeds even if Player version lags.
+        if (streamUrl && (opts.poToken || opts.po_token)) {
+            const potVal = opts.poToken || opts.po_token;
+            // Player.decipher path already handled pot when po_token bound to session; verify via URL
+            if (!streamUrl.includes('pot=')) {
+                try {
+                    const u = new URL(streamUrl);
+                    // Only append for googlevideo hosts (avoid polluting other URLs)
+                    if (u.hostname.includes('googlevideo.com') || u.hostname.includes('youtube.com')) {
+                        u.searchParams.set('pot', potVal);
+                        streamUrl = u.toString();
+                        console.log(`[YouTubeResolver] Appended pot to googlevideo URL for ${videoId}`);
+                    }
+                } catch (_) {
+                    if (!streamUrl.includes('pot=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + 'pot=' + encodeURIComponent(potVal);
+                }
+            }
         }
 
         if (!streamUrl) {
