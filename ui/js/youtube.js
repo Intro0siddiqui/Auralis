@@ -13,6 +13,8 @@
  * fetches bytes, so no yt-dlp / ffmpeg sidecars are required.
  */
 
+import { generatePoTokenForVideo, getCachedPoToken, setCachedPoToken } from './modules/po_token.js';
+
 /**
  * Native HTTP fetch bridge that delegates requests to Rust's reqwest client
  * when running inside Tauri, completely bypassing Android WebView CORS restrictions.
@@ -228,8 +230,34 @@ class YouTubeResolver {
             return { kind: 'playlist', items };
         }
 
-        const client = await this._client(opts);
         const videoId = this.extractVideoId(url);
+
+        // 2026 PO-token gate: mint per-video token via BgUtils if none supplied
+        // Cache 6h (content-bound to videoId), fallback to TV/ANDROID_VR if mint fails
+        let client = null;
+        if (!opts.poToken) {
+            const cached = getCachedPoToken(videoId);
+            if (cached) {
+                opts = { ...opts, poToken: cached.poToken, visitorData: cached.visitorData || opts.visitorData };
+                console.log(`[YouTubeResolver] Using cached PO token for ${videoId}`);
+            } else {
+                try {
+                    // Need a tmp innertube to fetch challenge
+                    const tmpClient = await this._client(opts);
+                    const minted = await generatePoTokenForVideo(tmpClient, videoId);
+                    if (minted?.poToken) {
+                        opts = { ...opts, poToken: minted.poToken, visitorData: minted.visitorData || opts.visitorData };
+                        setCachedPoToken(videoId, minted);
+                        console.log(`[YouTubeResolver] Minted PO token for ${videoId}`);
+                    } else {
+                        console.warn(`[YouTubeResolver] No PO token minted for ${videoId} — will try TV/ANDROID_VR fallback`);
+                    }
+                } catch (e) {
+                    console.warn('[YouTubeResolver] PO token mint error:', e?.message || e);
+                }
+            }
+        }
+        client = await this._client(opts);
 
         let info = null;
         let winningClient = null;

@@ -1,0 +1,119 @@
+import { GOOG_API_KEY, GOOG_BASE_URL, USER_AGENT, YT_BASE_URL } from './constants.js';
+const base64urlCharRegex = /[-_.]/g;
+const base64urlToBase64Map = {
+    '-': '+',
+    _: '/',
+    '.': '='
+};
+export class DeferredPromise {
+    promise;
+    resolve;
+    reject;
+    constructor() {
+        this.promise = new Promise((resolve, reject) => {
+            this.resolve = resolve;
+            this.reject = reject;
+        });
+    }
+}
+export class BgError extends TypeError {
+    info;
+    constructor(message, info) {
+        super(message);
+        this.name = 'BgError';
+        if (info)
+            this.info = info;
+    }
+}
+export function base64ToU8(base64) {
+    let base64Mod;
+    if (base64urlCharRegex.test(base64)) {
+        base64Mod = base64.replace(base64urlCharRegex, function (match) {
+            return base64urlToBase64Map[match];
+        });
+    }
+    else {
+        base64Mod = base64;
+    }
+    base64Mod = atob(base64Mod);
+    return new Uint8Array([...base64Mod].map((char) => char.charCodeAt(0)));
+}
+export function u8ToBase64(u8, base64url = false) {
+    const result = btoa(String.fromCharCode(...u8));
+    if (base64url) {
+        return result
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_');
+    }
+    return result;
+}
+export function parseLooseJSON(looseJson) {
+    let jsonStr = looseJson.replace(/,\s*([\]}])/g, '$1');
+    jsonStr = jsonStr.replace(/'((?:[^'\\]|\\[\s\S])*)'/g, (_match, innerStr) => {
+        const unescaped = innerStr.replace(/\\'/g, '\'');
+        return JSON.stringify(unescaped);
+    });
+    // just in case
+    jsonStr = jsonStr.replace(/([{,]\s*)([a-zA-Z0-9_$]+)\s*:/g, '$1"$2":');
+    const parsedData = JSON.parse(jsonStr);
+    /**
+     * \x41 -> A basically.
+     */
+    const decodeHexEscapes = (value) => {
+        return value.replace(/\\x([0-9A-Fa-f]{2})/g, (_match, hex) => {
+            return String.fromCharCode(parseInt(hex, 16));
+        });
+    };
+    const normalizeValue = (value) => {
+        if (typeof value === 'string') {
+            const decodedValue = decodeHexEscapes(value);
+            const trimmed = decodedValue.trim();
+            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                try {
+                    return normalizeValue(JSON.parse(decodedValue));
+                }
+                catch {
+                    return decodedValue;
+                }
+            }
+            return decodedValue;
+        }
+        if (Array.isArray(value)) {
+            return value.map(normalizeValue);
+        }
+        if (value && typeof value === 'object') {
+            for (const key in value) {
+                value[key] = normalizeValue(value[key]);
+            }
+        }
+        return value;
+    };
+    return normalizeValue(parsedData);
+}
+export function isBrowser() {
+    const isBrowser = typeof window !== 'undefined'
+        && typeof window.document !== 'undefined'
+        && typeof window.document.createElement !== 'undefined'
+        && typeof window.HTMLElement !== 'undefined'
+        && typeof window.navigator !== 'undefined'
+        && typeof window.getComputedStyle === 'function'
+        && typeof window.requestAnimationFrame === 'function'
+        && typeof window.matchMedia === 'function';
+    const hasValidWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')?.get?.toString().includes('[native code]') ?? false;
+    return isBrowser && hasValidWindow;
+}
+export function getHeaders() {
+    const headers = {
+        'content-type': 'application/json+protobuf',
+        'x-goog-api-key': GOOG_API_KEY,
+        'x-user-agent': 'grpc-web-javascript/0.1'
+    };
+    if (!isBrowser()) {
+        headers['user-agent'] = USER_AGENT;
+    }
+    return headers;
+}
+export function buildURL(endpointName, useYouTubeAPI) {
+    return `${useYouTubeAPI ? YT_BASE_URL : GOOG_BASE_URL}/${useYouTubeAPI ? 'api/jnn/v1' : '$rpc/google.internal.waa.v1.Waa'}/${endpointName}`;
+}
+//# sourceMappingURL=helpers.js.map
