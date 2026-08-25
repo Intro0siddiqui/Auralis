@@ -49,8 +49,8 @@ ui/
 ├── js/
 │   ├── bridge.js       # Module entry — composes js/modules/* onto Bridge.prototype, exposes window.Auralis.bridge
 │   ├── modules/        # ES modules: core, library, views, scan-ui, player, downloads, ui (bridge methods)
-│   ├── player.js       # PlayerController: progress bar, seeking, MediaSession API, hardware keys, keyboard shortcuts
-│   └── youtube.js      # YouTubeResolver: vendored youtubei.js wrapper (getInfo/search/getPlaylist → resolved objects)
+│   ├── player.js       # PlayerController: progress bar, seeking, MediaSession API, hardware keys, keyboard shortcuts — `play()` is async: `currentTrack? resume : get_queue → playTrack : get_tracks limit1 → playTrack` (fixes fresh-start No track playing no-op, v2.5.10)
+│   └── youtube.js      # YouTubeResolver: vendored youtubei.js wrapper (getInfo/search/getPlaylist → resolved objects) — PO-token mint for all clients before `actions.execute`, unconditional `&pot=`, `UA/Referer/Origin` per `winningClient`, SABR legacy `formats[18]` fallback, `effectiveOrderedClients` + `retryClients` for 403 rotation
 ├── vendor/             # Locally bundled third-party assets (htmx, lucide, youtubei.js esm + node shims)
 
 **Playback events**: Rust emits `playback:state_changed` / `playback:track_changed` / `playback:queue_updated` / `playback:progress`; `js/modules/core.js` re-emits them to the frontend as `playback:state` / `playback:track` / `playback:queue` / `playback:progress`. The progress bar is **event-driven** (no fake timer) — `PlayerController` snaps optimistically on seek and is corrected by the 250ms progress events.
@@ -91,7 +91,7 @@ ui/
 
 | Task | Status |
 |------|--------|
-| Audio player (`infrastructure/media/player.rs`) | ✅ rodio (0.22) with queue, shuffle, repeat, seek via rodio's native `try_seek`; real position tracked in `AudioPlayer`; **auto-advance watcher** (`spawn_playback_watcher` in `commands/playback.rs`) advances the queue on track end and emits `playback:progress` every 250ms |
+| Audio player (`infrastructure/media/player.rs`) | ✅ rodio (0.22) with queue, shuffle, repeat, seek via rodio's native `try_seek`; real position tracked in `AudioPlayer`; **auto-advance watcher** (`spawn_playback_watcher` in `commands/playback.rs`) advances the queue on track end and emits `playback:progress` every 250ms; **download output** is `app_data_dir/downloads/<sanitized title>.<ext>` (`src/lib.rs:322` `Downloader::new(download_dir)` + `downloader.rs:192` `sanitize_filename` + dedup 8-char UUID) with `*.jpg` sidecar — scanned on Android via `AndroidScanner::scan_sandboxed_dir` (`app_data_dir/music` + `downloads`), on desktop via `DesktopScanner` (`dirs::audio_dir`/`download_dir` + `app_data_dir/music`/`downloads`) |
 | Background playback (`infrastructure/media/background_service.rs` + `scripts/android/MediaPlaybackService.kt`) | ✅ Android: JNI-driven foreground service (notification + MediaSession). Rust pushes track metadata/state on every playback change; notification/lockscreen buttons route back through `Java_com_auralis_v2_NativeBridge_command` into the same commands as the UI, so the frontend stays in sync via `playback:*` events. No-op on desktop |
 | Playback commands (`commands/playback.rs`) | ✅ All commands wired to AudioPlayer |
 
@@ -99,7 +99,7 @@ ui/
 
 | Task | Status |
 |------|--------|
-| Download pipeline (`infrastructure/media/downloader.rs`) | ✅ `reqwest` streaming of a resolved audio URL, HTTP-Range pause/resume + cancel, progress tracking |
+| Download pipeline (`infrastructure/media/downloader.rs`) | ✅ `reqwest` streaming of a resolved audio URL, HTTP-Range pause/resume + cancel, progress tracking — saves to `app_data_dir/downloads/` (sanitized `title.ext` + UUID dedup, see `Downloader`); `commands/downloads.rs` injects `Referer`/`Origin` + client-matched `UA` |
 | Download commands (`commands/downloads.rs`) | ✅ Frontend `youtube.js` resolves the URL; Rust streams bytes + emits `download:progress`/`download:completed` |
 
 ### Phase 4: Playlists — ✅ COMPLETE
@@ -137,7 +137,7 @@ The dependency set was audited and upgraded in Aug 2026. Current key entries:
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "fs", "io-util", "time"] }
 rusqlite = { version = "0.40", features = ["bundled"] }   # chrono/uuid features removed — datetimes & UUIDs are stored as TEXT
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream", "gzip", "brotli", "deflate"] } # see deferred-upgrades note below
-rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "flac", "vorbis", "wav"] }
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "flac", "vorbis", "wav"] }  # vorbis = ogg/vorbis only; no opus feature — webm/opus downloads will DecodeError, prefer m4a 140 over webm/opus in youtube.js or add "opus"
 lofty = "0.25"
 libp2p = { version = "0.56", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "json"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }  # only PngEncoder is used (QR); jpeg/ico decoders look trimmable
@@ -158,20 +158,27 @@ Notes from the audit/upgrade pass:
 
 - `bundle.targets` is `["deb", "app", "dmg", "msi", "nsis"]` (no `"all"`).
 - `identifier` is `com.auralis.v2` (was `com.auralis.app`).
-- `version` is `2.5.9` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
-- CSP is `default-src 'self' tauri: https: data: blob: ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https:;` — all third-party JS vendored under `ui/vendor/` (no CDN), `https:` kept for `youtubei`/`googlevideo` `connect-src` (see `scripts/tests/youtube_resolver.test.js`). `unsafe-eval` is required for `youtube.js` `new Function` decipher (BotGuard) — noted as intentional.
+- `version` is `2.5.10` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
+- CSP is `default-src 'self' tauri: data: blob: ipc: http://ipc.localhost; img-src 'self' data: blob: asset: https://i.ytimg.com https://*.ytimg.com; media-src 'self' data: blob: asset: ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost https://*.googlevideo.com https://*.ytimg.com https://i.ytimg.com https://www.youtube.com https://youtubei.googleapis.com https://*.youtube.com https://jnn-pa.googleapis.com https://www.google.com https://*.google.com; font-src 'self' data: https:;` — all third-party JS vendored under `ui/vendor/` (no CDN), `https:` kept for `youtubei`/`googlevideo`/`jnn-pa` `connect-src` (see `scripts/tests/youtube_resolver.test.js`). `unsafe-eval` is required for `youtube.js` `new Function` decipher (BotGuard) — noted as intentional.
 
 ### 4.3 Android CI Optimization (`.github/workflows/build.yml`) — ✅ DONE (2026-08-23)
 
-- APKs are built for **both `aarch64` and `x86_64` via `--split-per-abi`** (`cargo tauri android build --apk --split-per-abi`, `auralis-v2.5.9-android-arm64.apk` + `-x86_64.apk`); `x86_64` powers emulator E2E `pixel_6 api33 google_apis`.
+- APKs are built for **both `aarch64` and `x86_64` via `--split-per-abi`** (`cargo tauri android build --apk --target aarch64 x86_64 --split-per-abi`, `auralis-v2.5.10-android-arm64.apk` + `-x86_64.apk`); `x86_64` powers emulator E2E `pixel_6 api33 google_apis`.
 - `cargo tauri android init` is guarded with `|| true` before build — harmless idempotent.
 - NDK is pinned to **`27.2.12479018` (r27)** — 16KB-page-size capable; `compileSdk`/`targetSdk` sed'd to **36** in `build.gradle.kts`; `tauri-cli` pinned to **`2.11.4`** (via `npm install -g @tauri-apps/cli@2.11.4` + `~/.cargo` cache).
 - `libc++_shared.so` is bundled for **both** `arm64-v8a` + `x86_64` via `.cargo/config.toml` (`-lc++_shared` per target) and copied into `jniLibs` during CI.
 - Android permissions (`READ_MEDIA_AUDIO`, `READ/WRITE_EXTERNAL_STORAGE` maxSdk 32/29, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `WAKE_LOCK`) plus **real `MediaPlaybackService`** (`scripts/android/MediaPlaybackService.kt`) and its `<service android:foregroundServiceType="mediaPlayback">` are injected at build time. Rust drives the service over JNI (`background_service.rs`); media buttons route back via `NativeBridge` → playback commands.
-- YouTube resolver is **PO-token-aware (2026)**: `ui/js/youtube.js` prefers `TV`/`ANDROID_VR` (no `poToken` required) when `opts.poToken` empty, else `IOS`/`ANDROID`; `downloader.rs` injects `Referer`/`Origin` + client-matched `User-Agent` to avoid `googlevideo` `403`. JS E2E `e2e_download_test.js` now asserts `headers {User-Agent,Referer,Origin}` + `client` and `desktop_download_player_e2e.js` verifies Rust download→scan→play.
+- YouTube resolver is **PO-token-aware (2026)**: `ui/js/youtube.js` mints `po_token` for **all clients** (`TV`/`ANDROID_VR`/`MWEB` included) via `po_token.js:86 generatePoTokenForVideo` `WebPoMinter` `6h visitorData-bound` `nativeFetchPo jnn-pa` `buildURL/getHeaders` protobuf, attaches `&pot=` unconditionally (`vendor youtubei.esm.mjs pot` guard removed), prefers `TV`/`ANDROID_VR` when token missing else `IOS`/`ANDROID` with `effectiveOrderedClients`/`retryClients` `exclude/force` for 403 rotation; `downloader.rs` injects `Referer`/`Origin` + client-matched `User-Agent` to avoid `googlevideo` `403` (`rr1---sn-gwpa-cived` Jio 2026 gates `TV` too). JS E2E `e2e_download_test.js` asserts `headers {User-Agent,Referer,Origin}` + `client` and `desktop_download_player_e2e.js` verifies Rust download→scan→play. `downloads.js:30 _handle403AutoRetry` auto-retries `403` once `TV→ANDROID+pot→WEB_SAFARI` via `forceClient`/`excludeClient`.
 - CI **enforces 16KB alignment**: `zipalign -c -P 16` + `llvm-readelf p_align==0x4000` on every `.so` — misaligned build fails CI. `sccache` + `shared-key` + NDK cache enabled (~11m per release).
 
-**Verify**: `gh release view v2.5.1` shows both `arm64` + `x86_64` APKs + desktop artifacts.
+**Verify**: `gh release view v2.5.10` shows both `arm64` + `x86_64` APKs + desktop artifacts.
+
+### 4.5 Downloads — where files live (v2.5.10)
+- **Saved to:** `app_data_dir/downloads/<sanitized title>.<ext>` — `src/lib.rs:322` `download_dir = app_data_dir.join("downloads")` → `Downloader::new(download_dir)`. `downloader.rs:192 sanitize_filename` strips path separators/control chars/`..` + `ALLOWED_EXTS` check, appends 8-char UUID suffix on collision, saves thumbnail sidecar `<audio>.jpg`.
+- **Android path:** `app_data_dir` is Tauri internal storage (`/data/data/com.auralis.v2/` → `files/downloads/`), **not** `Music/` pillar — scanned via `AndroidScanner::scan_sandboxed_dir` (`app_data_dir/music` + `downloads`) triggered by `scan_library_paths` after `download:completed`. Not visible in `DocumentsUI > Android/data` without `All files access` (fuse `Permission denied` on `HyperOS` scoped storage — use `Files → All files access` or `library:scan_log` toast `1 added`).
+- **Desktop path:** `DesktopScanner::scan_library_paths_with_progress` scans `dirs::audio_dir` + `dirs::download_dir` + `app_data_dir/music` + `app_data_dir/downloads`.
+- **`Settings.download_path` (`settings.rs:105 dirs::audio_dir()`) is legacy default UI hint, not the actual save dir — downloader ignores it.**
+- **Import bypass:** `commands/library.rs:320 import_audio_file` writes `app_data_dir/music/<name>` via `AndroidScanner::ingest_buffer` for Android 14/16 Scoped Storage base64 path.
 
 ### 4.4 Linker Optimization — ⚠️ PARTIAL
 

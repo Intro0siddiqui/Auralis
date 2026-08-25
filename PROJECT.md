@@ -1,7 +1,7 @@
 # Auralis — Project Knowledge File
 
 > Living reference for the Auralis codebase, build/release pipeline, device
-> environment, and the Android crash-debugging saga. Updated 2026-08-24 (v2.5.9 — PO-token-aware YouTube + diagnostics).
+> environment, and the Android crash-debugging saga. Updated 2026-08-25 (v2.5.10 — player fresh-start play fallback + unconditional pot + 403 auto-retry).
 
 ---
 
@@ -255,7 +255,7 @@ here — the rule below is what matters.)
 | `.cargo/config.toml` | `-C link-arg=-lc++_shared` for the 4 android targets (fixes `DT_NEEDED`). |
 | `Cargo.toml` | android-only deps `jni`/`ndk-context`; `crate-type = ["staticlib","cdylib","rlib"]`; `[profile.release] panic = "abort"`. |
 | `Cargo.lock` | `auralis` version entry must match `Cargo.toml` + `tauri.conf.json`. |
-| `tauri.conf.json` | app `version` (`2.5.9`), `identifier = com.auralis.v2`, CSP (`default-src https: + script-src unsafe-inline + connect-src https:` for `youtubei`/`googlevideo`, vendored `ui/vendor/`). |
+| `tauri.conf.json` | app `version` (`2.5.10`), `identifier = com.auralis.v2`, CSP (`default-src 'self' tauri: data: blob: ipc: http://ipc.localhost; img-src ...i.ytimg.com; media-src ...; script-src 'unsafe-eval' for BotGuard new Function; connect-src https://*.googlevideo.com https://jnn-pa.googleapis.com ...`, vendored `ui/vendor/`). |
 | `src/lib.rs` | `setup` init chain (android-context seed → db → network → sync → audio → settings → downloader); `#[cfg_attr(mobile, tauri::mobile_entry_point)]`; android `android_jni` module: `JNI_OnLoad` VM capture + null-safe `ndk_context` seed, with a `setup`-time `try_seed` fallback. |
 | `src/infrastructure/media/player.rs` | `AudioPlayer::new()` → `OutputStream::try_default()` — the cpal/oboe path that needs `ndk_context`. |
 | `src/commands/sync.rs` | `build_sync_service(db, sync_engine)` (2-arg). |
@@ -297,7 +297,12 @@ logcat -b crash -d | grep -iE "AndroidRuntime|FATAL|abort|auralis|libauralis|sig
 
 ---
 
-## 9. Current Status (2026-08-24, v2.5.9)
+## 9. Current Status (2026-08-25, v2.5.10)
+
+### Where downloads are saved
+Songs are **not** saved to `Settings → Library Music directory` (`dirs::audio_dir` default legacy). Code trace `youtube.js:732 extFromMime + 109 buildDownloadPayload → bridge downloads.js:108 → downloads.rs:72 DownloadRequest → downloader.rs:192 sanitize_filename + 106 ALLOWED_EXTS + 198 UUID dedup → lib.rs:322 app_data_dir.join("downloads") → Downloader::new(download_dir)` writes `app_data_dir/downloads/<sanitized title>.<ext>` (`<audio>.jpg` sidecar via `save_thumbnail`). On Android `app_data_dir` is internal `/data/data/com.auralis.v2/files/downloads` (Tauri `app_data_dir`), scanned post-`download:completed` by `AndroidScanner::scan_sandboxed_dir` via `library.rs:142 scan_library_paths` (`app_data_dir/music` + `downloads`); requires `All files access` to browse in `DocumentsUI` (`HyperOS` fuse `Permission denied`). See `AGENTS.md §4.5`.
+
+### Changelog since 2026-08-24 (v2.5.9 → v2.5.10)
 
 The app is feature-complete on the core set and ships signed APKs via CI tag
 builds. The Android launch crashes documented in §4 are all resolved. Recent
@@ -331,7 +336,8 @@ milestones from `git log`:
 - **v2.5.0** — **YouTube 403 fix**: `youtube.js` widens InnerTube to 6 clients (`IOS`,`ANDROID`,`ANDROID_VR`,`TV`,`MWEB`,`WEB`) + client-matched `User-Agent`/`Referer`/`Origin` headers to `downloader.rs` (`reqwest`); `googlevideo` 403 on Jio IPv6 fixed for `VILLAINS` etc. Dual `--split-per-abi` APKs (`arm64` + `x86_64`) + `sccache`, JS E2E `node --test youtube_resolver.test.js` + `desktop_download_player_e2e.js` + Android `e2e_download_test.js`.
 - **v2.5.1** — **Download failure diagnostics**: `downloader.rs` verbose `HTTP 403 [host] 403 + body snip + hint + DIAGNOSTIC` tag, `downloads.rs` emits `download:diagnostic`, `core.js` fixes `p.error` vs `p.error_message`, shows `8000ms` toast + red copyable error box with `navigator.clipboard`, `youtube.js` warns for `PlayerErrorCommand` suppression.
 - **v2.5.2** — **PO-token-aware resolver (2026 gate)**: `youtube.js` prefers `TV`/`ANDROID_VR`/`MWEB` (no `poToken` required) when `youtube_po_token` empty, else `IOS`/`ANDROID`; `downloader.rs` hint adds `PO-token` guidance. Vendor `youtubei.js@18.0.0` verified latest (no newer `18.0.0` > `2026-08-13`).
-- **v2.5.9** — Version sync (2.5.9) + `workflow_dispatch` docs + PO-token bgUtils retry/path fixes + DB Mutex phone doc.
+- **v2.5.9** — `clippy` lint fix (`PendingResponseMap` + identity `??` → `?`), `live-youtube-e2e` without `cargo test` (no `webkit`), `Cargo.lock` precise `auralis` version bump `url 2.5.8` preserved.
+- **v2.5.10** — **Player fresh-start fix**: `ui/js/player.js:445 async play()` was `resume` no-op on `sink None` → now `currentTrack? resume : get_queue → playTrack : get_tracks limit1 → playTrack` + toast (agent fix); version `2.5.10` sync `Cargo.toml`/`Cargo.lock`/`tauri.conf.json`/`package.json`.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,
@@ -371,7 +377,7 @@ Audited 2026-08-15 against Android and Tauri distribution guidelines. The
 | Requirement | Status | Evidence / Notes |
 |---|---|---|
 | **16 KB page alignment** (Play-mandatory since 2025-11-01 for API 35+) | ✅ Met + enforced | `build.rs` sets `-Wl,-z,max-page-size=16384` + `common-page-size=16384`; NDK r27 (27.2.12479018) builds 16KB-aligned libs; CI verify step runs `zipalign -c -P 16` on the APK and `llvm-readelf` LOAD-segment checks (p_align == 0x4000) on every `.so` — a misaligned build fails CI. |
-| **Target API level** (new/updated apps must target **API 36 by 2026-08-31**; ≥35 now) | ✅ Met | CI explicitly seds `compileSdk`/`targetSdk` to **36** in `gen/android/app/build.gradle.kts` (build.yml) + tauri-cli pinned to 2.11.5. |
+| **Target API level** (new/updated apps must target **API 36 by 2026-08-31**; ≥35 now) | ✅ Met | CI explicitly seds `compileSdk`/`targetSdk` to **36** in `gen/android/app/build.gradle.kts` (build.yml) + tauri-cli pinned to 2.11.4. |
 | **Foreground service *type* for media playback** (Android 14+: must declare `android:foregroundServiceType="mediaPlayback"` on a `<service>`, plus the permission) | ✅ Met | Manifest `<service android:name=".MediaPlaybackService" android:foregroundServiceType="mediaPlayback">` + `scripts/android/MediaPlaybackService.kt` (notification channel, `startForeground`, MediaSession). Rust starts/updates/stops the service on every playback change (JNI); media buttons are routed back into Rust (`NativeBridge`) and re-dispatched through the playback commands. **Known limitation:** media buttons are dropped if the app's activity is destroyed (audio itself keeps playing — the process lives). |
 | **Scoped storage / media access** | ✅ Met | `READ_MEDIA_AUDIO` + SAF/media-picker (`android.rs`) is the sanctioned path; `READ/WRITE_EXTERNAL_STORAGE` are capped with `maxSdkVersion` (32/29). `MANAGE_EXTERNAL_STORAGE` is **no longer injected**. |
 | **Edge-to-edge** (Android 15/16) | ✅ Likely | UI uses safe-area insets (`tokens.css`); satisfied if on Tauri ≥2.5 template. |

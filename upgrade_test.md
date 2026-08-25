@@ -31,3 +31,4 @@ adb logcat -s chromium | grep -E "actions.execute|winningClient|PoToken"   # on 
 - `v2.5.7` tag `a4c6bc3` base; next `v2.5.8` cherry-picks pot-unconditional + 403-retry.
 
 - [x] v2.5.9 fix: clippy identity map + PendingResponseMap + live job without cargo test (no webkit) + semicolon
+- [ ] v2.5.10: player `play()` fresh-start no-op fix — `ui/js/player.js:445 async play()` `currentTrack ? resume : get_queue → playTrack : get_tracks limit1 → playTrack` (agent), `rodio` `webm/opus` note (vorbis ≠ opus, prefer `m4a` or add `opus` feature), docs sync `2.5.10` (`tauri.conf.json` CSP `jnn-pa`/`googlevideo`/`ytimg`, `AGENTS.md §4.5` download path `app_data_dir/downloads`)

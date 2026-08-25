@@ -26,8 +26,8 @@ The rewrite trades the JVM's startup cost and Compose's runtime overhead for a t
 | Feature | Status | Notes |
 | :--- | :--- | :--- |
 | **Music Library** | Implemented | SQLite-backed; scanner extracts metadata via lofty |
-| **Audio Playback** | Implemented | rodio with queue, shuffle, repeat, seek |
-| **Media Downloading** | Implemented | `youtube.js` URL resolution + `reqwest` streaming, progress tracking, pause/resume/cancel |
+| **Audio Playback** | Implemented | rodio 0.22 (mp3/mp4/flac/vorbis/wav — vorbis≠opus) with queue, shuffle, repeat, seek, auto-advance watcher, background `MediaPlaybackService` |
+| **Media Downloading** | Implemented | `youtube.js` URL resolution (PO-token `&pot=` unconditional, `403` auto-retry) + `reqwest` streaming to `app_data_dir/downloads/<title>.<ext>`, progress tracking, pause/resume/cancel |
 | **Playlist Management** | Implemented | Full CRUD with SQLite persistence |
 | **P2P Networking** | Implemented | libp2p with mDNS, gossipsub, request-response |
 | **Settings** | Implemented | SQLite-backed load/save |
@@ -174,8 +174,8 @@ See [AGENTS.md](AGENTS.md) for detailed implementation guidelines and the roadma
 
 Auralis v2 features a **pure-Rust media downloader** with zero mandatory external binaries:
 
-- **YouTube resolution (`youtube.js`, vendored `youtubei.js`)**: Runs in the app's webview and resolves a direct `googlevideo` audio URL using PO-token-aware InnerTube clients, with client-matched headers.
-- **Native Direct Audio Streaming (`reqwest`)**: Streams the resolved URL (and direct HTTPS audio files — `.mp3`, `.flac`, `.m4a`, `.wav`, `.aac`) natively in Rust with live byte progress tracking. No Python, no sidecar.
+- **YouTube resolution (`youtube.js`, vendored `youtubei.js`)**: Runs in the app's webview and resolves a direct `googlevideo` audio URL using PO-token-aware InnerTube clients (6 clients `TV`/`ANDROID_VR`→`IOS` with `effectiveOrderedClients`/`retryClients` rotation, `&pot=` unconditional via `po_token.js` `GenerateIT` protobuf, `n`/`signatureCipher` decipher), with client-matched headers.
+- **Native Direct Audio Streaming (`reqwest`)**: Streams the resolved URL (and direct HTTPS audio files — `.mp3`, `.flac`, `.m4a`, `.wav`, `.aac`) natively in Rust to `app_data_dir/downloads/` (`sanitize_filename` + UUID dedup, `*.jpg` sidecar, scanned via `AndroidScanner`/`DesktopScanner`) with live byte progress tracking + `403` auto-retry (`downloads.js` `TV→ANDROID+pot→WEB_SAFARI`). No Python, no sidecar.
 
 ---
 
