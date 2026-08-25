@@ -438,5 +438,5 @@ pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _reserved: *mut std::ffi::c_v
     android_jni::INITIAL_VM.store(vm.get_java_vm_pointer() as *mut c_void, Ordering::SeqCst);
     android_jni::try_seed(&vm);
 
-    jni::sys::JNI_VERSION_1_6 as i32
+    jni::sys::JNI_VERSION_1_6
 }

@@ -119,6 +119,30 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
             };
             was_playing = is_playing;
 
+            // Truncated / buffer-underrun detection: sink went empty mid-track far from duration
+            let truncated_stop = was_playing && !is_playing && is_empty && !track_just_ended && {
+                let dur = player.duration().await;
+                let pos = player.current_position().await;
+                let elapsed = player
+                    .play_started_elapsed()
+                    .await
+                    .unwrap_or(Duration::ZERO);
+                !dur.is_zero()
+                    && pos + Duration::from_secs(5) < dur
+                    && elapsed + Duration::from_secs(5) < dur
+            };
+            if truncated_stop {
+                let dur = player.duration().await.as_secs();
+                let pos = player.current_position().await.as_secs();
+                warn!(
+                    pos,
+                    dur, "Playback stopped mid-track — likely truncated file or buffer underrun"
+                );
+                let msg = format!("Playback stopped at {pos}s of {dur}s — file may be truncated. Try re-downloading.");
+                let _ = app.emit("playback:error", &msg);
+                emit_state_changed(&app, &player).await;
+            }
+
             if track_just_ended {
                 info!("Current track ended; advancing playback");
                 match player.next_for_auto_advance().await {

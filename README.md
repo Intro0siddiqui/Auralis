@@ -175,7 +175,7 @@ See [AGENTS.md](AGENTS.md) for detailed implementation guidelines and the roadma
 Auralis v2 features a **pure-Rust media downloader** with zero mandatory external binaries:
 
 - **YouTube resolution (`youtube.js`, vendored `youtubei.js`)**: Runs in the app's webview and resolves a direct `googlevideo` audio URL using PO-token-aware InnerTube clients (6 clients `TV`/`ANDROID_VR`→`IOS` with `effectiveOrderedClients`/`retryClients` rotation, `&pot=` unconditional via `po_token.js` `GenerateIT` protobuf, `n`/`signatureCipher` decipher), with client-matched headers.
-- **Native Direct Audio Streaming (`reqwest`)**: Streams the resolved URL (and direct HTTPS audio files — `.mp3`, `.flac`, `.m4a`, `.wav`, `.aac`) natively in Rust to `app_data_dir/downloads/` (`sanitize_filename` + UUID dedup, `*.jpg` sidecar, scanned via `AndroidScanner`/`DesktopScanner`) with live byte progress tracking + `403` auto-retry (`downloads.js` `TV→ANDROID+pot→WEB_SAFARI`). No Python, no sidecar.
+- **Native Direct Audio Streaming (`reqwest`)**: Streams the resolved URL (and direct HTTPS audio files — `.mp3`, `.flac`, `.m4a`, `.wav`, `.aac`) natively in Rust to `app_data_dir/downloads/` (`sanitize_filename` + UUID dedup, `*.jpg` sidecar, scanned via `AndroidScanner`/`DesktopScanner`) with live byte progress tracking + `403` auto-retry (`downloads.js` `TV→ANDROID+pot→WEB_SAFARI`). On Android **v2.5.11 dual-save** publishes a copy to `Download/Auralis/` via `MediaStore.Downloads` (`IS_PENDING` on API 29+, `MediaScanner` legacy) when `Settings.downloads.use_system_downloads` is enabled (default `true`); library scan stays sandboxed to avoid duplicate entries. No Python, no sidecar.
 
 ---
 

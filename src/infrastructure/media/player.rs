@@ -2,7 +2,7 @@
 //!
 //! Audio playback using rodio (0.22+).
 
-use rodio::{mixer::Mixer, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
+use rodio::{mixer::Mixer, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::Arc;
@@ -126,9 +126,42 @@ impl AudioPlayer {
         self.stop().await?;
 
         let vol = *self.volume.read().await;
-        let file = File::open(path).map_err(|e| PlayerError::FileError(format!("{path}: {e}")))?;
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                // Android scoped-storage fallback: try to resolve a MediaStore
+                // Download/Auralis entry via ContentResolver into a cache copy.
+                #[cfg(target_os = "android")]
+                {
+                    if let Some(cached) =
+                        crate::infrastructure::media::android_downloads::cached_copy_for_path(path)
+                    {
+                        File::open(&cached).map_err(|ce| {
+                            PlayerError::FileError(format!("{path}: {e} (cached {cached:?}: {ce})"))
+                        })?
+                    } else {
+                        return Err(PlayerError::FileError(format!("{path}: {e}")));
+                    }
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    return Err(PlayerError::FileError(format!("{path}: {e}")));
+                }
+            }
+        };
         let source = Decoder::new(BufReader::new(file))
             .map_err(|e| PlayerError::DecodeError(format!("{path}: {e}")))?;
+        // Reconcile duration: decoder total_duration may differ from DB/lofty by >2s for truncated files
+        if let Some(dec_dur) = source.total_duration() {
+            let db_dur = *self.track_duration.read().await;
+            if !db_dur.is_zero() && (dec_dur.as_secs() as i64 - db_dur.as_secs() as i64).abs() > 2 {
+                warn!(path=%path, db_secs=db_dur.as_secs(), dec_secs=dec_dur.as_secs(), "Duration mismatch DB vs decoder, using max");
+                let reconciled = db_dur.max(dec_dur);
+                *self.track_duration.write().await = reconciled;
+            } else if db_dur.is_zero() {
+                *self.track_duration.write().await = dec_dur;
+            }
+        }
 
         let mixer = self.output_stream_handle().await?;
         let player = Player::connect_new(&mixer);

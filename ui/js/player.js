@@ -361,7 +361,9 @@ class PlayerController {
             fullTitle.textContent = (this.currentTrack && this.currentTrack.title) || 'No Track Selected';
         }
         if (fullArtist) {
-            fullArtist.textContent = (this.currentTrack && this.currentTrack.artist) || 'Select a song to play';
+            fullArtist.textContent = this.currentTrack
+                ? (this.currentTrack.artist || 'Unknown Artist')
+                : 'Select a song to play';
         }
         if (fullArt && this.currentTrack) {
             if (this.currentTrack.album_art_path) {

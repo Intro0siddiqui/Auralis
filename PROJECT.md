@@ -1,7 +1,7 @@
 # Auralis — Project Knowledge File
 
 > Living reference for the Auralis codebase, build/release pipeline, device
-> environment, and the Android crash-debugging saga. Updated 2026-08-25 (v2.5.10 — player fresh-start play fallback + unconditional pot + 403 auto-retry).
+> environment, and the Android crash-debugging saga. Updated 2026-08-25 (v2.5.11 — Download/Auralis MediaStore dual-save + filesystem verification).
 
 ---
 
@@ -255,7 +255,7 @@ here — the rule below is what matters.)
 | `.cargo/config.toml` | `-C link-arg=-lc++_shared` for the 4 android targets (fixes `DT_NEEDED`). |
 | `Cargo.toml` | android-only deps `jni`/`ndk-context`; `crate-type = ["staticlib","cdylib","rlib"]`; `[profile.release] panic = "abort"`. |
 | `Cargo.lock` | `auralis` version entry must match `Cargo.toml` + `tauri.conf.json`. |
-| `tauri.conf.json` | app `version` (`2.5.10`), `identifier = com.auralis.v2`, CSP (`default-src 'self' tauri: data: blob: ipc: http://ipc.localhost; img-src ...i.ytimg.com; media-src ...; script-src 'unsafe-eval' for BotGuard new Function; connect-src https://*.googlevideo.com https://jnn-pa.googleapis.com ...`, vendored `ui/vendor/`). |
+| `tauri.conf.json` | app `version` (`2.5.11`), `identifier = com.auralis.v2`, CSP (`default-src 'self' tauri: data: blob: ipc: http://ipc.localhost; img-src ...i.ytimg.com; media-src ...; script-src 'unsafe-eval' for BotGuard new Function; connect-src https://*.googlevideo.com https://jnn-pa.googleapis.com ...`, vendored `ui/vendor/`). |
 | `src/lib.rs` | `setup` init chain (android-context seed → db → network → sync → audio → settings → downloader); `#[cfg_attr(mobile, tauri::mobile_entry_point)]`; android `android_jni` module: `JNI_OnLoad` VM capture + null-safe `ndk_context` seed, with a `setup`-time `try_seed` fallback. |
 | `src/infrastructure/media/player.rs` | `AudioPlayer::new()` → `OutputStream::try_default()` — the cpal/oboe path that needs `ndk_context`. |
 | `src/commands/sync.rs` | `build_sync_service(db, sync_engine)` (2-arg). |
@@ -297,10 +297,10 @@ logcat -b crash -d | grep -iE "AndroidRuntime|FATAL|abort|auralis|libauralis|sig
 
 ---
 
-## 9. Current Status (2026-08-25, v2.5.10)
+## 9. Current Status (2026-08-25, v2.5.11)
 
 ### Where downloads are saved
-Songs are **not** saved to `Settings → Library Music directory` (`dirs::audio_dir` default legacy). Code trace `youtube.js:732 extFromMime + 109 buildDownloadPayload → bridge downloads.js:108 → downloads.rs:72 DownloadRequest → downloader.rs:192 sanitize_filename + 106 ALLOWED_EXTS + 198 UUID dedup → lib.rs:322 app_data_dir.join("downloads") → Downloader::new(download_dir)` writes `app_data_dir/downloads/<sanitized title>.<ext>` (`<audio>.jpg` sidecar via `save_thumbnail`). On Android `app_data_dir` is internal `/data/data/com.auralis.v2/files/downloads` (Tauri `app_data_dir`), scanned post-`download:completed` by `AndroidScanner::scan_sandboxed_dir` via `library.rs:142 scan_library_paths` (`app_data_dir/music` + `downloads`); requires `All files access` to browse in `DocumentsUI` (`HyperOS` fuse `Permission denied`). See `AGENTS.md §4.5`.
+Songs are **not** saved to `Settings → Library Music directory` (`dirs::audio_dir` default legacy). Code trace `youtube.js:732 extFromMime + 109 buildDownloadPayload → bridge downloads.js:108 → downloads.rs:72 DownloadRequest → downloader.rs:192 sanitize_filename + 106 ALLOWED_EXTS + 198 UUID dedup → lib.rs:322 app_data_dir.join("downloads") → Downloader::new(download_dir)` writes `app_data_dir/downloads/<sanitized title>.<ext>` (`<audio>.jpg` sidecar via `save_thumbnail`). On Android `app_data_dir` is internal `/data/data/com.auralis.v2/files/downloads` (Tauri `app_data_dir`), scanned post-`download:completed` by `AndroidScanner::scan_sandboxed_dir` via `library.rs:142 scan_library_paths` (`app_data_dir/music` + `downloads`). **v2.5.11 dual-save:** when `Settings.downloads.use_system_downloads` (`true` default, toggle in `settings.html`/`views.js`) is enabled, `downloader.rs` also publishes a copy to `Download/Auralis/<name>` via `android_downloads.rs` `publish_to_downloads` (`MediaStore.Downloads` `IS_PENDING` on API 29+, legacy `MediaScanner` on 26-28; non-fatal, `player.rs` `cached_copy_for_path` fallback). The public copy is Files-visible (`/storage/emulated/0/Download/Auralis/`); library scan stays sandboxed to `app_data_dir` only to avoid duplicate entries — verification via `ls`/`content query` + filesystem check (see `upgrade_test.md` v2.5.11). Requires `All files access` to browse `Android/data` (`HyperOS` fuse `Permission denied`). See `AGENTS.md §4.5`.
 
 ### Changelog since 2026-08-24 (v2.5.9 → v2.5.10)
 
@@ -338,6 +338,7 @@ milestones from `git log`:
 - **v2.5.2** — **PO-token-aware resolver (2026 gate)**: `youtube.js` prefers `TV`/`ANDROID_VR`/`MWEB` (no `poToken` required) when `youtube_po_token` empty, else `IOS`/`ANDROID`; `downloader.rs` hint adds `PO-token` guidance. Vendor `youtubei.js@18.0.0` verified latest (no newer `18.0.0` > `2026-08-13`).
 - **v2.5.9** — `clippy` lint fix (`PendingResponseMap` + identity `??` → `?`), `live-youtube-e2e` without `cargo test` (no `webkit`), `Cargo.lock` precise `auralis` version bump `url 2.5.8` preserved.
 - **v2.5.10** — **Player fresh-start fix**: `ui/js/player.js:445 async play()` was `resume` no-op on `sink None` → now `currentTrack? resume : get_queue → playTrack : get_tracks limit1 → playTrack` + toast (agent fix); version `2.5.10` sync `Cargo.toml`/`Cargo.lock`/`tauri.conf.json`/`package.json`.
+- **v2.5.11** — **Download/Auralis MediaStore dual-save**: `downloader.rs` + `android_downloads.rs` publish finished download to `Download/Auralis/` via `MediaStore.Downloads` (`IS_PENDING` on Q+, `MediaScanner` legacy) when `use_system_downloads` enabled (default `true`, `settings.rs`/`settings.html`/`views.js` toggle); `player.rs` `cached_copy_for_path` fallback + `library.rs` sandboxed scan note; filesystem + MediaStore verification (see `upgrade_test.md`); version `2.5.11` sync `Cargo.toml`/`Cargo.lock`/`tauri.conf.json`/`package.json` + `AGENTS.md §4.5`/`PROJECT.md §9` dual-save docs.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,

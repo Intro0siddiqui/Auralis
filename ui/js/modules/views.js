@@ -519,6 +519,17 @@ export const viewMethods = {
                 opt.classList.toggle('active', opt.dataset.theme === currentTheme);
             });
 
+            const useSystemDownloadsToggle = settingsView.querySelector('[name="use_system_downloads"], [data-name="use_system_downloads"]');
+            if (useSystemDownloadsToggle && settings.downloads) {
+                const val = settings.downloads.use_system_downloads !== undefined ? Boolean(settings.downloads.use_system_downloads) : true;
+                if (useSystemDownloadsToggle.type === 'checkbox') {
+                    useSystemDownloadsToggle.checked = val;
+                } else {
+                    useSystemDownloadsToggle.classList.toggle('active', val);
+                    useSystemDownloadsToggle.setAttribute('aria-checked', val.toString());
+                }
+            }
+
             const syncToggle = settingsView.querySelector('[name="sync_enabled"], [data-name="sync_enabled"]');
             if (syncToggle && settings.sync) {
                 if (syncToggle.type === 'checkbox') {
@@ -608,6 +619,18 @@ export const viewMethods = {
                     }
                 });
             });
+
+            if (useSystemDownloadsToggle) {
+                useSystemDownloadsToggle.addEventListener('click', async () => {
+                    if (this.currentSettings && this.currentSettings.downloads) {
+                        const newState = !useSystemDownloadsToggle.classList.contains('active');
+                        useSystemDownloadsToggle.classList.toggle('active', newState);
+                        useSystemDownloadsToggle.setAttribute('aria-checked', newState.toString());
+                        this.currentSettings.downloads.use_system_downloads = newState;
+                        await saveSettings();
+                    }
+                });
+            }
 
             if (syncToggle) {
                 syncToggle.addEventListener('click', async () => {

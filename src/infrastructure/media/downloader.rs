@@ -525,7 +525,44 @@ impl Downloader {
             Self::save_thumbnail(&client, thumb, &job.output_path).await;
         }
 
-        info!(download_id = %id, path = ?job.output_path, "Download complete");
+        // Android: also publish a copy to the user-visible Download/Auralis/ via MediaStore
+        // so it appears in the system Files app like a browser download. Non-fatal;
+        // pause/resume continues to use the sandboxed file.
+        // Dual-save is gated by `use_system_downloads` (default true per settings.rs
+        // `default_true`). We evaluate the persisted setting at publish time so the
+        // default `true` path always publishes; only an explicit `false` skips it.
+        #[cfg(target_os = "android")]
+        {
+            let should_publish = std::panic::catch_unwind(|| {
+                crate::domain::models::Settings::load()
+                    .map(|s| s.downloads.use_system_downloads)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+            info!(download_id = %id, should_publish = should_publish, src = %job.output_path.display(), "MediaStore publish check (use_system_downloads, default true)");
+            if !should_publish {
+                info!(download_id = %id, "Skipping MediaStore publish per use_system_downloads=false");
+            } else {
+                let public = crate::infrastructure::media::android_downloads::publish_to_downloads(
+                    &job.output_path,
+                );
+                if let Some(pub_path) = public {
+                    let mut guard = active.write().await;
+                    if let Some(state) = guard.get_mut(&id) {
+                        // Keep internal path for library scan dedup, but surface public
+                        // path so `download:completed` shows the Files-visible location.
+                        state.output_path = Some(pub_path.clone());
+                    }
+                    info!(download_id = %id, public = %pub_path, internal = %job.output_path.display(), "Published download to Download/Auralis");
+                } else {
+                    // publish_to_downloads already warns with source/error, add call-site context.
+                    // Common causes: JNI env unavailable, is_pending insert failure, empty source.
+                    warn!(download_id = %id, src = %job.output_path.display(), "MediaStore publish returned None — keeping internal path (see prior warn for root cause; no permission needed on API 29+ via MediaStore)");
+                }
+            }
+        }
+
+        info!(download_id = %id, path = ?job.output_path, download_dir = %job.output_path.display(), "Download complete (internal retained; public copy was attempted above on Android when enabled)");
         Ok(())
     }
 

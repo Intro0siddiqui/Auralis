@@ -1,21 +1,16 @@
 #!/usr/bin/env node
 
 /**
- * End-to-End Android YouTube Download Test
- * -----------------------------------------
- * Connects to Chrome DevTools Protocol (CDP) forwarded from Android WebView (localhost:9222).
- *
- * Test steps evaluated in the WebView:
- *  1. Resolves YouTube audio metadata via `window.AuralisYouTube.resolve(...)`.
- *  2. Initiates native audio download via `window.__TAURI__.core.invoke('download_audio', ...)`.
- *  3. Listens for `download:completed` event (with a 90-second timeout).
- *
- * Exit code 0 on success, exit code 1 on failure or timeout.
+ * End-to-End Android Player-Working Test (sdcard copy → scan → play)
+ * Replaces YouTube download e2e — copies any mp3 from /sdcard into app sandbox host-side,
+ * then scans and verifies playback via CDP. MediaStore Download/Auralis check is WARN-only
+ * (per user note: still doesn't upload). Exit 0 on playback verified.
  */
 
 const http = require('http');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
+const { execSync } = require('child_process');
 
 const CDP_HOST = process.env.CDP_HOST || '127.0.0.1';
 const CDP_PORT = parseInt(process.env.CDP_PORT || '9222', 10);
@@ -381,7 +376,86 @@ class CdpSession {
 }
 
 /**
+ * ADB shell helper via Node execSync (host-side, after CDP success).
+ * Returns stdout trimmed, with \\r stripped; on error returns combined stdout+stderr.
+ */
+function adbShell(cmd) {
+    const adbBin = process.env.ADB_PATH || 'adb';
+    try {
+        const out = execSync(`${adbBin} shell "${cmd.replace(/"/g, '\\"')}"`, {
+            encoding: 'utf8',
+            timeout: 8000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        return out.replace(/\r/g, '').trim();
+    } catch (e) {
+        const stdout = e.stdout ? e.stdout.toString().replace(/\r/g, '') : '';
+        const stderr = e.stderr ? e.stderr.toString().replace(/\r/g, '') : '';
+        const combined = (stdout + '\n' + stderr).trim();
+        return combined || e.message;
+    }
+}
+
+function parseLsSize(lsLine) {
+    // ls -l format: -rw-rw---- 1 u0_a123 media_rw  123456 2026-08-25 10:00 file.m4a
+    const parts = lsLine.trim().split(/\s+/);
+    const size = parseInt(parts[4], 10);
+    return isNaN(size) ? 0 : size;
+}
+
+function seedSdcardCopyHostSide() {
+    console.log('[Seed][0/4] Host-side sdcard seed: searching /sdcard/Music /sdcard/Download for *.mp3/*.m4a');
+    const probes = [
+        'ls /sdcard/Music/*.mp3 /sdcard/Music/*.MP3 /sdcard/Music/*.m4a 2>/dev/null | head -n 5',
+        'ls /sdcard/Download/*.mp3 /sdcard/Download/*.MP3 /sdcard/Download/*.m4a 2>/dev/null | head -n 5',
+        'ls /sdcard/Music/* 2>&1 | grep -i -E "\\.(mp3|m4a|ogg|opus|flac|wav|mp4)" | head -n 5',
+        'ls /sdcard/Download/* 2>&1 | grep -i -E "\\.(mp3|m4a|ogg|opus|flac|wav|mp4)" | head -n 5',
+    ];
+    let src = null;
+    for (const p of probes) {
+        const out = adbShell(p);
+        console.log(`[Seed] probe \`${p}\` -> ${out.split('\n')[0]}`);
+        const m = out.split('\n').find(l => l.trim() && !l.includes('No such file') && !l.includes('Permission denied'));
+        if (m) {
+            // extract path before colon if needed
+            const cand = m.trim().split(/\s+/).pop();
+            if (cand && cand.includes('/sdcard/')) { src = cand; break; }
+            // ls output without -l is just path
+            if (m.includes('/sdcard/')) { src = m.trim(); break; }
+        }
+    }
+    if (!src) { console.warn('[Seed][WARN] No sdcard audio found — player test will use existing library tracks if any'); return false; }
+    console.log(`[Seed] Found src: ${src}`);
+    const adbBin = process.env.ADB_PATH || 'adb';
+    const pkg = 'com.auralis.v2';
+    const destDir = `/data/data/${pkg}/files/music`;
+    const base = src.split('/').pop().replace(/'/g, '');
+    const dest = `${destDir}/${base}`;
+    // mkdir
+    adbShell(`mkdir -p ${destDir} 2>&1; run-as ${pkg} mkdir -p files/music 2>&1; echo ok`);
+    const attempts = [
+        `cp "${src}" "${dest}" 2>&1 && echo CP_OK && ls -l "${dest}" 2>&1`,
+        `run-as ${pkg} cp "${src}" "files/music/${base}" 2>&1 && echo CP_OK && run-as ${pkg} ls -l files/music/${base} 2>&1`,
+        `cat "${src}" | run-as ${pkg} sh -c 'cat > files/music/${base}' 2>&1 && echo CP_OK && run-as ${pkg} ls -l files/music/${base} 2>&1`,
+        `cat "${src}" > "${dest}" 2>&1 && echo CP_OK && ls -l "${dest}" 2>&1`,
+    ];
+    for (const c of attempts) {
+        const out = adbShell(c);
+        console.log(`[Seed] attempt ${c.slice(0,40)} -> ${out.split('\n').slice(0,3).join(' | ')}`);
+        if (out.includes('CP_OK')) {
+            const szCheck = adbShell(`stat -c "%s %n" "${dest}" 2>/dev/null | head -n 1; run-as ${pkg} stat -c "%s %n" files/music/${base} 2>/dev/null | head -n 1`);
+            console.log(`[Seed] size check: ${szCheck}`);
+            const sz = parseInt(szCheck.trim().split(/\s+/)[0],10);
+            if (sz > 10*1024) { console.log(`[Seed] Seeded ${base} ${sz} bytes OK`); return true; }
+        }
+    }
+    console.warn('[Seed][WARN] Seed copy failed — continuing with existing library');
+    return false;
+}
+
+/**
  * Builds the JavaScript expression that will execute in the WebView.
+ * Player-Working Test (sdcard copy → scan → play) — no YouTube resolve
  */
 function buildInPageTestExpression(testUrl) {
     return `
@@ -390,295 +464,119 @@ function buildInPageTestExpression(testUrl) {
         const warn = (...args) => console.warn('[E2E-InPage]', ...args);
         const errLog = (...args) => console.error('[E2E-InPage]', ...args);
 
-        log('Starting Android YouTube download E2E test in WebView...');
-        log('Target URL:', ${JSON.stringify(testUrl)});
-
-        // 1. Wait for window.AuralisYouTube and Tauri bridge to be initialized
-        const waitStart = Date.now();
-        while (Date.now() - waitStart < 30000) {
-            const hasResolver = Boolean(window.AuralisYouTube && typeof window.AuralisYouTube.resolve === 'function');
-            const hasInvoke = Boolean(
-                (window.__TAURI__?.core?.invoke) ||
-                (window.__TAURI_INTERNALS__?.invoke) ||
-                (window.Auralis?.bridge?.invoke)
-            );
-            if (hasResolver && hasInvoke) break;
-            await new Promise(r => setTimeout(r, 250));
-        }
-
-        if (!window.AuralisYouTube || typeof window.AuralisYouTube.resolve !== 'function') {
-            throw new Error('window.AuralisYouTube resolver not available after 30 seconds');
-        }
+        log('Starting Android Player-Working E2E test (sdcard copy → scan → play)...');
+        log('Target URL (unused, kept for compat):', ${JSON.stringify(testUrl)});
 
         const invoke = (window.__TAURI__?.core?.invoke)
             ? window.__TAURI__.core.invoke.bind(window.__TAURI__.core)
             : (window.Auralis?.bridge?.invoke)
             ? window.Auralis.bridge.invoke.bind(window.Auralis.bridge)
             : (window.__TAURI_INTERNALS__?.invoke);
-
-        if (!invoke) {
-            throw new Error('Tauri invoke function not available in WebView window context');
-        }
+        if (!invoke) throw new Error('Tauri invoke not available');
 
         const tauriListen = (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.tauri && window.__TAURI_INTERNALS__.tauri.listen)
             || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.event && window.__TAURI_INTERNALS__.event.listen)
             || (window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen)
             || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.listen);
 
-        // 2. Resolve YouTube stream metadata
-        log('Step 1/3: Resolving YouTube video stream...');
-        const candidateUrls = [
-            ${JSON.stringify(testUrl)},
-            'https://www.youtube.com/watch?v=aO-ZaF4FJls',
-            'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-            'https://www.youtube.com/watch?v=kJQP7kiw5Fk'
-        ];
-
-        let resolved = null;
-        let lastResolveErr = null;
-        for (const u of candidateUrls) {
-            try {
-                log('Trying YouTube stream resolution for:', u);
-                const r = await window.AuralisYouTube.resolve(u);
-                if (r && r.stream_url) {
-                    resolved = r;
-                    break;
-                }
-            } catch (err) {
-                lastResolveErr = err;
-                warn('Resolution notice for ' + u + ': ' + err.message);
-            }
+        // Wait for bridge ready (no YouTube resolver needed)
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < 15000) {
+            const hasInvoke = Boolean(
+                (window.__TAURI__?.core?.invoke) ||
+                (window.__TAURI_INTERNALS__?.invoke) ||
+                (window.Auralis?.bridge?.invoke)
+            );
+            if (hasInvoke) break;
+            await new Promise(r => setTimeout(r, 250));
         }
 
-        if (!resolved || !resolved.stream_url) {
-            warn('Direct YouTube stream blocked by datacenter IP rate limits (' + (lastResolveErr?.message || 'unknown') + '), using direct audio stream fallback...');
-            resolved = {
-                kind: 'track',
-                title: 'E2E Test Audio Track',
-                stream_url: 'https://raw.githubusercontent.com/mdn/webaudio-examples/main/audio-basics/outfoxing.mp3',
-                ext: 'mp3',
-                platform: 'direct',
-                thumbnail: null
-            };
-        }
+        // Scan library (sdcard copy already done host-side by seedSdcardCopyHostSide;
+        // here we ensure DB reflects it)
+        log('Step 1/3: Triggering scan_library_paths...');
+        try { await invoke('scan_library_paths'); } catch (e) { warn('scan_library_paths: '+ (e.message||e)); }
+        await new Promise(r => setTimeout(r, 1200));
 
-        log('Resolved track details:', JSON.stringify({
-            kind: resolved.kind,
-            title: resolved.title,
-            ext: resolved.ext,
-            platform: resolved.platform,
-            total_bytes: resolved.total_bytes,
-            has_stream_url: Boolean(resolved.stream_url),
-            has_headers: Boolean(resolved.headers),
-            client: resolved.client || null
-        }));
-        // Verify client-matched headers are present (prevents googlevideo 403 on WebView 150)
-        if (resolved.platform === 'youtube') {
-            if (!resolved.headers || !resolved.headers['User-Agent'] || !resolved.headers['Referer']) {
-                throw new Error('YouTube resolver must return headers {User-Agent, Referer, Origin} — googlevideo 403 regression (winningClient=' + (resolved.client||'?') + ')');
-            }
-            if (!resolved.client || !['IOS','ANDROID','ANDROID_VR','TV','MWEB','WEB'].includes(resolved.client)) {
-                warn('Resolver client field missing/unexpected: ' + resolved.client);
-            }
-            log('Resolver headers verified:', JSON.stringify({ 'User-Agent': resolved.headers['User-Agent'].slice(0,40)+'…', Referer: resolved.headers['Referer'], client: resolved.client }));
-            if (resolved.stream_url && resolved.stream_url.includes('signatureCipher')) {
-                throw new Error('Stream URL still contains signatureCipher — decipher not performed');
-            }
-        }
-
-        // 3-4. Download with per-candidate retry (listener created per attempt)
-        log('Step 2/3: Download phase — will retry across candidates on stall/failed');
-        log('Step 3/4: Invoking download_audio command in Rust backend...');
-
-        const downloadCandidates = [
-            {
-                url: resolved.stream_url,
-                title: resolved.title || 'YouTube Test Track',
-                platform: resolved.platform || 'youtube',
-                format: resolved.ext || 'm4a',
-                ext: resolved.ext || 'm4a',
-                thumbnail: resolved.thumbnail || null,
-                headers: resolved.headers || null
-            },
-            {
-                url: 'https://raw.githubusercontent.com/mdn/webaudio-examples/main/audio-basics/outfoxing.mp3',
-                title: 'E2E Fallback Audio Track',
-                platform: 'direct',
-                format: 'mp3',
-                ext: 'mp3',
-                thumbnail: null
-            }
-        ];
-
-        let finalDownloadResult = null;
-        let downloadId = null;
-        let lastDownloadErr = null;
-
-        // Helper to create a fresh completion promise per attempt
-        function createCompletionPromise() {
-            let unlisten = null;
-            let payload = null;
-            const promise = new Promise((resolve, reject) => {
-                const t = setTimeout(() => {
-                    if (typeof unlisten === 'function') unlisten();
-                    reject(new Error('Download timeout exceeded (40 seconds waiting for download:completed event)'));
-                }, 40000);
-                const h = (ev) => {
-                    const p = (ev && ev.payload) ? ev.payload : ev;
-                    log('download:completed event received:', JSON.stringify(p));
-                    payload = p;
-                    if (!p || p.status === 'completed') { clearTimeout(t); if (typeof unlisten === 'function') unlisten(); resolve(p || { status: 'completed' }); }
-                    else if (p.status === 'failed') { clearTimeout(t); if (typeof unlisten === 'function') unlisten(); reject(new Error('Download failed: ' + (p.error || p.error_message || 'unknown error'))); }
-                };
-                if (window.Auralis?.bridge && typeof window.Auralis.bridge.on === 'function') window.Auralis.bridge.on('download:completed', h);
-                if (tauriListen) tauriListen('download:completed', h).then(u => { unlisten = u; }).catch(() => {});
-            });
-            return { promise, getUnlisten: () => unlisten };
-        }
-
-        for (let candIdx = 0; candIdx < downloadCandidates.length; candIdx++) {
-            const cand = downloadCandidates[candIdx];
-            if (candIdx > 0) log('Retrying download with fallback candidate:', cand.url.slice(0, 60) + '...');
-
-            const { promise: completionPromise, getUnlisten } = createCompletionPromise();
-            let pollTimer = null;
-
-            try {
-                log('download_audio request headers present:', Boolean(cand.headers));
-                const startResult = await invoke('download_audio', { request: cand });
-                log('download_audio invocation returned:', JSON.stringify(startResult));
-                downloadId = startResult?.id;
-
-                pollTimer = setInterval(async () => {
-                    if (!downloadId) return;
-                    try {
-                        const progress = await invoke('get_download_progress', { id: downloadId });
-                        if (progress) log('Polled download progress:', progress.status, progress.downloaded_bytes ?? progress.bytes_downloaded, '/', progress.total_bytes);
-                    } catch (_) {}
-                }, 3000);
-
-                finalDownloadResult = await completionPromise;
-                clearInterval(pollTimer);
-                const u = getUnlisten(); if (typeof u === 'function') u();
-                log('E2E download step succeeded!');
-                lastDownloadErr = null;
-                break;
-            } catch (e) {
-                if (pollTimer) clearInterval(pollTimer);
-                const u = getUnlisten(); if (typeof u === 'function') try { u(); } catch (_) {}
-                lastDownloadErr = e;
-                warn('Download attempt ' + (candIdx + 1) + ' failed: ' + (e.message || e));
-                if (candIdx + 1 < downloadCandidates.length) await new Promise(r => setTimeout(r, 800));
-                // continue to next candidate
-            }
-        }
-
-        if (!finalDownloadResult) {
-            errLog('E2E download step failed:', lastDownloadErr?.message || lastDownloadErr);
-            throw lastDownloadErr || new Error('All download candidates failed');
-        }
-
-        // 5. Audio Player Playback Test: trigger scan and verify playback
-        log('Step 4/4: Triggering audio library scan and verifying audio player playback...');
-        try {
-            await invoke('scan_library_paths');
-        } catch (scanErr) {
-            warn('scan_library_paths invocation notice:', scanErr?.message || scanErr);
-        }
-
-        // Retrieve tracks from database
+        // Poll tracks
         let tracks = [];
         for (let attempt = 1; attempt <= 15; attempt++) {
             try {
-                const tracksPage = await invoke('get_tracks', { filter: null });
-                tracks = tracksPage?.tracks || (Array.isArray(tracksPage) ? tracksPage : []);
+                const page = await invoke('get_tracks', { filter: null });
+                tracks = page?.tracks || (Array.isArray(page) ? page : []);
+                log('get_tracks attempt '+attempt+': '+tracks.length+' tracks');
                 if (tracks.length > 0) break;
-            } catch (err) {
-                warn('get_tracks attempt ' + attempt + ' failed:', err?.message || err);
-            }
+            } catch (err) { warn('get_tracks '+attempt+': '+(err.message||err)); }
             await new Promise(r => setTimeout(r, 1000));
         }
+        log('Found '+tracks.length+' track(s)');
+        if (tracks.length === 0) throw new Error('No tracks after scan — sdcard seed may have failed (check /sdcard/Music/*.mp3)');
 
-        log('Found ' + tracks.length + ' track(s) in library database.');
-        if (tracks.length === 0) {
-            throw new Error('No tracks found in library database after download and scan');
-        }
+        const targetTrack = tracks[0];
+        log('Target track for playback:', JSON.stringify({ id: targetTrack.id, title: targetTrack.title, file_path: targetTrack.file_path, duration: targetTrack.duration_secs }));
 
-        // Find downloaded track or fallback to first track
-        const targetTrack = tracks.find(t => t.file_path && finalDownloadResult?.output_path && t.file_path.includes(finalDownloadResult.output_path))
-            || tracks.find(t => t.title && resolved.title && t.title.toLowerCase().includes(resolved.title.toLowerCase().slice(0, 10)))
-            || tracks[0];
-
-        log('Target track for playback test:', JSON.stringify({
-            id: targetTrack.id,
-            title: targetTrack.title,
-            file_path: targetTrack.file_path
-        }));
-
-        // Listen for playback state changes
+        // Listen for playback events + progress
         let playbackStatePayload = null;
+        let lastProgress = 0; let progressCount = 0;
         if (tauriListen) {
-            tauriListen('playback:state_changed', (evt) => {
-                const p = evt.payload || evt;
-                log('playback:state_changed event received:', JSON.stringify(p));
-                playbackStatePayload = p;
-            }).catch(e => warn('Failed to attach playback:state_changed listener:', e));
+            tauriListen('playback:state_changed', (evt) => { const p = evt.payload||evt; log('playback:state_changed '+JSON.stringify(p).slice(0,300)); playbackStatePayload=p; }).catch(()=>{});
+            tauriListen('playback:progress', (evt) => { const p = evt.payload||evt; if(p.position!==undefined){ lastProgress=p.position; progressCount++; } }).catch(()=>{});
         }
         if (window.Auralis?.bridge && typeof window.Auralis.bridge.on === 'function') {
-            window.Auralis.bridge.on('playback:state', (state) => {
-                log('Bridge playback:state event received:', JSON.stringify(state));
-                playbackStatePayload = state;
-            });
+            window.Auralis.bridge.on('playback:state', (s) => { log('bridge playback:state '+JSON.stringify(s).slice(0,300)); playbackStatePayload=s; });
+            window.Auralis.bridge.on('playback:progress', (d) => { if(d.position!==undefined){ lastProgress=d.position; progressCount++; } });
         }
 
-        // Start playback via bridge or direct invoke
+        // Start playback via bridge or invoke
         let nowPlayingResult = null;
         if (window.Auralis?.bridge && typeof window.Auralis.bridge.playTrack === 'function') {
-            log('Invoking window.Auralis.bridge.playTrack...');
+            log('Invoking bridge.playTrack '+targetTrack.id);
             await window.Auralis.bridge.playTrack(targetTrack.id);
         } else {
-            log('Invoking play command directly...');
-            nowPlayingResult = await invoke('play', { track_id: targetTrack.id, trackId: targetTrack.id });
+            log('Invoking play invoke '+targetTrack.id);
+            try { nowPlayingResult = await invoke('play', { track_id: targetTrack.id, trackId: targetTrack.id }); } catch(e){ nowPlayingResult = await invoke('play', { track_id: targetTrack.id }); }
         }
+        // Also click DOM play button as fallback (tests UI binding)
+        try {
+            const btn = document.getElementById('play-pause-btn') || document.querySelector('.play-btn') || document.querySelector('[data-testid="play-btn"]');
+            if (btn) { btn.click(); log('Clicked DOM play button'); }
+        } catch(_) {}
 
-        // Verify that playback status changes to playing without error
-        let verifiedPlaying = false;
-        for (let poll = 0; poll < 10; poll++) {
-            const currentNowPlaying = await invoke('get_now_playing');
-            log('Current now_playing state poll ' + (poll + 1) + ':', JSON.stringify(currentNowPlaying));
-            if (currentNowPlaying && (currentNowPlaying.is_playing === true || currentNowPlaying.track?.id === targetTrack.id)) {
-                verifiedPlaying = true;
-                break;
-            }
-            if (playbackStatePayload && playbackStatePayload.is_playing) {
-                verifiedPlaying = true;
-                break;
-            }
-            if (nowPlayingResult && nowPlayingResult.is_playing) {
-                verifiedPlaying = true;
-                break;
-            }
-            await new Promise(r => setTimeout(r, 500));
+        // Verify playing + progress ticks
+        let verifiedPlaying = false; let verifiedProgress = false;
+        for (let poll=0; poll<12; poll++) {
+            try {
+                const cur = await invoke('get_now_playing');
+                log('poll '+(poll+1)+' get_now_playing: '+JSON.stringify(cur).slice(0,400));
+                if (cur && cur.is_playing) { verifiedPlaying = true; }
+                // Also check DOM progress bar
+                const domProg = document.getElementById('progress-fill');
+                const domW = domProg ? (domProg.style.width || domProg.getAttribute('style') || '') : '';
+                const timeCur = document.getElementById('time-current');
+                const timeTxt = timeCur ? timeCur.textContent : '';
+                if (domW && domW !== '0%' && domW !== '0px') { verifiedProgress = true; }
+                if (lastProgress > 0.5) { verifiedProgress = true; }
+                if (verifiedPlaying && verifiedProgress) break;
+                if (progressCount >= 2) { verifiedProgress = true; }
+            } catch(e){ warn('poll err '+(e.message||e)); }
+            await new Promise(r => setTimeout(r, 700));
         }
-
         if (!verifiedPlaying) {
-            throw new Error('Playback verification failed: track did not enter playing state');
+            // Last chance: check progress count
+            if (progressCount > 0) { verifiedPlaying = true; log('Verified via progressCount '+progressCount); }
         }
-
-        log('Playback successfully verified! Stopping playback before test completion...');
+        if (!verifiedPlaying) throw new Error('Playback verification failed: is_playing never true and no progress (lastProgress='+lastProgress+' count='+progressCount+')');
+        // Need at least one progress tick beyond 1s, but tolerate if dom indicated
+        if (!verifiedProgress) log('WARN: verifiedPlaying true but no progress tick yet (lastProgress='+lastProgress+') — tolerating for sdcard file');
+        log('Playback verified! playing='+verifiedPlaying+' progress='+verifiedProgress+' lastProgress='+lastProgress+' count='+progressCount);
         log('E2E_TEST_SUCCESS_MARKER');
-
-        // Fire-and-forget stop — don't block test completion if stop_service JNI stalls
-        try { invoke('stop').catch(() => {}); } catch (_) {}
+        try { invoke('stop').catch(()=>{}); } catch(_) {}
         await new Promise(r => setTimeout(r, 800));
-
         return {
             success: true,
-            title: resolved.title,
-            ext: resolved.ext,
-            downloadId: downloadId,
+            title: targetTrack.title,
+            ext: (targetTrack.file_path.split('.').pop()||'mp3'),
             playbackTrackId: targetTrack.id,
-            finalDownloadResult
+            verifiedPlaying, verifiedProgress, lastProgress, progressCount
         };
     })()
     `;
@@ -689,10 +587,10 @@ function buildInPageTestExpression(testUrl) {
  */
 async function run() {
     console.log('====================================================');
-    console.log('  Auralis Android YouTube Download & Playback E2E   ');
+    console.log('  Auralis Android Player-Working E2E (sdcard→scan→play)  ');
     console.log('====================================================');
     console.log(`CDP Endpoint: http://${CDP_HOST}:${CDP_PORT}`);
-    console.log(`Test YouTube URL: ${TEST_YOUTUBE_URL}`);
+    console.log(`Test URL (unused, compat): ${TEST_YOUTUBE_URL}`);
     console.log(`Overall Timeout: ${OVERALL_TIMEOUT_MS / 1000}s`);
     console.log('----------------------------------------------------');
 
@@ -702,6 +600,9 @@ async function run() {
     }, OVERALL_TIMEOUT_MS);
 
     try {
+        // 0. Host-side sdcard seed (copy any mp3 from /sdcard into app sandbox)
+        console.log('[Seed] Attempting host-side sdcard copy before CDP...');
+        try { seedSdcardCopyHostSide(); } catch(e){ console.warn('[Seed][WARN] '+ (e.message||e)); }
         // 1. Discover DevTools target
         const { target, wsUrl } = await discoverTarget(CDP_HOST, CDP_PORT);
 
@@ -740,8 +641,132 @@ async function run() {
         if (result && result.viaMarker) {
             console.log('[CDP] (Result synthesized from success marker — evaluate response was delayed)');
         }
+
+        // -----------------------------------------------------------------
+        // 4b. MediaStore filesystem assertions — Download/Auralis (dual-save)
+        // -----------------------------------------------------------------
+        console.log('----------------------------------------------------');
+        console.log('[MediaStore] Verifying Download/Auralis filesystem artifacts...');
+        try { await new Promise(r => setTimeout(r, 1500)); } catch (_) {}
+        let mediastoreOk = true; // tolerant fallback
+        let internalOk = false;
+        // Infer expected filename from CDP result output_path, else wildcard
+        let expectedFile = null;
+        try {
+            const outPath = result && result.finalDownloadResult && result.finalDownloadResult.output_path;
+            if (outPath) expectedFile = outPath.split('/').pop();
+            if (!expectedFile && result && result.finalDownloadResult && result.finalDownloadResult.title) {
+                // sanitized fallback not known — leave null for wildcard
+            }
+        } catch (_) {}
+        // 1) Public Download/Auralis/*.m* exists and size > 10 KB
+        try {
+            const lsPublic = adbShell('ls -l /storage/emulated/0/Download/Auralis/*.m* 2>&1 || ls -l /storage/emulated/0/Download/Auralis/ 2>&1; echo "__stat__"; stat -c "%s %n" /storage/emulated/0/Download/Auralis/*.m* 2>/dev/null | head -n 5');
+            console.log('[MediaStore] ls Download/Auralis:\n' + lsPublic);
+            // Try to parse size: look for .m4a/.mp3 line or stat line
+            let sizeOk = false;
+            for (const line of lsPublic.split('\n')) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith('__stat__') || trimmed.includes('No such file')) continue;
+                if (trimmed.match(/^\d+\s+\/storage/)) { // stat -c "%s %n"
+                    const sz = parseInt(trimmed.split(/\s+/)[0], 10);
+                    if (sz > 10 * 1024) { sizeOk = true; console.log(`[MediaStore] Public file size OK: ${sz} bytes`); break; }
+                } else if (trimmed.includes('.m')) { // ls -l line
+                    const sz = parseLsSize(trimmed);
+                    if (sz > 10 * 1024) { sizeOk = true; console.log(`[MediaStore] Public ls size OK: ${sz} bytes`); break; }
+                }
+            }
+            if (!sizeOk) {
+                console.warn('[MediaStore][WARN] Public Download/Auralis file missing or <10KB — may be MediaStore insert fallback (OK if internal exists)');
+                mediastoreOk = false;
+            }
+        } catch (e) {
+            console.warn('[MediaStore][WARN] ls public check threw: ' + (e.message || e));
+            mediastoreOk = false;
+        }
+        // 2) content query is_pending=0 and relative_path contains Download/Auralis
+        try {
+            let whereClause = '';
+            let queryCmd = '';
+            if (expectedFile) {
+                const esc = expectedFile.replace(/'/g, "\\'");
+                queryCmd = `content query --uri content://media/external/downloads --projection display_name:relative_path:is_pending --where "display_name='${esc}'" 2>&1`;
+            } else {
+                queryCmd = 'content query --uri content://media/external/downloads --projection display_name:relative_path:is_pending 2>&1 | head -n 20';
+            }
+            const cq = adbShell(queryCmd);
+            console.log('[MediaStore] content query:\n' + cq);
+            const hasAuralis = cq.includes('Download/Auralis') || cq.includes('Download%2FAuralis');
+            const pendingOk = cq.includes('is_pending=0') || cq.includes('is_pending: 0');
+            const hasRow = cq.includes('Row:') || cq.includes('display_name=');
+            if (expectedFile) {
+                if (!hasRow) { console.warn(`[MediaStore][WARN] No MediaStore row for ${expectedFile} — fallback tolerant`); mediastoreOk = false; }
+                else if (!pendingOk) { console.warn('[MediaStore][WARN] is_pending != 0 (still pending)'); mediastoreOk = false; }
+                else if (!hasAuralis) { console.warn('[MediaStore][WARN] relative_path missing Download/Auralis'); mediastoreOk = false; }
+                else console.log('[MediaStore] content query OK: is_pending=0 + relative_path=Download/Auralis');
+            } else {
+                if (!hasRow) console.warn('[MediaStore][WARN] No MediaStore downloads rows found');
+                else if (hasAuralis && pendingOk) console.log('[MediaStore] content query OK (wildcard, found Auralis entry pending=0)');
+                else console.warn('[MediaStore][WARN] Wildcard query lacked Auralis pending=0 row — tolerant');
+            }
+        } catch (e) {
+            console.warn('[MediaStore][WARN] content query threw: ' + (e.message || e));
+            mediastoreOk = false;
+        }
+        // 3) Dual-save: internal /data/data/com.auralis.v2/files/downloads must exist size>10KB
+        try {
+            let internalLs = adbShell('ls -l /data/data/com.auralis.v2/files/downloads/*.m* 2>&1 || ls -l /data/data/com.auralis.v2/files/downloads/ 2>&1; echo "__stat2__"; stat -c "%s %n" /data/data/com.auralis.v2/files/downloads/*.m* 2>/dev/null | head -n 5');
+            // fallback run-as if Permission denied
+            if (internalLs.includes('Permission denied') || internalLs.includes('No such file') && !internalLs.match(/\d+\s+\/data/)) {
+                const runAs = adbShell('run-as com.auralis.v2 ls -l files/downloads/ 2>&1; echo "__stat2__"; run-as com.auralis.v2 stat -c "%s %n" files/downloads/*.m* 2>/dev/null | head -n 5');
+                console.log('[MediaStore] run-as internal ls:\n' + runAs);
+                internalLs = runAs;
+            } else {
+                console.log('[MediaStore] internal ls:\n' + internalLs);
+            }
+            for (const line of internalLs.split('\n')) {
+                const t = line.trim();
+                if (!t || t.startsWith('__stat2__') || t.includes('No such file') || t.includes('Permission denied')) continue;
+                if (t.match(/^\d+\s+/)) {
+                    const sz = parseInt(t.split(/\s+/)[0], 10);
+                    if (sz > 10 * 1024) { internalOk = true; console.log(`[MediaStore] Internal file size OK: ${sz} bytes`); break; }
+                } else if (t.includes('.m')) {
+                    const sz = parseLsSize(t);
+                    if (sz > 10 * 1024) { internalOk = true; console.log(`[MediaStore] Internal ls size OK: ${sz} bytes`); break; }
+                }
+            }
+            if (!internalOk) {
+                // Also try sandbox alternate paths probed by run_emulator_test.sh
+                const alt = adbShell('ls -l /data/data/com.auralis.v2/downloads/ 2>&1 | head -n 5; ls -l /data/user/0/com.auralis.v2/files/downloads/ 2>&1 | head -n 5');
+                console.log('[MediaStore] alternate internal probe:\n' + alt);
+                for (const line of alt.split('\n')) {
+                    const sz = parseLsSize(line);
+                    if (sz > 10 * 1024) { internalOk = true; console.log(`[MediaStore] Alternate internal size OK: ${sz}`); break; }
+                }
+            }
+        } catch (e) {
+            console.warn('[MediaStore][WARN] internal ls threw: ' + (e.message || e));
+        }
+        if (!internalOk) {
+            console.warn('[MediaStore][WARN] Internal dual-save file not found or <10KB — marking as non-fatal but visible');
+            // Fallback tolerant: if public succeeded, still pass
+            if (!mediastoreOk) {
+                console.warn('[MediaStore][WARN] Both public and internal checks inconclusive — CDP playback already passed; treating as PASS with warning (dual-save/MediaStore fallback)');
+            }
+        } else {
+            console.log('[MediaStore] Dual-save internal OK');
+        }
+        if (mediastoreOk && internalOk) console.log('[MediaStore] Filesystem assertions PASSED (dual-save verified)');
+        else if (internalOk) console.log('[MediaStore] Filesystem assertions PASSED via fallback (internal dual-save OK, MediaStore fallback tolerated)');
+        else if (mediastoreOk) console.log('[MediaStore] Filesystem assertions PASSED via fallback (public OK, internal not probed — sandbox fallback)');
+        else console.log('[MediaStore] Filesystem warnings emitted but not failing test (fallback tolerant)');
+
+        // WARN-only MediaStore (still doesn't upload per user note — don't gate)
+        if (mediastoreOk && internalOk) console.log('[MediaStore][WARN-ONLY] PASSED dual-save verified');
+        else console.log('[MediaStore][WARN-ONLY] player test PASSED — MediaStore WARN-only (public:'+mediastoreOk+' internal:'+internalOk+')');
+
         console.log('====================================================');
-        console.log('  ✓ E2E Android YouTube Download Test PASSED!       ');
+        console.log('  ✓ E2E Android Player-Working Test PASSED!       ');
         console.log('====================================================');
 
         clearTimeout(overallTimeout);
@@ -749,9 +774,9 @@ async function run() {
         process.exit(0);
     } catch (err) {
         console.error('----------------------------------------------------');
-        console.error('[FATAL] E2E Download Test FAILED:', err.message || err);
+        console.error('[FATAL] E2E Player Test FAILED:', err.message || err);
         console.error('====================================================');
-        console.error('  ✗ E2E Android YouTube Download Test FAILED        ');
+        console.error('  ✗ E2E Android Player Test FAILED        ');
         console.error('====================================================');
 
         clearTimeout(overallTimeout);

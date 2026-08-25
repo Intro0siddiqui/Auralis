@@ -69,6 +69,10 @@ impl Default for AudioSettings {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Download preferences
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadSettings {
@@ -90,6 +94,10 @@ pub struct DownloadSettings {
     /// Embed metadata in files
     pub embed_metadata: bool,
 
+    /// Save to system Downloads (Download/Auralis)
+    #[serde(default = "default_true")]
+    pub use_system_downloads: bool,
+
     /// YouTube cookie (for age-restricted / geo-restricted videos)
     #[serde(default)]
     pub youtube_cookie: Option<String>,
@@ -108,6 +116,7 @@ impl Default for DownloadSettings {
             max_concurrent: 3,
             embed_artwork: true,
             embed_metadata: true,
+            use_system_downloads: true,
             youtube_cookie: None,
             youtube_po_token: None,
         }

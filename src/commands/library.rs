@@ -155,6 +155,9 @@ pub async fn scan_library_paths(
                         default_paths.push(dl_dir);
                     }
                 }
+                // Note: MediaStore Download/Auralis copy is for Files visibility only;
+                // library scan stays sandboxed to avoid duplicate entries (internal + public).
+                // `test-android-e2e` verifies the public copy separately via `ls`/`content query`.
                 default_paths
             }
         };
