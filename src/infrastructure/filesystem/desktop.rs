@@ -371,7 +371,7 @@ impl DesktopScanner {
         // size match the indexed row, skip the expensive lofty re-parse.
         let path_for_stat = path.to_path_buf();
         let path_str_for_stat = path_str.clone();
-        let (mtime, size) = tokio::task::spawn_blocking(move || {
+        let inner = tokio::task::spawn_blocking(move || {
             let meta = std::fs::metadata(&path_for_stat).map_err(|e| {
                 ScannerError::MetadataError(format!("Failed to stat {path_str_for_stat}: {e}"))
             })?;
@@ -385,8 +385,8 @@ impl DesktopScanner {
             Ok::<(i64, u64), ScannerError>((mtime, size))
         })
         .await
-        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?
-        .map_err(|e| e)?;
+        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
+        let (mtime, size) = inner?;
 
         if let Some(existing_track) = existing.as_ref() {
             if existing_track.mtime == mtime && existing_track.file_size == size {
@@ -398,7 +398,7 @@ impl DesktopScanner {
         // Lofty extraction is blocking (file I/O + header decode) — offload.
         let path_for_extract = path.to_path_buf();
         let path_str_for_extract = path_str.clone();
-        let mut track = tokio::task::spawn_blocking(move || {
+        let inner_track = tokio::task::spawn_blocking(move || {
             MetadataExtractor::extract(&path_for_extract).map_err(|e| {
                 ScannerError::MetadataError(format!(
                     "Failed to extract metadata from {path_str_for_extract}: {e}"
@@ -406,8 +406,8 @@ impl DesktopScanner {
             })
         })
         .await
-        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?
-        .map_err(|e| e)?;
+        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
+        let mut track = inner_track?;
         track.mtime = mtime;
 
         if let Some(existing_track) = existing {

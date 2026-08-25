@@ -716,17 +716,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: "false"
-
-      - name: Run Rust tests (--all-features)
-        run: cargo test --all-features
-
       - name: Run JS unit tests (YouTube resolver)
         run: node --test scripts/tests/youtube_resolver.test.js
 

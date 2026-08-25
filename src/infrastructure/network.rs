@@ -25,6 +25,9 @@ use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+type PendingResponseMap =
+    HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>;
+
 /// Protocol name used for direct peer-to-peer sync transfers.
 pub const SYNC_PROTOCOL_NAME: &str = "/auralis/sync/1";
 /// Gossipsub topic used to broadcast change announcements to the mesh.
@@ -909,11 +912,7 @@ async fn run_swarm(
     // Shared pending map so timeout tasks can clean up the entry even when the
     // caller dropped its `reply_rx` after a 30s timeout. Previously a timed-out
     // request leaked forever (never removed until a late response arrived).
-    let pending: Arc<
-        TokioMutex<
-            HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>,
-        >,
-    > = Arc::new(TokioMutex::new(HashMap::new()));
+    let pending: Arc<TokioMutex<PendingResponseMap>> = Arc::new(TokioMutex::new(HashMap::new()));
 
     info!(peer_id = %runtime.local_peer_id, "Swarm event loop started");
     loop {
@@ -990,11 +989,7 @@ async fn run_swarm(
 async fn handle_swarm_event(
     runtime: &Arc<NetworkRuntime>,
     swarm: &mut Swarm<SwarmBehaviour>,
-    pending: &Arc<
-        TokioMutex<
-            HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>,
-        >,
-    >,
+    pending: &Arc<TokioMutex<PendingResponseMap>>,
     event: SwarmEvent<<SwarmBehaviour as libp2p::swarm::NetworkBehaviour>::ToSwarm>,
 ) {
     match event {

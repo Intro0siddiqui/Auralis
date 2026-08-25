@@ -201,7 +201,7 @@ impl AndroidScanner {
         // Incremental check — shared with desktop.rs (mtime + size). Stat
         // via spawn_blocking so we don't block the runtime.
         let path_for_stat = path.to_path_buf();
-        let (mtime, size) = tokio::task::spawn_blocking(move || {
+        let inner = tokio::task::spawn_blocking(move || {
             let meta = std::fs::metadata(&path_for_stat)
                 .map_err(|e| ScannerError::MetadataError(format!("Failed to stat: {e}")))?;
             let mtime = meta
@@ -214,8 +214,8 @@ impl AndroidScanner {
             Ok::<(i64, u64), ScannerError>((mtime, size))
         })
         .await
-        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?
-        .map_err(|e| e)?;
+        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
+        let (mtime, size) = inner?;
 
         if let Some(existing_track) = existing.as_ref() {
             if existing_track.mtime == mtime && existing_track.file_size == size {

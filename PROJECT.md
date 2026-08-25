@@ -1,7 +1,7 @@
 # Auralis — Project Knowledge File
 
 > Living reference for the Auralis codebase, build/release pipeline, device
-> environment, and the Android crash-debugging saga. Updated 2026-08-24 (v2.5.8 — PO-token-aware YouTube + diagnostics).
+> environment, and the Android crash-debugging saga. Updated 2026-08-24 (v2.5.9 — PO-token-aware YouTube + diagnostics).
 
 ---
 
@@ -255,7 +255,7 @@ here — the rule below is what matters.)
 | `.cargo/config.toml` | `-C link-arg=-lc++_shared` for the 4 android targets (fixes `DT_NEEDED`). |
 | `Cargo.toml` | android-only deps `jni`/`ndk-context`; `crate-type = ["staticlib","cdylib","rlib"]`; `[profile.release] panic = "abort"`. |
 | `Cargo.lock` | `auralis` version entry must match `Cargo.toml` + `tauri.conf.json`. |
-| `tauri.conf.json` | app `version` (`2.5.8`), `identifier = com.auralis.v2`, CSP (`default-src https: + script-src unsafe-inline + connect-src https:` for `youtubei`/`googlevideo`, vendored `ui/vendor/`). |
+| `tauri.conf.json` | app `version` (`2.5.9`), `identifier = com.auralis.v2`, CSP (`default-src https: + script-src unsafe-inline + connect-src https:` for `youtubei`/`googlevideo`, vendored `ui/vendor/`). |
 | `src/lib.rs` | `setup` init chain (android-context seed → db → network → sync → audio → settings → downloader); `#[cfg_attr(mobile, tauri::mobile_entry_point)]`; android `android_jni` module: `JNI_OnLoad` VM capture + null-safe `ndk_context` seed, with a `setup`-time `try_seed` fallback. |
 | `src/infrastructure/media/player.rs` | `AudioPlayer::new()` → `OutputStream::try_default()` — the cpal/oboe path that needs `ndk_context`. |
 | `src/commands/sync.rs` | `build_sync_service(db, sync_engine)` (2-arg). |
@@ -297,7 +297,7 @@ logcat -b crash -d | grep -iE "AndroidRuntime|FATAL|abort|auralis|libauralis|sig
 
 ---
 
-## 9. Current Status (2026-08-24, v2.5.8)
+## 9. Current Status (2026-08-24, v2.5.9)
 
 The app is feature-complete on the core set and ships signed APKs via CI tag
 builds. The Android launch crashes documented in §4 are all resolved. Recent
@@ -331,7 +331,7 @@ milestones from `git log`:
 - **v2.5.0** — **YouTube 403 fix**: `youtube.js` widens InnerTube to 6 clients (`IOS`,`ANDROID`,`ANDROID_VR`,`TV`,`MWEB`,`WEB`) + client-matched `User-Agent`/`Referer`/`Origin` headers to `downloader.rs` (`reqwest`); `googlevideo` 403 on Jio IPv6 fixed for `VILLAINS` etc. Dual `--split-per-abi` APKs (`arm64` + `x86_64`) + `sccache`, JS E2E `node --test youtube_resolver.test.js` + `desktop_download_player_e2e.js` + Android `e2e_download_test.js`.
 - **v2.5.1** — **Download failure diagnostics**: `downloader.rs` verbose `HTTP 403 [host] 403 + body snip + hint + DIAGNOSTIC` tag, `downloads.rs` emits `download:diagnostic`, `core.js` fixes `p.error` vs `p.error_message`, shows `8000ms` toast + red copyable error box with `navigator.clipboard`, `youtube.js` warns for `PlayerErrorCommand` suppression.
 - **v2.5.2** — **PO-token-aware resolver (2026 gate)**: `youtube.js` prefers `TV`/`ANDROID_VR`/`MWEB` (no `poToken` required) when `youtube_po_token` empty, else `IOS`/`ANDROID`; `downloader.rs` hint adds `PO-token` guidance. Vendor `youtubei.js@18.0.0` verified latest (no newer `18.0.0` > `2026-08-13`).
-- **v2.5.8** — Version sync (2.5.8) + `workflow_dispatch` docs + PO-token bgUtils retry/path fixes + DB Mutex phone doc.
+- **v2.5.9** — Version sync (2.5.9) + `workflow_dispatch` docs + PO-token bgUtils retry/path fixes + DB Mutex phone doc.
 
 ### What works today
 - Library scan (desktop glob + Android SAF/media-picker), SQLite persistence,
