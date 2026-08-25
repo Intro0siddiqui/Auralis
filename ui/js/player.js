@@ -445,19 +445,48 @@ class PlayerController {
         }
     }
 
-    play() {
+    async play() {
         this.isPlaying = true;
         this.updatePlayButton();
         this.startTimeTracking();
-        if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('resume').catch((err) => {
+        if (!window.Auralis || !window.Auralis.bridge) return;
+        // If we have a current track, resume is correct — it preserves position.
+        if (this.currentTrack && this.currentTrack.id) {
+            try {
+                await window.Auralis.bridge.invoke('resume');
+            } catch (err) {
                 const msg = String(err || 'resume failed');
                 console.warn('Resume failed:', msg);
-                window.Auralis.bridge.showToast(`Resume failed: ${msg}`, 'error', 6000);
-                if (this.currentTrack && this.currentTrack.id) {
-                    window.Auralis.bridge.playTrack(this.currentTrack.id);
-                }
-            });
+                window.Auralis.bridge.showToast(`Resume failed: ${msg} — retrying track`, 'error', 6000);
+                // fallback: replay the current track from start
+                window.Auralis.bridge.playTrack(this.currentTrack.id);
+            }
+            return;
+        }
+        // No track loaded (fresh start / "No track playing") — resume is a no-op in Rust
+        // (sink is None → Ok(())). Play the last queued track or the first library track.
+        try {
+            const q = await window.Auralis.bridge.invoke('get_queue');
+            if (q && q.tracks && q.tracks.length > 0) {
+                const idx = q.current_index ?? 0;
+                const t = q.tracks[idx];
+                if (t && t.id) return window.Auralis.bridge.playTrack(t.id);
+            }
+        } catch (_) {}
+        try {
+            const page = await window.Auralis.bridge.invoke('get_tracks', { filter: { limit: 1 } });
+            const t = page && page.tracks && page.tracks[0];
+            if (t && t.id) return window.Auralis.bridge.playTrack(t.id);
+            // Library empty — nothing to play
+            this.isPlaying = false;
+            this.updatePlayButton();
+            window.Auralis.bridge.showToast('No track to play — import audio or download a track first', 'info', 5000);
+        } catch (err) {
+            const msg = String(err || 'no track');
+            this.isPlaying = false;
+            this.updatePlayButton();
+            console.warn('Play fallback failed:', msg);
+            window.Auralis.bridge.showToast(`Play failed: ${msg}`, 'error', 6000);
         }
     }
 
