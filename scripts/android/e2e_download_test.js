@@ -509,7 +509,32 @@ function buildInPageTestExpression(testUrl) {
             await new Promise(r => setTimeout(r, 1000));
         }
         log('Found '+tracks.length+' track(s)');
-        if (tracks.length === 0) throw new Error('No tracks after scan — sdcard seed may have failed (check /sdcard/Music/*.mp3)');
+        if (tracks.length === 0) {
+            log('No tracks after scan — falling back to direct download (outfoxing.mp3) for player test');
+            // fallback: download direct mp3 via invoke, then rescan
+            try {
+                const fb = { url: 'https://raw.githubusercontent.com/mdn/webaudio-examples/main/audio-basics/outfoxing.mp3', title: 'E2E Fallback Audio', platform: 'direct', format: 'mp3', ext: 'mp3', thumbnail: null };
+                log('Invoking download_audio fallback '+fb.url);
+                const startRes = await invoke('download_audio', { request: fb });
+                log('fallback download_audio returned '+JSON.stringify(startRes));
+                // wait for download:completed 30s
+                let fbDone = false;
+                const fbPromise = new Promise((resolve, reject) => {
+                    const t = setTimeout(()=> reject(new Error('fallback download timeout 30s')), 30000);
+                    const h = (ev)=>{ const p=ev.payload||ev; log('fallback download:completed '+JSON.stringify(p)); if(!p || p.status==='completed'){clearTimeout(t); resolve(p);} else if(p.status==='failed'){clearTimeout(t); reject(new Error('fallback failed '+ (p.error||'')));} };
+                    if (window.Auralis?.bridge) window.Auralis.bridge.on('download:completed', h);
+                    if (tauriListen) tauriListen('download:completed', h).catch(()=>{});
+                });
+                await fbPromise;
+                // rescan
+                await invoke('scan_library_paths');
+                await new Promise(r=>setTimeout(r,1200));
+                const page2 = await invoke('get_tracks', { filter: null });
+                tracks = page2?.tracks || (Array.isArray(page2)?page2:[]);
+                log('After fallback, found '+tracks.length+' tracks');
+            } catch(e){ warn('fallback download failed: '+(e.message||e)); }
+            if (tracks.length === 0) throw new Error('No tracks after scan and fallback — cannot test playback');
+        }
 
         const targetTrack = tracks[0];
         log('Target track for playback:', JSON.stringify({ id: targetTrack.id, title: targetTrack.title, file_path: targetTrack.file_path, duration: targetTrack.duration_secs }));

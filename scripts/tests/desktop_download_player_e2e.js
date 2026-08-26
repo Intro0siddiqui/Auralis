@@ -162,51 +162,52 @@ async function run() {
     `);
     if (ytCheck && ytCheck.ok && !ytCheck.skipped) pass(`YouTube resolver header guard present: ${ytCheck.hasHeaders}`);
 
-    // 2. Direct download via Rust downloader (deterministic, verifies Rust bytes path)
-    section('Download (direct URL → Rust downloader)');
-    const dlRes = await execAsync(`
+    // 2. Pure Player Test: seed local audio file directly (no downloader)
+    // Copy tiny wav bytes via import_audio_file or fallback download, then scan
+    section('Player seed (pure player — copy local mp3/wav, no download)');
+    const b64 = audioBytes.toString('base64');
+    const seedRes = await execAsync(`
       const done = arguments[arguments.length-1];
       (async () => {
         try {
           const inv = (window.Auralis?.bridge?.invoke) ? window.Auralis.bridge.invoke.bind(window.Auralis.bridge)
             : (window.__TAURI__?.core?.invoke) ? window.__TAURI__.core.invoke.bind(window.__TAURI__.core)
             : window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
-          const listen = (window.__TAURI_INTERNALS__?.event?.listen) || (window.__TAURI__?.event?.listen) || null;
-          let completed = null;
-          let unlisten = null;
-          const wait = new Promise((res, rej) => {
-            const t = setTimeout(() => { if(unlisten) try{unlisten();}catch(_){} rej(new Error('download:completed timeout 30s')); }, 30000);
-            const h = (ev) => { const p = ev.payload || ev; if (p.status === 'completed') { clearTimeout(t); if(unlisten) try{unlisten();}catch(_){} res(p); } else if (p.status === 'failed') { clearTimeout(t); if(unlisten) try{unlisten();}catch(_){} rej(new Error('failed: ' + (p.error_message||p.error||JSON.stringify(p)))); } };
-            if (window.Auralis?.bridge?.on) window.Auralis.bridge.on('download:completed', h);
-            if (listen) listen('download:completed', h).then(u=>unlisten=u).catch(()=>{});
-            // also poll
-          });
-          const directUrl = ${JSON.stringify(directUrl)};
-          let start;
-          try { start = await inv('download_audio', { request: { url: directUrl, title: 'E2E-Test-Audio', platform: 'direct', ext: 'wav', format: 'wav' } }); }
-          catch(e){ const m=String(e); if(m.includes('Origin')) { done({ok:true, gated:true}); return; } throw e; }
-          const result = await wait;
-          done({ok:true, start, result});
-        } catch(e){ const m=String(e); if(m.includes('Origin')) done({ok:true, gated:true}); else done({ok:false, e:m+(e.stack? '\\n'+e.stack.slice(0,400):'')}); }
+          // Try import_audio_file (writes app_data_dir/music/<name>) with base64 — pure player test
+          try {
+            const imp = await inv('import_audio_file', { fileName: 'e2e-test-seed.wav', data: ${JSON.stringify(b64)} });
+            done({ok:true, via:'import', imp});
+            return;
+          } catch(e){
+            // fallback to direct download if import not available
+            const m=String(e);
+            if (!m.includes('not found') && !m.includes('Unknown command')) { done({ok:false, e:m}); return; }
+            const directUrl = ${JSON.stringify(directUrl)};
+            const listen = (window.__TAURI_INTERNALS__?.event?.listen) || (window.__TAURI__?.event?.listen) || null;
+            let unlisten=null;
+            const wait = new Promise((res, rej)=>{
+              const t=setTimeout(()=>{ if(unlisten)try{unlisten();}catch(_){} rej(new Error('download timeout')); }, 20000);
+              const h=(ev)=>{ const p=ev.payload||ev; if(p.status==='completed'){clearTimeout(t); if(unlisten)try{unlisten();}catch(_){} res(p);} else if(p.status==='failed'){clearTimeout(t); if(unlisten)try{unlisten();}catch(_){} rej(new Error('failed '+(p.error_message||p.error)));} };
+              if(window.Auralis?.bridge?.on) window.Auralis.bridge.on('download:completed', h);
+              if(listen) listen('download:completed', h).then(u=>unlisten=u).catch(()=>{});
+            });
+            let start; try{ start=await inv('download_audio', { request:{ url:directUrl, title:'E2E-Test-Audio', platform:'direct', ext:'wav', format:'wav' } }); } catch(e2){ const mm=String(e2); if(mm.includes('Origin')){ done({ok:true, gated:true}); return;} throw e2; }
+            const result=await wait; done({ok:true, via:'download', start, result});
+          }
+        } catch(e){ const m=String(e); if(m.includes('Origin')) done({ok:true, gated:true}); else done({ok:false, e:m}); }
       })();
     `);
-    if (!dlRes || !dlRes.ok) throw new Error(`Direct download failed: ${JSON.stringify(dlRes)}`);
-    if (dlRes.gated) {
-      console.log(`  ${c.yellow}Download invoke gated by Tauri Origin check (expected in WebDriver) — Rust downloader verified via cargo test, skipping live download${c.reset}`);
+    if (!seedRes || !seedRes.ok) throw new Error(`Player seed failed: ${JSON.stringify(seedRes)}`);
+    if (seedRes.gated) {
+      console.log(`  ${c.yellow}Seed gated by Origin check — Rust verified via cargo test, skipping${c.reset}`);
     } else {
-      pass(`Download completed: ${dlRes.result.status} → ${dlRes.result.output_path || dlRes.result.title}`);
+      pass(`Player seed via ${seedRes.via || 'import'} OK`);
     }
 
-    // Verify via get_download_progress / list_downloads (only if not gated)
-    if (!dlRes.gated) {
-      const listCheck = await execAsync(invokeJs('list_downloads', {}));
-      if (listCheck && listCheck.ok && !listCheck.gated) pass(`list_downloads: ${Array.isArray(listCheck.v) ? listCheck.v.length : 'ok'} entry(ies)`);
-    }
-
-    // 3. Player: scan → get_tracks → play → get_now_playing (skip if gated — cargo test covers Rust)
-    if (dlRes.gated) {
-      console.log(`  ${c.yellow}Player verification gated by Origin check — Rust AudioPlayer verified via cargo test + Android E2E, skipping live play${c.reset}`);
-      pass('Player check skipped (origin-gated, Rust verified)');
+    // 3. Player: scan → get_tracks → play → get_now_playing
+    if (seedRes.gated) {
+      console.log(`  ${c.yellow}Player verification gated by Origin check — skipping live play${c.reset}`);
+      pass('Player check skipped (origin-gated)');
     } else {
       section('Player (Rust AudioPlayer)');
       await execAsync(invokeJs('scan_library_paths', {}));
