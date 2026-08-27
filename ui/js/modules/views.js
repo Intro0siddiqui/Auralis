@@ -39,11 +39,14 @@ export const viewMethods = {
     },
 
     async loadLibraryView() {
+        const expected = 'library';
         const trackList = document.querySelector('.page-library .track-list');
         if (!trackList) return;
 
         try {
             const page = await this.invoke('get_tracks');
+            if (this.activeView !== expected) return;
+            if (!document.querySelector('.page-library .track-list')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
             } else {
@@ -139,8 +142,13 @@ export const viewMethods = {
     }
 
     async loadHomeView() {
+        const expected = 'home';
         try {
             const page = await this.invoke('get_tracks', { filter: { limit: 12 } });
+            if (this.activeView !== expected) return;
+            // Abort if HTMX already swapped #content away from home (fixes 00:13 spontaneous Welcome jump)
+            if (!document.querySelector('.page-home')) return;
+            if (document.querySelector('.page-downloads, .page-settings, .page-library, .page-albums')) return;
             const shelf = document.getElementById('recently-added-shelf') || document.querySelector('.page-home .shelf') || document.querySelector('#content .shelf');
             const trackList = document.getElementById('continue-listening-tracks') || document.querySelector('.page-home .track-list');
             const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home');
@@ -196,7 +204,7 @@ export const viewMethods = {
                                     <i data-lucide="folder-search"></i>
                                     Scan Storage
                                 </label>
-                                <button class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML transition:true">
+                                <button class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML">
                                     <i data-lucide="download"></i>
                                     Download Audio
                                 </button>
@@ -212,11 +220,14 @@ export const viewMethods = {
     },
 
     async loadAlbumsView() {
+        const expected = 'albums';
         const grid = document.getElementById('albums-grid') || document.querySelector('.page-albums .grid');
         if (!grid) return;
 
         try {
             const page = await this.invoke('get_tracks');
+            if (this.activeView !== expected) return;
+            if (!document.getElementById('albums-grid') && !document.querySelector('.page-albums .grid')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
                 const albumMap = new Map();
@@ -256,11 +267,14 @@ export const viewMethods = {
     },
 
     async loadArtistsView() {
+        const expected = 'artists';
         const grid = document.getElementById('artists-grid') || document.querySelector('.page-artists .grid');
         if (!grid) return;
 
         try {
             const page = await this.invoke('get_tracks');
+            if (this.activeView !== expected) return;
+            if (!document.getElementById('artists-grid') && !document.querySelector('.page-artists .grid')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
                 const artistMap = new Map();
@@ -300,6 +314,7 @@ export const viewMethods = {
     },
 
     async loadPlaylistsView() {
+        const expected = 'playlists';
         const grid = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
         const detail = document.getElementById('playlist-detail');
         if (detail) detail.style.display = 'none';
@@ -308,6 +323,7 @@ export const viewMethods = {
 
         try {
             const playlists = await this.invoke('get_playlists');
+            if (this.activeView !== expected) return;
             if (playlists && playlists.length > 0) {
                 grid.innerHTML = playlists.map(pl => {
                     const isSmart = Boolean(pl.is_smart);
