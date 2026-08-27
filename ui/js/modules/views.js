@@ -143,6 +143,10 @@ export const viewMethods = {
 
     async loadHomeView() {
         const expected = 'home';
+        // Sync abort before any await — fixes 00:40.5 async gap where Download→Home overwrites after navigation
+        const _contentPre = document.getElementById('content');
+        if (_contentPre && _contentPre.querySelector('.page-downloads, .page-settings, .page-library, .page-albums, .page-artists, .page-playlists, .page-search, .page-sync')) return;
+        if (this.activeView !== expected) return;
         try {
             const page = await this.invoke('get_tracks', { filter: { limit: 12 } });
             if (this.activeView !== expected) return;

@@ -5,7 +5,7 @@
 
     <!-- YouTube Search -->
     <div class="card" style="padding: var(--space-2); margin-bottom: var(--space-4);">
-        <form id="youtube-search-form" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
+        <form id="youtube-search-form" onsubmit="return false" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
             <input type="text" name="q" class="input" placeholder="Search YouTube…"
                    style="flex: 1; min-width: 200px;">
             <button type="submit" class="btn btn-secondary">
@@ -18,7 +18,7 @@
 
     <!-- Paste URL -->
     <div class="card" style="padding: var(--space-2);">
-        <form id="download-form" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
+        <form id="download-form" onsubmit="return false" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
             <input type="url" name="url" class="input" placeholder="https://youtube.com/... or https://.../audio.mp3"
                    style="flex: 1; min-width: 200px;" required>
             <select name="container" class="input" title="Container">

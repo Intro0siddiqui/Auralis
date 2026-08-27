@@ -161,13 +161,15 @@ export const downloadMethods = {
     async loadDownloadView() {
         const form = document.getElementById('download-form');
         const searchForm = document.getElementById('youtube-search-form');
-        if (!form || form.dataset.bound) return;
-        form.dataset.bound = 'true';
+        if (!form) return;
 
         await this.ensureSettings();
 
-        form.addEventListener('submit', async (e) => {
+        // Rebind every swap: handles htmx history cache restoring data-bound without listeners (00:40.5 Download→Home)
+        if (form._auralisSubmitHandler) form.removeEventListener('submit', form._auralisSubmitHandler);
+        const _handler = async (e) => {
             e.preventDefault();
+            e.stopPropagation();
             const urlInput = form.querySelector('input[name="url"]');
             if (!urlInput || !urlInput.value) return;
 
@@ -201,20 +203,26 @@ export const downloadMethods = {
                 console.error('DIAGNOSTIC resolve_failed', { url, opts, error: msg, stack: err && err.stack });
                 console.error(err);
                 console.groupEnd();
-                // Also push to global diagnostics for copy
                 try { window.__auralisDownloadDiagnostics = window.__auralisDownloadDiagnostics || []; window.__auralisDownloadDiagnostics.push({ at: new Date().toISOString(), kind: 'resolve_failed', url, error: msg }); } catch (_) {}
                 this.showToast(`Resolve failed: ${msg}`, 'error', 6000);
             }
-        });
+        };
+        form._auralisSubmitHandler = _handler;
+        form.addEventListener('submit', _handler);
+        form.dataset.bound = 'true';
 
-        if (searchForm && !searchForm.dataset.bound) {
-            searchForm.dataset.bound = 'true';
-            searchForm.addEventListener('submit', async (ev) => {
+        if (searchForm) {
+            if (searchForm._auralisSearchHandler) searchForm.removeEventListener('submit', searchForm._auralisSearchHandler);
+            const _searchHandler = async (ev) => {
                 ev.preventDefault();
+                ev.stopPropagation();
                 const q = searchForm.querySelector('input[name="q"]');
                 if (!q || !q.value.trim()) return;
                 await this.performYouTubeSearch(q.value.trim(), this.getDownloadOptions(form || searchForm));
-            });
+            };
+            searchForm._auralisSearchHandler = _searchHandler;
+            searchForm.addEventListener('submit', _searchHandler);
+            searchForm.dataset.bound = 'true';
         }
     },
 

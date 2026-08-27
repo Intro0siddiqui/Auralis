@@ -297,7 +297,34 @@ export const coreMethods = {
                 this.ensureFileInput();
                 this.refreshCurrentView();
             });
+            document.body.addEventListener('htmx:restored', () => {
+                if (window.lucide) window.lucide.createIcons();
+                this.ensureFileInput();
+                this.refreshCurrentView();
+            });
         }
+        // BF-cache restore when returning from external Files app (Android SAF) — htmx:afterSwap does not fire
+        window.addEventListener('pageshow', (e) => {
+            if (e.persisted) {
+                if (window.lucide) window.lucide.createIcons();
+                this.ensureFileInput();
+                this.refreshCurrentView();
+            }
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && document.querySelector('.page-downloads')) {
+                // Re-ensure Download handlers after Files app returns without firing htmx events
+                this.loadDownloadView();
+            }
+        });
+        // Delegated fallback — prevents native navigation to "/" even if per-form handler missed (htmx cache)
+        document.addEventListener('submit', (e) => {
+            const t = e.target;
+            if (t && (t.id === 'download-form' || t.id === 'youtube-search-form')) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        }, true);
     },
 
     on(event, callback) {
