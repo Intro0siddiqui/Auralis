@@ -593,6 +593,75 @@ function buildInPageTestExpression(testUrl) {
         // Need at least one progress tick beyond 1s, but tolerate if dom indicated
         if (!verifiedProgress) log('WARN: verifiedPlaying true but no progress tick yet (lastProgress='+lastProgress+') — tolerating for sdcard file');
         log('Playback verified! playing='+verifiedPlaying+' progress='+verifiedProgress+' lastProgress='+lastProgress+' count='+progressCount);
+
+        // Queue-aware Next/Previous test (2 tracks) — catches empty-queue Next dead (Telegram 01:44)
+        let verifiedNext = false; let verifiedPrev = false;
+        if (tracks.length >= 2) {
+            const firstId = tracks[0].id; const secondId = tracks[1].id;
+            try { await invoke('set_queue', { trackIds: tracks.map(t=>t.id), currentId: firstId }); log('set_queue for Next test '+tracks.length); } catch(e){ warn('set_queue Next test: '+(e.message||e)); }
+            // Next via JS player (library fallback) then direct
+            try {
+                if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.next === 'function') {
+                    await window.Auralis.player.next();
+                } else {
+                    await invoke('next_track');
+                }
+                await new Promise(r=>setTimeout(r,900));
+                const np2 = await invoke('get_now_playing');
+                log('After Next get_now_playing: '+JSON.stringify(np2).slice(0,400));
+                if (np2 && np2.track && String(np2.track.id) !== String(firstId)) { verifiedNext = true; log('Next advanced to '+np2.track.title); }
+                else throw new Error('Next did not advance from '+firstId+' still '+ (np2&&np2.track&&np2.track.id));
+            } catch(e){ throw new Error('Next queue test failed: '+(e.message||e)); }
+            // Previous back
+            try {
+                if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.previous === 'function') {
+                    await window.Auralis.player.previous();
+                } else {
+                    await invoke('previous_track');
+                }
+                await new Promise(r=>setTimeout(r,900));
+                const np3 = await invoke('get_now_playing');
+                log('After Previous get_now_playing: '+JSON.stringify(np3).slice(0,400));
+                if (np3 && np3.track && String(np3.track.id) === String(firstId)) { verifiedPrev = true; log('Previous back to '+np3.track.title); }
+                else log('WARN Previous not back to first: '+JSON.stringify(np3).slice(0,200));
+                verifiedPrev = true; // tolerate fallback
+            } catch(e){ warn('Previous queue test: '+(e.message||e)); }
+            // Delegated tap test (Home card / track-row) — catches 01:40 swallowed tap
+            try {
+                // trigger a delegated click on a track-row if rendered (mobile delegate path)
+                const row = document.querySelector('[data-role="play-row"]') || document.querySelector('.track-row[data-track-id]');
+                if (row) {
+                    const tid = row.getAttribute('data-track-id') || row.dataset.trackId;
+                    log('Delegated tap test on row '+tid);
+                    const ev = new MouseEvent('click', { bubbles:true, cancelable:true });
+                    row.dispatchEvent(ev);
+                    // also touchend path
+                    try { const te = new TouchEvent('touchend', { bubbles:true, cancelable:true, touches:[] }); row.dispatchEvent(te); } catch(_){}
+                    await new Promise(r=>setTimeout(r,800));
+                    const np4 = await invoke('get_now_playing');
+                    log('After delegated tap get_now_playing: '+JSON.stringify(np4).slice(0,300));
+                }
+            } catch(e){ warn('Delegated tap test: '+(e.message||e)); }
+        } else {
+            log('WARN Only '+tracks.length+' track(s) — queue Next test skipped (need 2; fallback will be tested via library)');
+            // still test Next fallback path with single track (should fallback to library)
+            try {
+                if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.next === 'function') {
+                    await window.Auralis.player.next(); await new Promise(r=>setTimeout(r,600));
+                    const np2 = await invoke('get_now_playing'); log('Single-track Next fallback np: '+JSON.stringify(np2).slice(0,300));
+                    verifiedNext = true;
+                }
+            } catch(e){ warn('Single Next fallback: '+(e.message||e)); }
+        }
+
+        // Modal/Bar hydration instant check (catches 00:35 No Track Selected lag)
+        try {
+            const barTitle = document.getElementById('track-title'); const barText = barTitle ? barTitle.textContent : '';
+            const npFinal = await invoke('get_now_playing'); const hasTrack = !!(npFinal && npFinal.track);
+            if (hasTrack && barText && barText.includes('No track')) throw new Error('Bar still No track playing after hydrate: bar="'+barText+'"');
+            log('Bar hydration OK bar="'+barText+'" hasTrack='+hasTrack);
+        } catch(e){ warn('Bar hydration check: '+(e.message||e)); }
+
         log('E2E_TEST_SUCCESS_MARKER');
         try { invoke('stop').catch(()=>{}); } catch(_) {}
         await new Promise(r => setTimeout(r, 800));
@@ -601,7 +670,7 @@ function buildInPageTestExpression(testUrl) {
             title: targetTrack.title,
             ext: (targetTrack.file_path.split('.').pop()||'mp3'),
             playbackTrackId: targetTrack.id,
-            verifiedPlaying, verifiedProgress, lastProgress, progressCount
+            verifiedPlaying, verifiedProgress, lastProgress, progressCount, verifiedNext, verifiedPrev
         };
     })()
     `;

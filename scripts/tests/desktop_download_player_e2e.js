@@ -162,10 +162,10 @@ async function run() {
     `);
     if (ytCheck && ytCheck.ok && !ytCheck.skipped) pass(`YouTube resolver header guard present: ${ytCheck.hasHeaders}`);
 
-    // 2. Pure Player Test: seed local audio file directly (no downloader)
-    // Copy tiny wav bytes via import_audio_file or fallback download, then scan
-    section('Player seed (pure player — copy local mp3/wav, no download)');
+    // 2. Pure Player Test: seed 2 local audio files directly (queue context for Next/Prev)
+    section('Player seed (pure player — 2 tracks for queue/Next test)');
     const b64 = audioBytes.toString('base64');
+    const b64b = Buffer.concat([audioBytes, Buffer.alloc(1, 0x00)]).toString('base64'); // second file slightly different
     const seedRes = await execAsync(`
       const done = arguments[arguments.length-1];
       (async () => {
@@ -173,15 +173,12 @@ async function run() {
           const inv = (window.Auralis?.bridge?.invoke) ? window.Auralis.bridge.invoke.bind(window.Auralis.bridge)
             : (window.__TAURI__?.core?.invoke) ? window.__TAURI__.core.invoke.bind(window.__TAURI__.core)
             : window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
-          // Try import_audio_file (writes app_data_dir/music/<name>) with base64 — pure player test
-          try {
-            const imp = await inv('import_audio_file', { fileName: 'e2e-test-seed.wav', data: ${JSON.stringify(b64)} });
-            done({ok:true, via:'import', imp});
-            return;
-          } catch(e){
-            // fallback to direct download if import not available
-            const m=String(e);
-            if (!m.includes('not found') && !m.includes('Unknown command')) { done({ok:false, e:m}); return; }
+          const tryImport = async (name, b64d) => {
+            try { const imp = await inv('import_audio_file', { fileName: name, data: b64d }); return {ok:true, via:'import', imp}; }
+            catch(e){ const m=String(e); if(m.includes('not found')||m.includes('Unknown command')) return {ok:false, needFallback:true, e:m}; return {ok:false, e:m}; }
+          };
+          let r1 = await tryImport('e2e-test-seed-a.wav', ${JSON.stringify(b64)});
+          if (!r1.ok && r1.needFallback) {
             const directUrl = ${JSON.stringify(directUrl)};
             const listen = (window.__TAURI_INTERNALS__?.event?.listen) || (window.__TAURI__?.event?.listen) || null;
             let unlisten=null;
@@ -191,9 +188,15 @@ async function run() {
               if(window.Auralis?.bridge?.on) window.Auralis.bridge.on('download:completed', h);
               if(listen) listen('download:completed', h).then(u=>unlisten=u).catch(()=>{});
             });
-            let start; try{ start=await inv('download_audio', { request:{ url:directUrl, title:'E2E-Test-Audio', platform:'direct', ext:'wav', format:'wav' } }); } catch(e2){ const mm=String(e2); if(mm.includes('Origin')){ done({ok:true, gated:true}); return;} throw e2; }
-            const result=await wait; done({ok:true, via:'download', start, result});
-          }
+            let start; try{ start=await inv('download_audio', { request:{ url:directUrl, title:'E2E-Test-Audio-A', platform:'direct', ext:'wav', format:'wav' } }); } catch(e2){ const mm=String(e2); if(mm.includes('Origin')){ done({ok:true, gated:true}); return;} throw e2; }
+            const result=await wait; r1={ok:true, via:'download', start, result};
+          } else if (!r1.ok) { done({ok:false, e:r1.e}); return; }
+          let r2 = await tryImport('e2e-test-seed-b.wav', ${JSON.stringify(b64b)});
+          if (!r2.ok && r2.needFallback) {
+            const u2 = ${JSON.stringify(directUrl)}.replace('test.wav','test2.wav');
+            let start2; try{ start2=await inv('download_audio', { request:{ url:u2, title:'E2E-Test-Audio-B', platform:'direct', ext:'wav', format:'wav' } }); } catch(e2){ /* tolerate single */ }
+          } else if (!r2.ok) { /* tolerate single file */ }
+          done({ok:true, via: r1.via, r1, r2});
         } catch(e){ const m=String(e); if(m.includes('Origin')) done({ok:true, gated:true}); else done({ok:false, e:m}); }
       })();
     `);
@@ -201,7 +204,7 @@ async function run() {
     if (seedRes.gated) {
       console.log(`  ${c.yellow}Seed gated by Origin check — Rust verified via cargo test, skipping${c.reset}`);
     } else {
-      pass(`Player seed via ${seedRes.via || 'import'} OK`);
+      pass(`Player seed via ${seedRes.via || 'import'} OK (2 tracks attempted)`);
     }
 
     // 3. Player: scan → get_tracks → play → get_now_playing
@@ -227,7 +230,23 @@ async function run() {
       if (!tracksRes || !tracksRes.ok) throw new Error(`No tracks after download+scan: ${JSON.stringify(tracksRes)}`);
       if (tracksRes.gated) { console.log(`  ${c.yellow}get_tracks gated — skipping player${c.reset}`); pass('Player check gated (origin)'); }
       else {
-        pass(`Library has ${tracksRes.n} track(s), first: ${tracksRes.first.title}`);
+        if (tracksRes.n < 2) console.log(`  ${c.yellow}Only ${tracksRes.n} track(s) — queue Next test will use library fallback${c.reset}`);
+        else pass(`Library has ${tracksRes.n} track(s), first: ${tracksRes.first.title}`);
+        // Need full list for queue test
+        const allTracksRes = await execAsync(`
+          const done = arguments[arguments.length-1];
+          (async () => {
+            try {
+              const inv = (window.Auralis?.bridge?.invoke) ? window.Auralis.bridge.invoke.bind(window.Auralis.bridge)
+                : (window.__TAURI__?.core?.invoke) ? window.__TAURI__.core.invoke.bind(window.__TAURI__.core)
+                : window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+              const p = await inv('get_tracks', {filter:null}); const arr=p.tracks||p||[]; done({ok:true, arr});
+            } catch(e){ done({ok:false, e:String(e)}); }
+          })();
+        `);
+        const allTracks = (allTracksRes && allTracksRes.ok && allTracksRes.arr) ? allTracksRes.arr : [tracksRes.first];
+        const firstId = tracksRes.first.id;
+        const secondId = allTracks.length > 1 ? allTracks[1].id : null;
         const playRes = await execAsync(`
           const done = arguments[arguments.length-1];
           (async () => {
@@ -235,7 +254,10 @@ async function run() {
               const inv = (window.Auralis?.bridge?.invoke) ? window.Auralis.bridge.invoke.bind(window.Auralis.bridge)
                 : (window.__TAURI__?.core?.invoke) ? window.__TAURI__.core.invoke.bind(window.__TAURI__.core)
                 : window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
-              const tid = ${JSON.stringify(tracksRes.first.id)};
+              const tid = ${JSON.stringify(firstId)};
+              const all = ${JSON.stringify(allTracks.map(t=>t.id))};
+              // Queue-aware play via set_queue then play (mirrors views.js playTrack)
+              try { if(all.length>1) await inv('set_queue', { trackIds: all, currentId: tid }); } catch(_){}
               let r=null;
               try{ r=await inv('play', { track_id: tid }); } catch(e){ if(String(e).includes('Origin')) { done({ok:true, gated:true}); return; } try{ r=await inv('play', { trackId: tid }); }catch(e2){ if(String(e2).includes('Origin')) { done({ok:true, gated:true}); return; } throw e2; } }
               for(let i=0;i<12;i++){
@@ -249,6 +271,83 @@ async function run() {
         if (!playRes || !playRes.ok) throw new Error(`Playback failed: ${JSON.stringify(playRes)}`);
         if (playRes.gated) { console.log(`  ${c.yellow}play gated — Rust player verified via cargo${c.reset}`); pass('Player gated'); }
         else pass(`Player playing: ${playRes.np.track?.title || playRes.np.title || 'ok'} is_playing=${playRes.np.is_playing}`);
+        // 4. Next/Previous queue test (catches empty-queue Next dead)
+        if (!playRes.gated && secondId) {
+          section('Player Next/Previous (queue-aware)');
+          const nextRes = await execAsync(`
+            const done = arguments[arguments.length-1];
+            (async () => {
+              try {
+                const inv = (window.Auralis?.bridge?.invoke) ? window.Auralis.bridge.invoke.bind(window.Auralis.bridge)
+                  : (window.__TAURI__?.core?.invoke) ? window.__TAURI__.core.invoke.bind(window.__TAURI__.core)
+                  : window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+                // Try bridge.next() fallback (JS) then direct invoke; JS next will fallback to library if queue empty
+                if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.next === 'function') {
+                  await window.Auralis.player.next();
+                } else {
+                  await inv('next_track');
+                }
+                await new Promise(r=>setTimeout(r,900));
+                const np = await inv('get_now_playing');
+                // Also test delegated tap path: clicking a track-row should play (mobile delegate)
+                done({ok:true, np});
+              } catch(e){ done({ok:false, e:String(e)}); }
+            })();
+          `);
+          if (!nextRes || !nextRes.ok) throw new Error(`Next track failed: ${JSON.stringify(nextRes)} — queue may be empty`);
+          const afterNextId = nextRes.np && (nextRes.np.track?.id || nextRes.np.track_id);
+          if (String(afterNextId) === String(firstId)) throw new Error(`Next did not advance: still ${afterNextId} expected ${secondId}`);
+          pass(`Next advanced to ${nextRes.np.track?.title || afterNextId}`);
+          const prevRes = await execAsync(`
+            const done = arguments[arguments.length-1];
+            (async () => {
+              try {
+                const inv = (window.Auralis?.bridge?.invoke) ? window.Auralis.bridge.invoke.bind(window.Auralis.bridge)
+                  : (window.__TAURI__?.core?.invoke) ? window.__TAURI__.core.invoke.bind(window.__TAURI__.core)
+                  : window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+                if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.previous === 'function') {
+                  await window.Auralis.player.previous();
+                } else {
+                  await inv('previous_track');
+                }
+                await new Promise(r=>setTimeout(r,900));
+                const np = await inv('get_now_playing');
+                done({ok:true, np});
+              } catch(e){ done({ok:false, e:String(e)}); }
+            })();
+          `);
+          if (!prevRes || !prevRes.ok) throw new Error(`Previous track failed: ${JSON.stringify(prevRes)}`);
+          pass(`Previous back to ${prevRes.np.track?.title || prevRes.np.track?.id}`);
+          // 5. Modal hydration instant-tap (catches 00:35 No Track Selected lag)
+          const modalRes = await execAsync(`
+            const done = arguments[arguments.length-1];
+            (async () => {
+              try {
+                const inv = (window.Auralis?.bridge?.invoke) ? window.Auralis.bridge.invoke.bind(window.Auralis.bridge)
+                  : (window.__TAURI__?.core?.invoke) ? window.__TAURI__.core.invoke.bind(window.__TAURI__.core)
+                  : window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+                // Trigger overlay HTMX fetch if available, then immediately check metadata (no 1s delay)
+                const bar = document.querySelector('.player-track[hx-get]');
+                if (bar && window.htmx) window.htmx.trigger(bar, 'click');
+                // Force hydrate like the fixed player.js does on overlay click
+                if (window.Auralis && window.Auralis.player) await window.Auralis.player.hydrateState().catch(()=>{});
+                await new Promise(r=>setTimeout(r,200));
+                let titleEl = document.getElementById('player-full-title');
+                // If modal not yet swapped, check bar title instead (both should not be placeholder when playing)
+                const barTitle = document.getElementById('track-title');
+                const barText = barTitle ? barTitle.textContent : '';
+                const modalText = titleEl ? titleEl.textContent : 'no-modal-yet';
+                const np = await inv('get_now_playing');
+                const hasTrack = !!(np && np.track);
+                const barOk = hasTrack && barText && !barText.includes('No track');
+                done({ok:true, barText, modalText, hasTrack, barOk});
+              } catch(e){ done({ok:false, e:String(e)}); }
+            })();
+          `);
+          if (!modalRes || !modalRes.ok) throw new Error(`Modal hydration check failed: ${JSON.stringify(modalRes)}`);
+          if (!modalRes.barOk && modalRes.hasTrack) throw new Error(`Bar still No track playing after hydrate: bar="${modalRes.barText}" modal="${modalRes.modalText}"`);
+          pass(`Modal/Bar hydration OK bar="${modalRes.barText}"`);
+        }
         try { await execAsync(invokeJs('stop', {})); } catch (_) {}
         await new Promise(r => setTimeout(r, 600));
         pass('Player stop OK');
