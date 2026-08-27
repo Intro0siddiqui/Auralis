@@ -146,9 +146,9 @@ export const viewMethods = {
         try {
             const page = await this.invoke('get_tracks', { filter: { limit: 12 } });
             if (this.activeView !== expected) return;
-            // Abort if HTMX already swapped #content away from home (fixes 00:13 spontaneous Welcome jump)
-            if (!document.querySelector('.page-home')) return;
-            if (document.querySelector('.page-downloads, .page-settings, .page-library, .page-albums')) return;
+            // Abort if #content already shows a different page (fixes 00:13 Welcome jump without breaking initial home load when #content empty)
+            const _content = document.getElementById('content');
+            if (_content && _content.querySelector('.page-downloads, .page-settings, .page-library, .page-albums, .page-artists, .page-playlists, .page-search, .page-sync')) return;
             const shelf = document.getElementById('recently-added-shelf') || document.querySelector('.page-home .shelf') || document.querySelector('#content .shelf');
             const trackList = document.getElementById('continue-listening-tracks') || document.querySelector('.page-home .track-list');
             const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home');
