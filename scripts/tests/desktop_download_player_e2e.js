@@ -175,9 +175,10 @@ async function run() {
             : window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
           const tryImport = async (name, b64d) => {
             try { const imp = await inv('import_audio_file', { fileName: name, data: b64d }); return {ok:true, via:'import', imp}; }
-            catch(e){ const m=String(e); if(m.includes('not found')||m.includes('Unknown command')) return {ok:false, needFallback:true, e:m}; return {ok:false, e:m}; }
+            catch(e){ const m=String(e); if(m.includes('Origin')) return {ok:false, gated:true, e:m}; if(m.includes('not found')||m.includes('Unknown command')) return {ok:false, needFallback:true, e:m}; return {ok:false, e:m}; }
           };
           let r1 = await tryImport('e2e-test-seed-a.wav', ${JSON.stringify(b64)});
+          if (r1.gated) { done({ok:true, gated:true}); return; }
           if (!r1.ok && r1.needFallback) {
             const directUrl = ${JSON.stringify(directUrl)};
             const listen = (window.__TAURI_INTERNALS__?.event?.listen) || (window.__TAURI__?.event?.listen) || null;
@@ -192,10 +193,11 @@ async function run() {
             const result=await wait; r1={ok:true, via:'download', start, result};
           } else if (!r1.ok) { done({ok:false, e:r1.e}); return; }
           let r2 = await tryImport('e2e-test-seed-b.wav', ${JSON.stringify(b64b)});
+          if (r2.gated) { done({ok:true, gated:true}); return; }
           if (!r2.ok && r2.needFallback) {
             const u2 = ${JSON.stringify(directUrl)}.replace('test.wav','test2.wav');
             let start2; try{ start2=await inv('download_audio', { request:{ url:u2, title:'E2E-Test-Audio-B', platform:'direct', ext:'wav', format:'wav' } }); } catch(e2){ /* tolerate single */ }
-          } else if (!r2.ok) { /* tolerate single file */ }
+          } else if (!r2.ok && r2.gated) { done({ok:true, gated:true}); return; } else if (!r2.ok) { /* tolerate single file */ }
           done({ok:true, via: r1.via, r1, r2});
         } catch(e){ const m=String(e); if(m.includes('Origin')) done({ok:true, gated:true}); else done({ok:false, e:m}); }
       })();

@@ -128,7 +128,9 @@ set -e
 
 # 7. Run CDP Node.js E2E test (player-working)
 echo "[7/9] Executing Player-Working E2E test via Node.js (sdcard→scan→play)..."
-CDP_PORT="$PORT" node "${SCRIPT_DIR}/e2e_download_test.js"
+# renamed e2e_download_test.js -> e2e_player_test.js (pure player, download not needed)
+if [ -f "${SCRIPT_DIR}/e2e_player_test.js" ]; then E2E_JS="${SCRIPT_DIR}/e2e_player_test.js"; else E2E_JS="${SCRIPT_DIR}/e2e_download_test.js"; fi
+CDP_PORT="$PORT" node "$E2E_JS"
 
 # 8. Verify MediaStore Download/Auralis artifacts (WARN-only, still doesn't upload)
 echo "----------------------------------------------------"
