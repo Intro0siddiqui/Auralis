@@ -202,22 +202,49 @@ class PlayerController {
 
     bindFullScreenPlayerListeners() {
         const observer = new MutationObserver(() => {
+            // Re-wire on any overlay change; clear wired flag so update runs with latest currentTrack
+            const fp = document.getElementById('player-full');
+            if (fp) fp.dataset.wired = '';
             this.wireFullScreenElements();
+            // Re-hydrate from Rust so modal never shows stale "No Track Selected" placeholder
+            this.hydrateState().catch(()=>{});
         });
 
         const overlayRoot = document.getElementById('overlay-root');
         if (overlayRoot) {
             observer.observe(overlayRoot, { childList: true, subtree: true });
         }
-        document.body.addEventListener('htmx:afterSwap', () => {
-            this.wireFullScreenElements();
+        document.body.addEventListener('htmx:afterSwap', (e) => {
+            // HTMX swap for player-full may fire before observer; handle both
+            const target = e && e.detail && e.detail.target;
+            const isPlayerSwap = target && (target.id === 'overlay-root' || target.querySelector && target.querySelector('#player-full') || target.id === 'player-full');
+            // Also re-sync bar when any view swaps (covers Home/Library desync 01:39-01:44)
+            if (window.Auralis && window.Auralis.player) {
+                window.Auralis.player.hydrateState().catch(()=>{});
+            }
+            if (isPlayerSwap || document.getElementById('player-full')) {
+                const fp = document.getElementById('player-full');
+                if (fp) fp.dataset.wired = '';
+                this.wireFullScreenElements();
+                this.hydrateState().catch(()=>{});
+            }
         });
+        // Also wire on explicit overlay click (player-bar hx-get target)
+        const playerBar = document.querySelector('.player-track[hx-get]');
+        if (playerBar) {
+            playerBar.addEventListener('click', () => {
+                // Hydrate *before* HTMX fetches partial so metadata is ready when it swaps
+                this.hydrateState().catch(()=>{});
+            });
+        }
         this.wireFullScreenElements();
     }
 
     wireFullScreenElements() {
         const fullPlayer = document.getElementById('player-full');
-        if (!fullPlayer || fullPlayer.dataset.wired) return;
+        if (!fullPlayer) return;
+        // Always refresh metadata even if already wired (fixes 01:27 modal desync)
+        const wasWired = fullPlayer.dataset.wired === 'true';
         fullPlayer.dataset.wired = 'true';
 
         this.updateFullScreenMetadata();
@@ -226,6 +253,7 @@ class PlayerController {
         this.updateVolumeUI();
         this.updateLikeUI();
         this.updateShuffleRepeatUI();
+        if (wasWired) return;
 
         // 1. Play / Pause
         const fullPlay = document.getElementById('player-full-play');
@@ -505,23 +533,54 @@ class PlayerController {
         }
     }
 
-    next() {
-        if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('next_track').catch((err) => {
-                const msg = String(err || 'next failed');
-                console.warn('Next track failed:', msg);
-                window.Auralis.bridge.showToast(`Next failed: ${msg}`, 'error', 6000);
-            });
+    async next() {
+        if (!window.Auralis || !window.Auralis.bridge) return;
+        try {
+            const res = await window.Auralis.bridge.invoke('next_track');
+            if (res) return; // Rust advanced successfully
+            // Queue empty — fallback to library order (fixes 01:44 Next dead when queue empty)
+            const tracks = (window.Auralis.bridge.tracks && window.Auralis.bridge.tracks.length)
+                ? window.Auralis.bridge.tracks
+                : (await window.Auralis.bridge.invoke('get_tracks', { filter: { limit: 200 } }).then(p=>p.tracks||[]).catch(()=>[]));
+            if (!tracks.length) {
+                window.Auralis.bridge.showToast('No next track — queue empty and library empty', 'info', 4000);
+                return;
+            }
+            const curId = this.currentTrack && this.currentTrack.id;
+            let idx = tracks.findIndex(t => String(t.id) === String(curId));
+            idx = idx >= 0 ? (idx + 1) % tracks.length : 0;
+            const nxt = tracks[idx];
+            if (nxt && nxt.id) await window.Auralis.bridge.playTrack(nxt.id);
+        } catch (err) {
+            const msg = String(err || 'next failed');
+            console.warn('Next track failed:', msg);
+            window.Auralis.bridge.showToast(`Next failed: ${msg}`, 'error', 6000);
         }
     }
 
-    previous() {
-        if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('previous_track').catch((err) => {
-                const msg = String(err || 'previous failed');
-                console.warn('Previous track failed:', msg);
-                window.Auralis.bridge.showToast(`Previous failed: ${msg}`, 'error', 6000);
-            });
+    async previous() {
+        if (!window.Auralis || !window.Auralis.bridge) return;
+        try {
+            const res = await window.Auralis.bridge.invoke('previous_track');
+            if (res) return;
+            const tracks = (window.Auralis.bridge.tracks && window.Auralis.bridge.tracks.length)
+                ? window.Auralis.bridge.tracks
+                : (await window.Auralis.bridge.invoke('get_tracks', { filter: { limit: 200 } }).then(p=>p.tracks||[]).catch(()=>[]));
+            if (!tracks.length) {
+                window.Auralis.bridge.showToast('No previous track', 'info', 4000);
+                return;
+            }
+            const curId = this.currentTrack && this.currentTrack.id;
+            let idx = tracks.findIndex(t => String(t.id) === String(curId));
+            if (idx <= 0) idx = tracks.length - 1;
+            else idx = idx - 1;
+            if (idx < 0) idx = 0;
+            const prv = tracks[idx];
+            if (prv && prv.id) await window.Auralis.bridge.playTrack(prv.id);
+        } catch (err) {
+            const msg = String(err || 'previous failed');
+            console.warn('Previous track failed:', msg);
+            window.Auralis.bridge.showToast(`Previous failed: ${msg}`, 'error', 6000);
         }
     }
 

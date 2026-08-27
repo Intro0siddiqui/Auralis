@@ -494,6 +494,45 @@ pub async fn clear_queue(
     Ok(queue)
 }
 
+/// Replace the playback queue wholesale (used to make Next/Prev context-aware
+/// when playing from Library/Home/Playlist). Sets queue = tracks, current_index
+/// = index of current track (or 0 if id not found). Called by JS before `play`.
+#[tauri::command]
+pub async fn set_queue(
+    track_ids: Vec<Uuid>,
+    current_id: Option<Uuid>,
+    app: AppHandle,
+    player: State<'_, AudioPlayer>,
+    db: State<'_, Database>,
+) -> Result<PlaybackQueue, String> {
+    info!(
+        count = track_ids.len(),
+        ?current_id,
+        "Set queue command received"
+    );
+    let mut tracks = Vec::with_capacity(track_ids.len());
+    for tid in &track_ids {
+        match lookup_track(*tid, &db).await {
+            Ok(t) => tracks.push(t),
+            Err(e) => warn!(%tid, error=%e, "set_queue: skip missing track"),
+        }
+    }
+    if tracks.is_empty() {
+        return Err("set_queue: no valid tracks".into());
+    }
+    let idx = current_id
+        .and_then(|cid| tracks.iter().position(|t| t.id == cid))
+        .or(Some(0));
+    player.set_queue(tracks.clone()).await;
+    player.set_current_index(idx).await;
+    let queue = PlaybackQueue {
+        tracks,
+        current_index: idx,
+    };
+    emit_queue_updated(&app, &queue).await;
+    Ok(queue)
+}
+
 // ============================================================================
 // Helper functions
 // ============================================================================

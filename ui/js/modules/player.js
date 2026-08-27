@@ -7,6 +7,17 @@ export const playerMethods = {
     async playTrack(trackId) {
         if (!trackId) return;
         try {
+            // Populate Rust queue context-aware before play so Next/Prev work (fixes empty queue dead Next)
+            try {
+                const ids = (this.tracks && this.tracks.length) ? this.tracks.map(t => t.id) : [trackId];
+                if (ids.length > 1) {
+                    await this.invoke('set_queue', { trackIds: ids, currentId: trackId }).catch(()=>{});
+                } else if (ids.length === 1) {
+                    // Single track view — still set queue so Next wraps correctly
+                    const cur = this.tracks.find(t => String(t.id) === String(trackId));
+                    if (cur) await this.invoke('set_queue', { trackIds: [String(cur.id)], currentId: String(cur.id) }).catch(()=>{});
+                }
+            } catch (_) {}
             const nowPlaying = await this.invoke('play', { track_id: trackId, trackId });
             if (nowPlaying && nowPlaying.track) {
                 this.updatePlayerBar(nowPlaying.track);
@@ -14,6 +25,8 @@ export const playerMethods = {
                 const track = this.tracks.find(t => t.id === trackId);
                 if (track) this.updatePlayerBar(track);
             }
+            // Immediate bar sync for mobile where HTMX swap may not have fired yet
+            try { if (window.Auralis && window.Auralis.player) window.Auralis.player.hydrateState().catch(()=>{}); } catch (_) {}
         } catch (err) {
             const msg = String(err || 'unknown playback error');
             console.error(`[playTrack] failed id=${trackId}:`, msg);

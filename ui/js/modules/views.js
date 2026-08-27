@@ -129,6 +129,15 @@ export const viewMethods = {
         }
     },
 
+    _syncPlayerBar() {
+        // Re-sync mini-player bar with Rust after view navigation (fixes 01:39-01:44 desync)
+        try {
+            if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.hydrateState === 'function') {
+                window.Auralis.player.hydrateState().catch(()=>{});
+            }
+        } catch (_) {}
+    }
+
     async loadHomeView() {
         try {
             const page = await this.invoke('get_tracks', { filter: { limit: 12 } });
@@ -140,7 +149,7 @@ export const viewMethods = {
                 this.tracks = page.tracks;
                 if (shelf) {
                     shelf.innerHTML = page.tracks.slice(0, 6).map(track => `
-                        <div class="card album-card neu-glass" onclick="window.Auralis.bridge.playTrack('${track.id}')" style="cursor: pointer;">
+                        <div class="card album-card neu-glass" data-track-id="${track.id}" data-role="play-card" style="cursor: pointer; touch-action: manipulation;">
                             <div class="card-artwork">
                                 ${track.album_art_path ? this.artImgTag(track.album_art_path, track.title) : `<i data-lucide="disc-3"></i>`}
                             </div>
@@ -150,11 +159,25 @@ export const viewMethods = {
                             </div>
                         </div>
                     `).join('');
+                    // Delegate clicks/touches robustly for mobile WebView (fixes 01:40-01:42 swallowed taps)
+                    if (shelf && !shelf.dataset.bound) {
+                        shelf.dataset.bound = 'true';
+                        const handler = (e) => {
+                            const card = e.target.closest && e.target.closest('[data-role="play-card"]');
+                            if (!card || !shelf.contains(card)) return;
+                            e.preventDefault();
+                            const tid = card.dataset.trackId;
+                            if (tid) window.Auralis.bridge.playTrack(tid);
+                        };
+                        shelf.addEventListener('click', handler);
+                        shelf.addEventListener('touchend', handler, { passive: false });
+                    }
                 }
                 if (trackList) {
                     this.renderTrackRows(trackList, page.tracks.slice(0, 6));
                 }
                 if (window.lucide) window.lucide.createIcons();
+                this._syncPlayerBar();
             } else {
                 if (container) {
                     container.innerHTML = `
@@ -666,7 +689,7 @@ export const viewMethods = {
         container.innerHTML = tracks.map(track => {
             const isFav = Boolean(track.is_favorite);
             return `
-            <div class="track-row neu-glass" data-track-id="${track.id}" onclick="window.Auralis.bridge.playTrack('${track.id}')" style="cursor: pointer; margin-bottom: var(--space-2); border-radius: var(--radius-md);">
+            <div class="track-row neu-glass" data-track-id="${track.id}" data-role="play-row" style="cursor: pointer; margin-bottom: var(--space-2); border-radius: var(--radius-md); touch-action: manipulation;">
                 <div class="track-row-artwork">
                     ${track.album_art_path ? this.artImgTag(track.album_art_path, track.title) : `<i data-lucide="music"></i>`}
                 </div>
@@ -676,7 +699,7 @@ export const viewMethods = {
                 </div>
                 <span class="track-row-duration">${this.formatTime(track.duration_secs || 0)}</span>
                 <div class="track-row-actions" onclick="event.stopPropagation()">
-                    <button class="btn btn-ghost btn-icon" title="Play" onclick="window.Auralis.bridge.playTrack('${track.id}')">
+                    <button class="btn btn-ghost btn-icon" title="Play" data-role="play-btn" data-track-id="${track.id}">
                         <i data-lucide="play"></i>
                     </button>
                     <button class="btn btn-ghost btn-icon ${isFav ? 'liked' : ''}" style="${isFav ? 'color: var(--like);' : ''}" title="Like" onclick="window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)">
@@ -686,6 +709,30 @@ export const viewMethods = {
             </div>
         `;
         }).join('');
+
+        // Delegate row taps for mobile WebView reliability (fixes 01:40-01:44 swallowed taps)
+        if (container && !container.dataset.bound) {
+            container.dataset.bound = 'true';
+            const rowHandler = (e) => {
+                // Ignore clicks on action buttons handled separately
+                if (e.target.closest && e.target.closest('.track-row-actions')) {
+                    const playBtn = e.target.closest('[data-role="play-btn"]');
+                    if (playBtn) {
+                        e.preventDefault(); e.stopPropagation();
+                        const tid = playBtn.dataset.trackId;
+                        if (tid) window.Auralis.bridge.playTrack(tid);
+                    }
+                    return;
+                }
+                const row = e.target.closest && e.target.closest('[data-role="play-row"]');
+                if (!row || !container.contains(row)) return;
+                e.preventDefault();
+                const tid = row.dataset.trackId;
+                if (tid) window.Auralis.bridge.playTrack(tid);
+            };
+            container.addEventListener('click', rowHandler);
+            container.addEventListener('touchend', rowHandler, { passive: false });
+        }
 
         if (window.lucide) window.lucide.createIcons();
     }
