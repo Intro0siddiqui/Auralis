@@ -39,13 +39,11 @@ export const viewMethods = {
     },
 
     async loadLibraryView() {
-        const expected = 'library';
         const trackList = document.querySelector('.page-library .track-list');
         if (!trackList) return;
 
         try {
             const page = await this.invoke('get_tracks');
-            if (this.activeView !== expected) return;
             if (!document.querySelector('.page-library .track-list')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
@@ -121,10 +119,10 @@ export const viewMethods = {
                             <i data-lucide="file-plus-2"></i>
                             Import Audio
                         </label>
-                        <label class="btn btn-secondary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+                        <button type="button" class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
                             <i data-lucide="folder-search"></i>
                             Scan Storage
-                        </label>
+                        </button>
                     </div>
                 </div>
             `;
@@ -204,11 +202,11 @@ export const viewMethods = {
                                     <i data-lucide="file-plus-2"></i>
                                     Import Audio
                                 </label>
-                                <label class="btn btn-secondary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+                                <button type="button" class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
                                     <i data-lucide="folder-search"></i>
                                     Scan Storage
-                                </label>
-                                <button class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML">
+                                </button>
+                                <button type="button" class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
                                     <i data-lucide="download"></i>
                                     Download Audio
                                 </button>
@@ -224,13 +222,11 @@ export const viewMethods = {
     },
 
     async loadAlbumsView() {
-        const expected = 'albums';
         const grid = document.getElementById('albums-grid') || document.querySelector('.page-albums .grid');
         if (!grid) return;
 
         try {
             const page = await this.invoke('get_tracks');
-            if (this.activeView !== expected) return;
             if (!document.getElementById('albums-grid') && !document.querySelector('.page-albums .grid')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
@@ -242,9 +238,10 @@ export const viewMethods = {
                     }
                     albumMap.get(albumName).tracks.push(t);
                 }
+                this._albumMap = albumMap;
 
                 grid.innerHTML = Array.from(albumMap.values()).map(album => `
-                    <div class="card album-card neu-glass" onclick="window.Auralis.bridge.playTrack('${album.tracks[0].id}')" style="cursor: pointer;">
+                    <div class="card album-card neu-glass" data-album-name="${this.escapeHtml(album.name)}" data-role="play-album" style="cursor: pointer; touch-action: manipulation;">
                         <div class="card-artwork">
                             ${album.art ? this.artImgTag(album.art, album.name) : `<i data-lucide="disc-3"></i>`}
                         </div>
@@ -254,6 +251,22 @@ export const viewMethods = {
                         </div>
                     </div>
                 `).join('');
+                if (grid && !grid.dataset.bound) {
+                    grid.dataset.bound = 'true';
+                    const handler = (e) => {
+                        const card = e.target.closest && e.target.closest('[data-role="play-album"]');
+                        if (!card || !grid.contains(card)) return;
+                        e.preventDefault();
+                        const albName = card.dataset.albumName;
+                        const alb = albName && this._albumMap && this._albumMap.get(albName);
+                        if (alb && alb.tracks && alb.tracks.length > 0) {
+                            this.tracks = alb.tracks;
+                            window.Auralis.bridge.playTrack(alb.tracks[0].id);
+                        }
+                    };
+                    grid.addEventListener('click', handler);
+                    grid.addEventListener('touchend', handler, { passive: false });
+                }
                 if (window.lucide) window.lucide.createIcons();
             } else {
                 grid.innerHTML = `
@@ -271,13 +284,11 @@ export const viewMethods = {
     },
 
     async loadArtistsView() {
-        const expected = 'artists';
         const grid = document.getElementById('artists-grid') || document.querySelector('.page-artists .grid');
         if (!grid) return;
 
         try {
             const page = await this.invoke('get_tracks');
-            if (this.activeView !== expected) return;
             if (!document.getElementById('artists-grid') && !document.querySelector('.page-artists .grid')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
@@ -289,9 +300,10 @@ export const viewMethods = {
                     }
                     artistMap.get(artistName).tracks.push(t);
                 }
+                this._artistMap = artistMap;
 
                 grid.innerHTML = Array.from(artistMap.values()).map(artist => `
-                    <div class="card artist-card neu-glass" onclick="window.Auralis.bridge.playTrack('${artist.tracks[0].id}')" style="cursor: pointer;">
+                    <div class="card artist-card neu-glass" data-artist-name="${this.escapeHtml(artist.name)}" data-role="play-artist" style="cursor: pointer; touch-action: manipulation;">
                         <div class="card-artwork">
                             <i data-lucide="user"></i>
                         </div>
@@ -301,6 +313,22 @@ export const viewMethods = {
                         </div>
                     </div>
                 `).join('');
+                if (grid && !grid.dataset.bound) {
+                    grid.dataset.bound = 'true';
+                    const handler = (e) => {
+                        const card = e.target.closest && e.target.closest('[data-role="play-artist"]');
+                        if (!card || !grid.contains(card)) return;
+                        e.preventDefault();
+                        const artName = card.dataset.artistName;
+                        const art = artName && this._artistMap && this._artistMap.get(artName);
+                        if (art && art.tracks && art.tracks.length > 0) {
+                            this.tracks = art.tracks;
+                            window.Auralis.bridge.playTrack(art.tracks[0].id);
+                        }
+                    };
+                    grid.addEventListener('click', handler);
+                    grid.addEventListener('touchend', handler, { passive: false });
+                }
                 if (window.lucide) window.lucide.createIcons();
             } else {
                 grid.innerHTML = `
@@ -318,16 +346,17 @@ export const viewMethods = {
     },
 
     async loadPlaylistsView() {
-        const expected = 'playlists';
         const grid = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
         const detail = document.getElementById('playlist-detail');
-        if (detail) detail.style.display = 'none';
-        if (grid) grid.style.display = 'grid';
-        if (!grid) return;
+        if (detail && detail.style.display !== 'block') {
+            detail.style.display = 'none';
+            if (grid) grid.style.display = 'grid';
+        }
+        if (!grid && !detail) return;
 
         try {
             const playlists = await this.invoke('get_playlists');
-            if (this.activeView !== expected) return;
+            if (!document.getElementById('playlists-grid') && !document.querySelector('.page-playlists .grid')) return;
             if (playlists && playlists.length > 0) {
                 grid.innerHTML = playlists.map(pl => {
                     const isSmart = Boolean(pl.is_smart);
@@ -392,6 +421,7 @@ export const viewMethods = {
                 return;
             }
             const [playlist, tracks] = result;
+            this.tracks = tracks || [];
             const detailEl = document.getElementById('playlist-detail');
             const gridEl = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
 
@@ -474,8 +504,7 @@ export const viewMethods = {
     async loadSearchView() {
         const form = document.getElementById('search-form');
         const resultsContainer = document.getElementById('search-results');
-        if (!form || !resultsContainer || form.dataset.bound) return;
-        form.dataset.bound = 'true';
+        if (!form || !resultsContainer) return;
 
         const performSearch = async () => {
             const input = form.querySelector('input[name="q"]');
@@ -483,7 +512,9 @@ export const viewMethods = {
 
             try {
                 const page = await this.invoke('get_tracks', { filter: { search: input.value.trim() } });
+                if (!document.getElementById('search-results')) return;
                 if (page && page.tracks && page.tracks.length > 0) {
+                    this.tracks = page.tracks;
                     this.renderTrackRows(resultsContainer, page.tracks);
                 } else {
                     resultsContainer.innerHTML = `
@@ -500,26 +531,36 @@ export const viewMethods = {
             }
         };
 
-        form.addEventListener('submit', (e) => { e.preventDefault(); performSearch(); });
+        if (form._searchHandler) form.removeEventListener('submit', form._searchHandler);
+        form._searchHandler = (e) => { e.preventDefault(); performSearch(); };
+        form.addEventListener('submit', form._searchHandler);
+        form.dataset.bound = 'true';
+
         const searchInput = form.querySelector('input[name="q"]');
         if (searchInput) {
+            if (searchInput._inputHandler) searchInput.removeEventListener('input', searchInput._inputHandler);
             let debounceTimer;
-            searchInput.addEventListener('input', () => {
+            searchInput._inputHandler = () => {
                 clearTimeout(debounceTimer);
                 debounceTimer = setTimeout(performSearch, 300);
-            });
+            };
+            searchInput.addEventListener('input', searchInput._inputHandler);
         }
     },
 
     async loadSettingsView() {
         const settingsView = document.querySelector('.page-settings, #settings-view');
-        if (!settingsView || settingsView.dataset.bound) return;
-        settingsView.dataset.bound = 'true';
+        if (!settingsView) return;
 
         try {
             const settings = await this.invoke('get_settings');
             if (!settings) return;
+            if (!document.querySelector('.page-settings, #settings-view')) return;
             this.currentSettings = settings;
+            this.currentSettings.audio = this.currentSettings.audio || {};
+            this.currentSettings.downloads = this.currentSettings.downloads || {};
+            this.currentSettings.sync = this.currentSettings.sync || {};
+            this.currentSettings.appearance = this.currentSettings.appearance || {};
 
             const volInput = settingsView.querySelector('input[name="volume"]');
             const volBadge = settingsView.querySelector('#settings-volume-val');
@@ -593,6 +634,12 @@ export const viewMethods = {
                 }
             }
 
+            if (settingsView.dataset.bound) {
+                if (window.lucide) window.lucide.createIcons();
+                return;
+            }
+            settingsView.dataset.bound = 'true';
+
             const saveSettings = async () => {
                 if (!this.currentSettings) return;
                 try {
@@ -608,7 +655,8 @@ export const viewMethods = {
                     if (volBadge) volBadge.textContent = `${e.target.value}%`;
                 });
                 volInput.addEventListener('change', async (e) => {
-                    if (this.currentSettings && this.currentSettings.audio) {
+                    if (this.currentSettings) {
+                        this.currentSettings.audio = this.currentSettings.audio || {};
                         this.currentSettings.audio.volume = parseFloat(e.target.value) / 100;
                         await saveSettings();
                     }
@@ -617,7 +665,8 @@ export const viewMethods = {
 
             if (downloadPathInput) {
                 downloadPathInput.addEventListener('change', async (e) => {
-                    if (this.currentSettings && this.currentSettings.downloads) {
+                    if (this.currentSettings) {
+                        this.currentSettings.downloads = this.currentSettings.downloads || {};
                         this.currentSettings.downloads.download_path = e.target.value;
                         await saveSettings();
                     }
@@ -626,7 +675,8 @@ export const viewMethods = {
 
             if (formatSelect) {
                 formatSelect.addEventListener('change', async (e) => {
-                    if (this.currentSettings && this.currentSettings.downloads) {
+                    if (this.currentSettings) {
+                        this.currentSettings.downloads = this.currentSettings.downloads || {};
                         this.currentSettings.downloads.default_format = e.target.value;
                         await saveSettings();
                     }
@@ -635,7 +685,8 @@ export const viewMethods = {
 
             if (ytCookieInput) {
                 ytCookieInput.addEventListener('change', async (e) => {
-                    if (this.currentSettings && this.currentSettings.downloads) {
+                    if (this.currentSettings) {
+                        this.currentSettings.downloads = this.currentSettings.downloads || {};
                         this.currentSettings.downloads.youtube_cookie = e.target.value || null;
                         await saveSettings();
                     }
@@ -644,7 +695,8 @@ export const viewMethods = {
 
             if (ytPoTokenInput) {
                 ytPoTokenInput.addEventListener('change', async (e) => {
-                    if (this.currentSettings && this.currentSettings.downloads) {
+                    if (this.currentSettings) {
+                        this.currentSettings.downloads = this.currentSettings.downloads || {};
                         this.currentSettings.downloads.youtube_po_token = e.target.value || null;
                         await saveSettings();
                     }
@@ -655,7 +707,8 @@ export const viewMethods = {
                 btn.addEventListener('click', async () => {
                     const selectedTheme = btn.dataset.theme;
                     themeOptions.forEach(opt => opt.classList.toggle('active', opt === btn));
-                    if (this.currentSettings && this.currentSettings.appearance) {
+                    if (this.currentSettings) {
+                        this.currentSettings.appearance = this.currentSettings.appearance || {};
                         this.currentSettings.appearance.theme = selectedTheme;
                         this.applyTheme(selectedTheme);
                         await saveSettings();
@@ -665,7 +718,8 @@ export const viewMethods = {
 
             if (useSystemDownloadsToggle) {
                 useSystemDownloadsToggle.addEventListener('click', async () => {
-                    if (this.currentSettings && this.currentSettings.downloads) {
+                    if (this.currentSettings) {
+                        this.currentSettings.downloads = this.currentSettings.downloads || {};
                         const newState = !useSystemDownloadsToggle.classList.contains('active');
                         useSystemDownloadsToggle.classList.toggle('active', newState);
                         useSystemDownloadsToggle.setAttribute('aria-checked', newState.toString());
@@ -677,7 +731,8 @@ export const viewMethods = {
 
             if (syncToggle) {
                 syncToggle.addEventListener('click', async () => {
-                    if (this.currentSettings && this.currentSettings.sync) {
+                    if (this.currentSettings) {
+                        this.currentSettings.sync = this.currentSettings.sync || {};
                         const newState = !syncToggle.classList.contains('active');
                         syncToggle.classList.toggle('active', newState);
                         syncToggle.setAttribute('aria-checked', newState.toString());
@@ -689,7 +744,8 @@ export const viewMethods = {
 
             if (wifiToggle) {
                 wifiToggle.addEventListener('click', async () => {
-                    if (this.currentSettings && this.currentSettings.sync) {
+                    if (this.currentSettings) {
+                        this.currentSettings.sync = this.currentSettings.sync || {};
                         const newState = !wifiToggle.classList.contains('active');
                         wifiToggle.classList.toggle('active', newState);
                         wifiToggle.setAttribute('aria-checked', newState.toString());
@@ -718,7 +774,7 @@ export const viewMethods = {
                     <div class="track-row-subtitle">${this.escapeHtml(track.artist || 'Unknown Artist')} — ${this.escapeHtml(track.album || 'Single')}</div>
                 </div>
                 <span class="track-row-duration">${this.formatTime(track.duration_secs || 0)}</span>
-                <div class="track-row-actions" onclick="event.stopPropagation()">
+                <div class="track-row-actions" onclick="event.stopPropagation()" ontouchend="event.stopPropagation()">
                     <button class="btn btn-ghost btn-icon" title="Play" data-role="play-btn" data-track-id="${track.id}">
                         <i data-lucide="play"></i>
                     </button>
