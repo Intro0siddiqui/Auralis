@@ -317,12 +317,18 @@ export const coreMethods = {
                 this.loadDownloadView();
             }
         });
-        // Delegated fallback — prevents native navigation to "/" even if per-form handler missed (htmx cache)
+        // Delegated form submit handler — dispatches custom document events for download and search forms
         document.addEventListener('submit', (e) => {
             const t = e.target;
-            if (t && (t.id === 'download-form' || t.id === 'youtube-search-form')) {
+            if (!t) return;
+            if (t.id === 'download-form') {
                 e.preventDefault();
                 e.stopPropagation();
+                document.dispatchEvent(new CustomEvent('auralis:submit:download', { detail: { form: t } }));
+            } else if (t.id === 'youtube-search-form') {
+                e.preventDefault();
+                e.stopPropagation();
+                document.dispatchEvent(new CustomEvent('auralis:submit:search', { detail: { form: t } }));
             }
         }, true);
     },

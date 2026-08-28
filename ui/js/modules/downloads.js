@@ -7,6 +7,7 @@ export const downloadMethods = {
     // Pending download contexts for 403 auto-retry (id -> { resolved, opts, originalUrl, format, retryCount })
     _pendingDownloadContexts: null,
     _downloadRetryListenerBound: false,
+    _downloadSubmitListenersBound: false,
 
     _ensurePendingMap() {
         if (!this._pendingDownloadContexts) this._pendingDownloadContexts = new Map();
@@ -25,6 +26,19 @@ export const downloadMethods = {
                 this._handle403AutoRetry(p).catch((e) => console.warn('[Downloads] 403 auto-retry handler error', e?.message || e));
             });
         } catch (_) {}
+    },
+
+    _ensureDownloadSubmitListeners() {
+        if (this._downloadSubmitListenersBound) return;
+        this._downloadSubmitListenersBound = true;
+        document.addEventListener('auralis:submit:download', (e) => {
+            const form = (e.detail && e.detail.form) || document.getElementById('download-form');
+            this.handleDownloadFormSubmit(e, form);
+        });
+        document.addEventListener('auralis:submit:search', (e) => {
+            const form = (e.detail && e.detail.form) || document.getElementById('youtube-search-form');
+            this.handleSearchFormSubmit(e, form);
+        });
     },
 
     async _handle403AutoRetry(p) {
@@ -158,72 +172,70 @@ export const downloadMethods = {
         }
     },
 
-    async loadDownloadView() {
+    async handleDownloadFormSubmit(e, form) {
+        if (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        form = form || document.getElementById('download-form');
+        if (!form) return;
+        const urlInput = form.querySelector('input[name="url"]');
+        if (!urlInput || !urlInput.value) return;
+
+        const url = urlInput.value.trim();
+        if (!url.startsWith('https://')) {
+            this.showToast('Only secure HTTPS URLs are supported', 'error');
+            return;
+        }
+        if (!window.AuralisYouTube) {
+            this.showToast('YouTube resolver unavailable', 'error');
+            return;
+        }
+
+        const opts = this.getDownloadOptions(form);
+        this.showToast('Resolving source…', 'info');
+        try {
+            this._ensureDownloadRetryListener();
+            const resolved = await window.AuralisYouTube.resolve(url, opts);
+            if (resolved.kind === 'playlist') {
+                await this.startPlaylistDownloads(resolved.items, 'm4a', opts, urlInput);
+                return;
+            }
+            const result = await this.downloadResolvedTrack(resolved, 'm4a', opts, url);
+            if (result) {
+                this.showToast('Download started!', 'success');
+                urlInput.value = '';
+            }
+        } catch (err) {
+            const msg = err && err.message ? err.message : String(err);
+            console.groupCollapsed(`%c[YouTube Resolve Failed] ${url}`, 'color:#ff7a45');
+            console.error('DIAGNOSTIC resolve_failed', { url, opts, error: msg, stack: err && err.stack });
+            console.error(err);
+            console.groupEnd();
+            try { window.__auralisDownloadDiagnostics = window.__auralisDownloadDiagnostics || []; window.__auralisDownloadDiagnostics.push({ at: new Date().toISOString(), kind: 'resolve_failed', url, error: msg }); } catch (_) {}
+            this.showToast(`Resolve failed: ${msg}`, 'error', 6000);
+        }
+    },
+
+    async handleSearchFormSubmit(e, searchForm) {
+        if (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        searchForm = searchForm || document.getElementById('youtube-search-form');
+        if (!searchForm) return;
+        const q = searchForm.querySelector('input[name="q"]');
+        if (!q || !q.value.trim()) return;
         const form = document.getElementById('download-form');
-        const searchForm = document.getElementById('youtube-search-form');
+        await this.performYouTubeSearch(q.value.trim(), this.getDownloadOptions(form || searchForm));
+    },
+
+    async loadDownloadView() {
+        this._ensureDownloadSubmitListeners();
+        const form = document.getElementById('download-form');
         if (!form) return;
 
         await this.ensureSettings();
-
-        // Rebind every swap: handles htmx history cache restoring data-bound without listeners (00:40.5 Download→Home)
-        if (form._auralisSubmitHandler) form.removeEventListener('submit', form._auralisSubmitHandler);
-        const _handler = async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const urlInput = form.querySelector('input[name="url"]');
-            if (!urlInput || !urlInput.value) return;
-
-            const url = urlInput.value.trim();
-            if (!url.startsWith('https://')) {
-                this.showToast('Only secure HTTPS URLs are supported', 'error');
-                return;
-            }
-            if (!window.AuralisYouTube) {
-                this.showToast('YouTube resolver unavailable', 'error');
-                return;
-            }
-
-            const opts = this.getDownloadOptions(form);
-            this.showToast('Resolving source…', 'info');
-            try {
-                this._ensureDownloadRetryListener();
-                const resolved = await window.AuralisYouTube.resolve(url, opts);
-                if (resolved.kind === 'playlist') {
-                    await this.startPlaylistDownloads(resolved.items, 'm4a', opts, urlInput);
-                    return;
-                }
-                const result = await this.downloadResolvedTrack(resolved, 'm4a', opts, url);
-                if (result) {
-                    this.showToast('Download started!', 'success');
-                    urlInput.value = '';
-                }
-            } catch (err) {
-                const msg = err && err.message ? err.message : String(err);
-                console.groupCollapsed(`%c[YouTube Resolve Failed] ${url}`, 'color:#ff7a45');
-                console.error('DIAGNOSTIC resolve_failed', { url, opts, error: msg, stack: err && err.stack });
-                console.error(err);
-                console.groupEnd();
-                try { window.__auralisDownloadDiagnostics = window.__auralisDownloadDiagnostics || []; window.__auralisDownloadDiagnostics.push({ at: new Date().toISOString(), kind: 'resolve_failed', url, error: msg }); } catch (_) {}
-                this.showToast(`Resolve failed: ${msg}`, 'error', 6000);
-            }
-        };
-        form._auralisSubmitHandler = _handler;
-        form.addEventListener('submit', _handler);
-        form.dataset.bound = 'true';
-
-        if (searchForm) {
-            if (searchForm._auralisSearchHandler) searchForm.removeEventListener('submit', searchForm._auralisSearchHandler);
-            const _searchHandler = async (ev) => {
-                ev.preventDefault();
-                ev.stopPropagation();
-                const q = searchForm.querySelector('input[name="q"]');
-                if (!q || !q.value.trim()) return;
-                await this.performYouTubeSearch(q.value.trim(), this.getDownloadOptions(form || searchForm));
-            };
-            searchForm._auralisSearchHandler = _searchHandler;
-            searchForm.addEventListener('submit', _searchHandler);
-            searchForm.dataset.bound = 'true';
-        }
     },
 
     async performYouTubeSearch(query, opts) {
