@@ -381,7 +381,7 @@ impl DesktopScanner {
                 .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let size = meta.len() as u64;
+            let size = meta.len();
             Ok::<(i64, u64), ScannerError>((mtime, size))
         })
         .await
