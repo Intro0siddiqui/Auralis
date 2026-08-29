@@ -504,6 +504,15 @@ impl AndroidScanner {
                 continue;
             }
 
+            // Strict scope check: only process files within standard Music or Download folders
+            let path_lower = path_str.to_ascii_lowercase();
+            let is_music_or_download = path_lower.contains("/music/")
+                || path_lower.contains("/download/")
+                || path_lower.contains("/downloads/");
+            if !is_music_or_download {
+                continue;
+            }
+
             let existing = track_repo
                 .find_by_path(&path_str)
                 .await

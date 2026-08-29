@@ -36,8 +36,10 @@ object MediaStoreScanner {
             MediaStore.Audio.Media.ALBUM_ID
         )
 
-        // Filter out non-music / ringtones / tiny sound effects (< 10 KB)
-        val selection = "((${MediaStore.Audio.Media.IS_MUSIC} != 0) OR (${MediaStore.Audio.Media.IS_PODCAST} != 0) OR (${MediaStore.Audio.Media.IS_AUDIOBOOK} != 0)) AND (${MediaStore.Audio.Media.SIZE} > 10240)"
+        // Filter: only audio located in standard Music or Download directories, size > 10 KB
+        val selection = "((${MediaStore.Audio.Media.IS_MUSIC} != 0) OR (${MediaStore.Audio.Media.IS_PODCAST} != 0) OR (${MediaStore.Audio.Media.IS_AUDIOBOOK} != 0)) " +
+                "AND (${MediaStore.Audio.Media.SIZE} > 10240) " +
+                "AND (${MediaStore.Audio.Media.DATA} LIKE '%/Music/%' OR ${MediaStore.Audio.Media.DATA} LIKE '%/Download/%' OR ${MediaStore.Audio.Media.DATA} LIKE '%/Downloads/%')"
         val sortOrder = "${MediaStore.Audio.Media.DATE_ADDED} DESC"
 
         try {
