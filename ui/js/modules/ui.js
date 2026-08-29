@@ -96,7 +96,7 @@ export const uiMethods = {
         if (!path) return '';
         const safeAlt = this.escapeHtml(altText || '');
         const src = this.assetUrl(path);
-        const jsonPath = JSON.stringify(path).replace(/</g, '\\u003c');
+        const jsonPath = JSON.stringify(path).replace(/</g, '\\u003c').replace(/"/g, '&quot;');
         return `<img src="${src}" alt="${safeAlt}" onerror="if(!this.dataset.fb){this.dataset.fb='1';window.Auralis.bridge.embedArt(this, ${jsonPath})}">`;
     },
 

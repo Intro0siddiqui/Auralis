@@ -497,7 +497,7 @@ pub async fn clear_queue(
 /// Replace the playback queue wholesale (used to make Next/Prev context-aware
 /// when playing from Library/Home/Playlist). Sets queue = tracks, current_index
 /// = index of current track (or 0 if id not found). Called by JS before `play`.
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn set_queue(
     track_ids: Vec<Uuid>,
     current_id: Option<Uuid>,

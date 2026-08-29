@@ -292,14 +292,16 @@ export const coreMethods = {
 
     bindHTMXEvents() {
         if (document.body && typeof document.body.addEventListener === 'function') {
-            document.body.addEventListener('htmx:afterSwap', () => {
+            document.body.addEventListener('htmx:afterSwap', (evt) => {
                 if (window.lucide) window.lucide.createIcons();
                 this.ensureFileInput();
+                if (window.htmx && evt && evt.target) window.htmx.process(evt.target);
                 this.refreshCurrentView();
             });
-            document.body.addEventListener('htmx:restored', () => {
+            document.body.addEventListener('htmx:restored', (evt) => {
                 if (window.lucide) window.lucide.createIcons();
                 this.ensureFileInput();
+                if (window.htmx && evt && evt.target) window.htmx.process(evt.target);
                 this.refreshCurrentView();
             });
         }
@@ -308,6 +310,7 @@ export const coreMethods = {
             if (e.persisted) {
                 if (window.lucide) window.lucide.createIcons();
                 this.ensureFileInput();
+                if (window.htmx) window.htmx.process(document.body);
                 this.refreshCurrentView();
             }
         });
@@ -317,14 +320,45 @@ export const coreMethods = {
                 this.loadDownloadView();
             }
         });
-        // Delegated fallback — prevents native navigation to "/" even if per-form handler missed (htmx cache)
+        // Delegated form submit handler — dispatches custom document events for download and search forms
         document.addEventListener('submit', (e) => {
             const t = e.target;
-            if (t && (t.id === 'download-form' || t.id === 'youtube-search-form')) {
+            if (!t) return;
+            if (t.id === 'download-form') {
                 e.preventDefault();
                 e.stopPropagation();
+                document.dispatchEvent(new CustomEvent('auralis:submit:download', { detail: { form: t } }));
+            } else if (t.id === 'youtube-search-form') {
+                e.preventDefault();
+                e.stopPropagation();
+                document.dispatchEvent(new CustomEvent('auralis:submit:search', { detail: { form: t } }));
             }
         }, true);
+
+        // Delegated track play handlers across all views (Home, Library, Search)
+        if (document.body && !document.body.dataset.playDelegationBound) {
+            document.body.dataset.playDelegationBound = 'true';
+            const handlePlayDelegate = (e) => {
+                if (e.target.closest && e.target.closest('.track-row-actions')) {
+                    const playBtn = e.target.closest('[data-role="play-btn"]');
+                    if (playBtn) {
+                        e.preventDefault(); e.stopPropagation();
+                        const tid = playBtn.dataset.trackId;
+                        if (tid) this.playTrack(tid);
+                    }
+                    return;
+                }
+                const playEl = e.target.closest && e.target.closest('[data-role="play-row"], [data-role="play-card"]');
+                if (!playEl) return;
+                const tid = playEl.dataset.trackId;
+                if (tid) {
+                    e.preventDefault();
+                    this.playTrack(tid);
+                }
+            };
+            document.addEventListener('click', handlePlayDelegate);
+            document.addEventListener('touchend', handlePlayDelegate, { passive: false });
+        }
     },
 
     on(event, callback) {
