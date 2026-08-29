@@ -560,10 +560,14 @@ function buildInPageTestExpression(testUrl) {
             log('Invoking play invoke '+targetTrack.id);
             try { nowPlayingResult = await invoke('play', { track_id: targetTrack.id, trackId: targetTrack.id }); } catch(e){ nowPlayingResult = await invoke('play', { track_id: targetTrack.id }); }
         }
-        // Also click DOM play button as fallback (tests UI binding)
+
+        // Also click DOM play button as fallback only if playback is not already active
         try {
-            const btn = document.getElementById('play-pause-btn') || document.querySelector('.play-btn') || document.querySelector('[data-testid="play-btn"]');
-            if (btn) { btn.click(); log('Clicked DOM play button'); }
+            const isAlreadyPlaying = (window.Auralis?.player?.isPlaying) || (playbackStatePayload && playbackStatePayload.is_playing);
+            if (!isAlreadyPlaying) {
+                const btn = document.getElementById('play-pause-btn') || document.querySelector('.play-btn') || document.querySelector('[data-testid="play-btn"]');
+                if (btn) { btn.click(); log('Clicked DOM play button as fallback'); }
+            }
         } catch(_) {}
 
         // Verify playing + progress ticks
