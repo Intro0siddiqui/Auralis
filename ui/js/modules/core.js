@@ -292,12 +292,18 @@ export const coreMethods = {
 
     bindHTMXEvents() {
         if (document.body && typeof document.body.addEventListener === 'function') {
-            document.body.addEventListener('htmx:afterSwap', () => {
+            document.body.addEventListener('htmx:afterSwap', (evt) => {
+                if (window.htmx && evt.target) {
+                    window.htmx.process(evt.target);
+                }
                 if (window.lucide) window.lucide.createIcons();
                 this.ensureFileInput();
                 this.refreshCurrentView();
             });
-            document.body.addEventListener('htmx:restored', () => {
+            document.body.addEventListener('htmx:restored', (evt) => {
+                if (window.htmx && (evt.target || document.body)) {
+                    window.htmx.process(evt.target || document.body);
+                }
                 if (window.lucide) window.lucide.createIcons();
                 this.ensureFileInput();
                 this.refreshCurrentView();
@@ -305,6 +311,9 @@ export const coreMethods = {
         }
         // BF-cache restore when returning from external Files app (Android SAF) — htmx:afterSwap does not fire
         window.addEventListener('pageshow', (e) => {
+            if (window.htmx) {
+                window.htmx.process(document.body);
+            }
             if (e.persisted) {
                 if (window.lucide) window.lucide.createIcons();
                 this.ensureFileInput();

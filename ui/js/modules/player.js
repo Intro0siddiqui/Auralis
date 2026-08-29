@@ -4,6 +4,19 @@
  */
 
 export const playerMethods = {
+    async setQueue(trackIds, currentId = null) {
+        try {
+            await this.invoke('set_queue', {
+                trackIds: trackIds,
+                currentId: currentId,
+                track_ids: trackIds,
+                current_id: currentId,
+            });
+        } catch (err) {
+            console.error('Failed to set queue:', err);
+        }
+    },
+
     async playTrack(trackId) {
         if (!trackId) return;
         try {
@@ -11,11 +24,11 @@ export const playerMethods = {
             try {
                 const ids = (this.tracks && this.tracks.length) ? this.tracks.map(t => t.id) : [trackId];
                 if (ids.length > 1) {
-                    await this.invoke('set_queue', { trackIds: ids, currentId: trackId }).catch(()=>{});
+                    await this.setQueue(ids, trackId);
                 } else if (ids.length === 1) {
                     // Single track view — still set queue so Next wraps correctly
                     const cur = this.tracks.find(t => String(t.id) === String(trackId));
-                    if (cur) await this.invoke('set_queue', { trackIds: [String(cur.id)], currentId: String(cur.id) }).catch(()=>{});
+                    if (cur) await this.setQueue([String(cur.id)], String(cur.id));
                 }
             } catch (_) {}
             const nowPlaying = await this.invoke('play', { track_id: trackId, trackId });

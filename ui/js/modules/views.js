@@ -3,6 +3,20 @@
  * Handles loading, rendering, filtering and UI state transitions for all app views.
  */
 
+document.addEventListener('click', (evt) => {
+    const playBtn = evt.target.closest && evt.target.closest('.play-shelf-btn, .play-track-btn');
+    if (!playBtn) return;
+
+    const trackId = playBtn.dataset.firstTrackId || playBtn.dataset.trackId;
+    if (trackId) {
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.playTrack(trackId);
+        } else if (window.AuralisPlayer && typeof window.AuralisPlayer.playTrack === 'function') {
+            window.AuralisPlayer.playTrack(trackId);
+        }
+    }
+});
+
 export const viewMethods = {
     refreshCurrentView() {
         const content = document.getElementById('content');
