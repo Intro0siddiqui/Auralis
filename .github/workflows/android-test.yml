@@ -195,3 +195,13 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: bash scripts/android/run_emulator_test.sh "${{ steps.sign.outputs.apk_path }}"
+
+      - name: Upload Android E2E Screenshots & Logcat Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-e2e
+          path: |
+            test_screenshots/
+            *.log
+          retention-days: 14

@@ -126,9 +126,19 @@ else
 fi
 set -e
 
-# 7. Run CDP Node.js E2E test (player-working)
+# 7. Run CDP Node.js E2E test (player-working & background playback)
 echo "[7/9] Executing Player-Working E2E test via Node.js (sdcard→scan→play)..."
-# renamed e2e_download_test.js -> e2e_player_test.js (pure player, download not needed)
+# Send background Home intent to test background MediaPlaybackService notification controls
+echo "Testing background state transition via adb shell am start (HOME intent)..."
+adb shell am start -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null || true
+sleep 1
+echo "Sending media keyevents (KEYCODE_MEDIA_PLAY_PAUSE) to test MediaPlaybackService response..."
+adb shell input keyevent 85 2>/dev/null || true
+sleep 1
+# Bring MainActivity back to foreground
+adb shell am start -W -n "$MAIN_ACTIVITY" 2>/dev/null || true
+sleep 1
+
 if [ -f "${SCRIPT_DIR}/e2e_player_test.js" ]; then E2E_JS="${SCRIPT_DIR}/e2e_player_test.js"; else E2E_JS="${SCRIPT_DIR}/e2e_download_test.js"; fi
 CDP_PORT="$PORT" node "$E2E_JS"
 

@@ -38,6 +38,11 @@ scratch/
 *.profraw
 *.profdata
 
+# Test Fixtures & Screenshots
+scripts/tests/fixtures/*.wav
+scripts/tests/fixtures/*.mp3
+test_screenshots/
+
 # Release & Package Artifacts
 *.apk
 *.aab
