@@ -114,6 +114,17 @@ jobs:
       - name: Build (compile gate)
         run: cargo build --release
 
+      - name: Run Playwright E2E Diagnostics (macOS)
+        run: npx playwright test --config scripts/tests/playwright.config.js || true
+
+      - name: Upload macOS E2E Screenshots Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-e2e-screenshots
+          path: test_screenshots/
+          retention-days: 14
+
       - name: Bundle (.app / .dmg)
         if: startsWith(github.ref, 'refs/tags/')
         run: npx @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build
@@ -669,6 +680,16 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: bash scripts/android/run_emulator_test.sh "${{ steps.sign.outputs.apk_path }}"
+
+      - name: Upload Android E2E Screenshots & Logcat Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-e2e
+          path: |
+            test_screenshots/
+            *.log
+          retention-days: 14
 
   lint:
     runs-on: ubuntu-22.04

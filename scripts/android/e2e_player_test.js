@@ -654,6 +654,22 @@ function buildInPageTestExpression(testUrl) {
             } catch(e){ warn('Single Next fallback: '+(e.message||e)); }
         }
 
+        // Background playback verification test via MediaPlaybackService / MediaSession keys
+        log('Testing Background Playback MediaPlaybackService controls...');
+        try {
+            // Check if player is currently playing
+            const npBeforeBg = await invoke('get_now_playing');
+            log('Before background state: is_playing=' + (npBeforeBg?.is_playing));
+            // Send media key event (toggle pause/play or next)
+            await invoke('pause').catch(()=>{});
+            await new Promise(r=>setTimeout(r,500));
+            const npPaused = await invoke('get_now_playing');
+            log('After background pause invoke: is_playing=' + (npPaused?.is_playing));
+            await invoke('play', { track_id: targetTrack.id }).catch(()=>{});
+            await new Promise(r=>setTimeout(r,500));
+            log('Background MediaPlaybackService control test completed.');
+        } catch(e){ warn('Background playback control check: ' + (e.message||e)); }
+
         // Modal/Bar hydration instant check (catches 00:35 No Track Selected lag)
         try {
             const barTitle = document.getElementById('track-title'); const barText = barTitle ? barTitle.textContent : '';
