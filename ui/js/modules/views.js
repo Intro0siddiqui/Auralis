@@ -154,7 +154,7 @@ export const viewMethods = {
                 window.Auralis.player.hydrateState().catch(()=>{});
             }
         } catch (_) {}
-    }
+    },
 
     async loadHomeView() {
         const expected = 'home';
