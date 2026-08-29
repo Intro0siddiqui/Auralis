@@ -121,7 +121,7 @@ impl TrackRepository for SqliteTrackRepository {
             .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        let (where_sql, params_vec) = track_filter_where(&filter);
+        let (where_sql, mut params_vec) = track_filter_where(&filter);
         let mut sql = String::from("SELECT * FROM tracks ");
         sql.push_str(&where_sql);
 
@@ -143,11 +143,13 @@ impl TrackRepository for SqliteTrackRepository {
         ));
 
         if let Some(limit) = filter.limit {
-            sql.push_str(&format!(" LIMIT {}", limit));
+            sql.push_str(" LIMIT ?");
+            params_vec.push(Box::new(limit));
         }
 
         if let Some(offset) = filter.offset {
-            sql.push_str(&format!(" OFFSET {}", offset));
+            sql.push_str(" OFFSET ?");
+            params_vec.push(Box::new(offset));
         }
 
         let params_refs: Vec<&dyn rusqlite::ToSql> =
@@ -1054,6 +1056,43 @@ mod tests {
         assert_eq!(found.title, "Test Favorite Track");
 
         repo.set_favorite(&track_id_str, false).await.unwrap();
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_track_repository_limit_offset() {
+        let db_path = std::env::temp_dir().join(format!(
+            "test_auralis_repo_pagination_{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let repo = SqliteTrackRepository::new(db_arc);
+
+        for i in 1..=5 {
+            let track = Track::new(
+                format!("Track {:02}", i),
+                format!("/path/to/test_{}.mp3", i),
+                100 + i * 10,
+                AudioFormat::Mp3,
+            );
+            repo.insert(&track).await.unwrap();
+        }
+
+        let filter = TrackFilter {
+            sort_by: Some(TrackSortField::Title),
+            sort_desc: false,
+            limit: Some(2),
+            offset: Some(1),
+            ..Default::default()
+        };
+
+        let tracks = repo.find_all(filter).await.unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].title, "Track 02");
+        assert_eq!(tracks[1].title, "Track 03");
 
         let _ = std::fs::remove_file(&db_path);
     }
