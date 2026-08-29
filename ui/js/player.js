@@ -204,18 +204,24 @@ class PlayerController {
     }
 
     bindFullScreenPlayerListeners() {
+        let isHandlingMutation = false;
         const observer = new MutationObserver(() => {
-            // Re-wire on any overlay change; clear wired flag so update runs with latest currentTrack
-            const fp = document.getElementById('player-full');
-            if (fp) fp.dataset.wired = '';
-            this.wireFullScreenElements();
-            // Re-hydrate from Rust so modal never shows stale "No Track Selected" placeholder
-            this.hydrateState().catch(()=>{});
+            if (isHandlingMutation) return;
+            isHandlingMutation = true;
+            try {
+                const fp = document.getElementById('player-full');
+                if (fp && fp.dataset.wired !== 'true') {
+                    this.wireFullScreenElements();
+                    this.hydrateState().catch(() => {});
+                }
+            } finally {
+                isHandlingMutation = false;
+            }
         });
 
         const overlayRoot = document.getElementById('overlay-root');
         if (overlayRoot) {
-            observer.observe(overlayRoot, { childList: true, subtree: true });
+            observer.observe(overlayRoot, { childList: true, subtree: false });
         }
         document.body.addEventListener('htmx:afterSwap', (e) => {
             // HTMX swap for player-full may fire before observer; handle both

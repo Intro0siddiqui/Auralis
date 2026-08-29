@@ -193,7 +193,16 @@ export const downloadMethods = {
         const urlInput = form.querySelector('input[name="url"]');
         if (!urlInput || !urlInput.value) return;
 
-        const url = urlInput.value.trim();
+        let url = urlInput.value.trim();
+        if (!/^https?:\/\//i.test(url)) {
+            if (url.includes('youtube.com') || url.includes('youtu.be')) {
+                url = 'https://' + url;
+                urlInput.value = url;
+            } else if (/^[a-zA-Z0-9_-]{11}$/.test(url)) {
+                url = `https://www.youtube.com/watch?v=${url}`;
+                urlInput.value = url;
+            }
+        }
         if (!url.startsWith('https://')) {
             this.showToast('Only secure HTTPS URLs are supported', 'error');
             return;
