@@ -90,9 +90,14 @@
         left: 0;
         right: 0;
         height: var(--player-height-mobile);
-        padding: var(--space-2) var(--space-4);
+        padding: var(--space-2) var(--space-3);
         gap: var(--space-2);
         z-index: var(--z-player-bar);
+        overflow: hidden;
+    }
+
+    .mobile-player-progress {
+        display: block;
     }
 
     /* Android Soft Keyboard Active State */
@@ -107,22 +112,70 @@
     }
     
     .player-track {
-        width: 100%;
-        gap: var(--space-3);
+        flex: 1;
+        min-width: 0;
+        width: auto;
+        gap: var(--space-2);
     }
     
     .track-artwork {
-        width: 44px;
-        height: 44px;
+        width: 40px;
+        height: 40px;
+        flex-shrink: 0;
     }
     
     .track-info {
         flex: 1;
+        min-width: 0;
         overflow: hidden;
+    }
+
+    .track-title {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: var(--text-sm);
+    }
+
+    .track-artist {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: var(--text-xs);
     }
     
     .player-controls {
+        display: flex;
+        flex: 0 0 auto;
+        align-items: center;
+        justify-content: flex-end;
+        gap: var(--space-1);
+    }
+
+    .player-controls .control-buttons {
+        display: flex;
+        align-items: center;
+        gap: var(--space-1);
+    }
+
+    .player-controls #shuffle-btn,
+    .player-controls #prev-btn,
+    .player-controls #repeat-btn,
+    .player-controls .progress-container {
         display: none;
+    }
+
+    .player-controls #play-pause-btn,
+    .player-controls #next-btn {
+        display: inline-flex;
+        min-width: 40px;
+        min-height: 40px;
+        width: 40px;
+        height: 40px;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-full);
+        padding: 0;
     }
     
     .player-extra {
@@ -131,8 +184,8 @@
     
     .track-like {
         display: flex;
-        min-width: 44px;
-        min-height: 44px;
+        min-width: 36px;
+        min-height: 36px;
         align-items: center;
         justify-content: center;
     }

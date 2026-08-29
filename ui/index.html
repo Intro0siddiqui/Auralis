@@ -58,6 +58,11 @@
         
         <!-- Player Bar - static, not HTMX swapped -->
         <footer id="player-bar" class="neu-glass player-bar">
+            <!-- Slim Top Progress Line for Mobile Player Bar -->
+            <div class="mobile-player-progress">
+                <div class="mobile-player-progress-fill" id="mobile-progress-fill"></div>
+            </div>
+            
             <div class="player-track" hx-get="/partials/player-full.html" hx-target="#overlay-root" hx-swap="innerHTML" style="cursor:pointer">
                 <div class="track-artwork" id="current-artwork">
                     <div class="artwork-placeholder">

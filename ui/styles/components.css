@@ -508,6 +508,26 @@
    PLAYER BAR
    ========================================================================== */
 
+.mobile-player-progress {
+    display: none;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+    z-index: 10;
+}
+
+.mobile-player-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent-glow, rgba(99, 102, 241, 0.5));
+    transition: width 0.15s linear;
+}
+
 .player-track {
     display: flex;
     align-items: center;

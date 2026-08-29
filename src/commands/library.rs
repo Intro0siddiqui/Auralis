@@ -297,7 +297,6 @@ pub async fn import_audio_file(
     db: State<'_, Database>,
     name: String,
     data: Option<Vec<u8>>,
-    #[serde(alias = "data_base64")]
     data_base64: Option<String>,
 ) -> Result<Track, String> {
     tracing::info!(name = %name, has_data = data.is_some(), has_b64 = data_base64.is_some(), "Importing audio file");

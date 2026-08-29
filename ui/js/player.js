@@ -97,6 +97,7 @@ class PlayerController {
         this.progressTrack = document.getElementById('progress-track');
         this.progressFill = document.getElementById('progress-fill');
         this.progressHandle = document.getElementById('progress-handle');
+        this.mobileProgressFill = document.getElementById('mobile-progress-fill');
         this.timeCurrent = document.getElementById('time-current');
         this.timeTotal = document.getElementById('time-total');
         this.volumeSlider = document.getElementById('volume-slider');
@@ -777,20 +778,15 @@ class PlayerController {
     }
 
     updatePlayButton() {
+        const iconName = this.isPlaying ? 'pause' : 'play';
         // Player bar button
         if (this.playBtn) {
-            const icon = this.playBtn.querySelector('i');
-            if (icon) {
-                icon.setAttribute('data-lucide', this.isPlaying ? 'pause' : 'play');
-            }
+            this.playBtn.innerHTML = `<i data-lucide="${iconName}"></i>`;
         }
         // Full screen player button
         const fullPlay = document.getElementById('player-full-play');
         if (fullPlay) {
-            const icon = fullPlay.querySelector('i');
-            if (icon) {
-                icon.setAttribute('data-lucide', this.isPlaying ? 'pause' : 'play');
-            }
+            fullPlay.innerHTML = `<i data-lucide="${iconName}"></i>`;
         }
         if (window.lucide) window.lucide.createIcons();
     }
@@ -803,6 +799,9 @@ class PlayerController {
         // Player bar
         if (this.progressFill) {
             this.progressFill.style.width = `${pct}%`;
+        }
+        if (this.mobileProgressFill) {
+            this.mobileProgressFill.style.width = `${pct}%`;
         }
         if (this.progressHandle) {
             this.progressHandle.style.left = `${pct}%`;
