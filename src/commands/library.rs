@@ -319,12 +319,13 @@ pub async fn scan_library_paths(
 }
 
 /// Import an audio file directly from binary or base64 payload (bypasses Android 14/15/16 Scoped Storage restrictions)
-#[tauri::command(rename_all = "snake_case")]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn import_audio_file(
     app: tauri::AppHandle,
     db: State<'_, Database>,
     name: String,
     data: Option<Vec<u8>>,
+    #[serde(alias = "data_base64")]
     data_base64: Option<String>,
 ) -> Result<Track, String> {
     tracing::info!(name = %name, has_data = data.is_some(), has_b64 = data_base64.is_some(), "Importing audio file");

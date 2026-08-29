@@ -72,7 +72,16 @@ impl AndroidScanner {
                 ))
             })?;
 
-        let file_path = target_dir.join(name);
+        // Sanitize `name` to isolate the filename component. This prevents
+        // absolute paths (e.g., `/storage/emulated/0/...` or `content://...`)
+        // passed from Android SAF/SFS pickers from replacing `target_dir`
+        // when calling `target_dir.join(name)`.
+        let clean_name = Path::new(name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(name);
+
+        let file_path = target_dir.join(clean_name);
         let file_path_clone = file_path.clone();
         let bytes_owned = bytes.to_vec();
         let bytes_len = bytes_owned.len();
@@ -106,7 +115,7 @@ impl AndroidScanner {
                 );
                 let format = detect_format(&file_path).unwrap_or(AudioFormat::Mp3);
                 Track::new(
-                    name.to_string(),
+                    clean_name.to_string(),
                     file_path.to_string_lossy().to_string(),
                     0,
                     format,
@@ -115,7 +124,7 @@ impl AndroidScanner {
         };
 
         if track.title.trim().is_empty() || track.title == "Unknown" {
-            track.title = name.to_string();
+            track.title = clean_name.to_string();
         }
 
         // Record the file's modification time so an incremental re-scan of
