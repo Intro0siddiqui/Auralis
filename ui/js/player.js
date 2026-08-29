@@ -280,10 +280,22 @@ class PlayerController {
     }
 
     wireFullScreenButtons() {
+        this.wireFullScreenCloseButton();
         this.wireFullScreenPlayButton();
         this.wireFullScreenNavButtons();
         this.wireFullScreenModeButtons();
         this.wireFullScreenLikeButton();
+    }
+
+    wireFullScreenCloseButton() {
+        const fullClose = document.getElementById('player-full-close') || document.querySelector('.player-full-close');
+        if (fullClose) {
+            fullClose.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const overlay = document.getElementById('overlay-root');
+                if (overlay) overlay.innerHTML = '';
+            });
+        }
     }
 
     wireFullScreenPlayButton() {

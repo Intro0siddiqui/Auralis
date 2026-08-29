@@ -1,5 +1,5 @@
 <div id="player-full" class="overlay modal--full glass-strong">
-    <button class="btn btn-ghost btn-icon player-full-close" onclick="document.getElementById('overlay-root').innerHTML = ''" aria-label="Close">
+    <button id="player-full-close" class="btn btn-ghost btn-icon player-full-close" onclick="event.stopPropagation(); document.getElementById('overlay-root').innerHTML = ''" aria-label="Close">
         <i data-lucide="x"></i>
     </button>
 
