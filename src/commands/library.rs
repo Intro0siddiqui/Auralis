@@ -216,15 +216,16 @@ pub async fn scan_library_paths(
             }
         };
 
-        emit_scan_start_logs(&app, "Android sandboxed library scan", "Sandboxed path", &scan_paths);
+        emit_scan_start_logs(
+            &app,
+            "Android sandboxed library scan",
+            "Sandboxed path",
+            &scan_paths,
+        );
 
         let android_scanner = crate::infrastructure::filesystem::AndroidScanner::new();
         let summary = android_scanner
-            .scan_sandboxed_dir(
-                &scan_paths,
-                repo,
-                Some(create_scan_progress_callback(&app)),
-            )
+            .scan_sandboxed_dir(&scan_paths, repo, Some(create_scan_progress_callback(&app)))
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Android scan failed");

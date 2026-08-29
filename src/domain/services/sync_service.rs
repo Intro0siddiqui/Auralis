@@ -541,7 +541,10 @@ mod tests {
         let sync_repo = Arc::new(SqliteSyncRepository::new(db_arc.clone()));
 
         let sync_engine = Arc::new(SyncEngine::new());
-        sync_engine.runtime().set_persistent_store(db_arc.clone()).await;
+        sync_engine
+            .runtime()
+            .set_persistent_store(db_arc.clone())
+            .await;
 
         let peer_id = Keypair::generate_ed25519().public().to_peer_id();
         let device = PairedDevice::with_peer_id(
@@ -555,7 +558,10 @@ mod tests {
         let service = SyncService::new(settings_repo, sync_repo, sync_engine.clone());
         service.init().await.unwrap();
 
-        let resolved = sync_engine.runtime().resolve_peer_id(&device.id.to_string()).await;
+        let resolved = sync_engine
+            .runtime()
+            .resolve_peer_id(&device.id.to_string())
+            .await;
         assert_eq!(resolved, Some(peer_id));
 
         let _ = std::fs::remove_file(&db_path);
