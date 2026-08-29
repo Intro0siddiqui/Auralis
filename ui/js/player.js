@@ -247,23 +247,37 @@ class PlayerController {
         const wasWired = fullPlayer.dataset.wired === 'true';
         fullPlayer.dataset.wired = 'true';
 
+        this.refreshFullScreenUI();
+        if (wasWired) return;
+
+        this.wireFullScreenControls();
+
+        if (window.lucide) window.lucide.createIcons();
+    }
+
+    refreshFullScreenUI() {
         this.updateFullScreenMetadata();
         this.updatePlayButton();
         this.updateProgressUI();
         this.updateVolumeUI();
         this.updateLikeUI();
         this.updateShuffleRepeatUI();
-        if (wasWired) return;
+    }
 
+    wireFullScreenControls() {
         this.wireFullScreenButtons();
         this.wireFullScreenProgressSlider();
         this.wireFullScreenVolumeSlider();
-
-        if (window.lucide) window.lucide.createIcons();
     }
 
     wireFullScreenButtons() {
-        // 1. Play / Pause
+        this.wireFullScreenPlayButton();
+        this.wireFullScreenNavButtons();
+        this.wireFullScreenModeButtons();
+        this.wireFullScreenLikeButton();
+    }
+
+    wireFullScreenPlayButton() {
         const fullPlay = document.getElementById('player-full-play');
         if (fullPlay) {
             fullPlay.addEventListener('click', (e) => {
@@ -271,8 +285,9 @@ class PlayerController {
                 this.togglePlay();
             });
         }
+    }
 
-        // 2. Previous / Next
+    wireFullScreenNavButtons() {
         const fullPrev = document.getElementById('player-full-prev');
         if (fullPrev) {
             fullPrev.addEventListener('click', (e) => {
@@ -287,8 +302,9 @@ class PlayerController {
                 this.next();
             });
         }
+    }
 
-        // 3. Shuffle / Repeat
+    wireFullScreenModeButtons() {
         const fullShuffle = document.getElementById('player-full-shuffle');
         if (fullShuffle) {
             fullShuffle.addEventListener('click', (e) => {
@@ -303,8 +319,9 @@ class PlayerController {
                 this.cycleRepeat();
             });
         }
+    }
 
-        // 4. Like / Favorite
+    wireFullScreenLikeButton() {
         const fullLike = document.getElementById('player-full-like');
         if (fullLike) {
             fullLike.addEventListener('click', (e) => {
