@@ -470,4 +470,272 @@ impl AndroidScanner {
 
         Ok(summary)
     }
+
+    /// Full Android library scan: combines sandboxed directories (`app_data_dir/music`, `app_data_dir/downloads`)
+    /// with system-wide MediaStore audio tracks.
+    pub async fn scan_library_paths_with_progress<F>(
+        &self,
+        sandboxed_dirs: &[PathBuf],
+        track_repo: Arc<dyn TrackRepository>,
+        mut progress_callback: Option<F>,
+    ) -> Result<ScanSummary, ScannerError>
+    where
+        F: FnMut(ScanProgress) + Send + 'static,
+    {
+        // 1. Scan sandboxed dirs
+        let mut summary = self
+            .scan_sandboxed_dir(sandboxed_dirs, track_repo.clone(), None::<fn(ScanProgress)>)
+            .await?;
+
+        // 2. Query system-wide MediaStore audio
+        let media_store_tracks = query_system_mediastore_audio();
+        let total_mediastore = media_store_tracks.len();
+        info!(
+            mediastore_count = total_mediastore,
+            "Processing system-wide MediaStore audio tracks"
+        );
+
+        for (idx, raw) in media_store_tracks.into_iter().enumerate() {
+            let path_buf = PathBuf::from(&raw.path);
+            let path_str = raw.path.clone();
+
+            // Skip if path is in sandboxed dirs to avoid double processing
+            if sandboxed_dirs.iter().any(|p| path_buf.starts_with(p)) {
+                continue;
+            }
+
+            let existing = track_repo
+                .find_by_path(&path_str)
+                .await
+                .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+
+            // Try to extract rich lofty metadata if file is directly readable
+            let path_buf_clone = path_buf.clone();
+            let file_readable = tokio::task::spawn_blocking(move || path_buf_clone.exists())
+                .await
+                .unwrap_or(false);
+
+            let extract_res = if file_readable {
+                let p_clone = path_buf.clone();
+                tokio::task::spawn_blocking(move || MetadataExtractor::extract(&p_clone))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+            } else {
+                None
+            };
+
+            let format = detect_format(&path_buf)
+                .or_else(|| {
+                    raw.mime_type.as_deref().and_then(|m| match m {
+                        "audio/mpeg" => Some(AudioFormat::Mp3),
+                        "audio/mp4" | "audio/aac" => Some(AudioFormat::M4a),
+                        "audio/flac" => Some(AudioFormat::Flac),
+                        "audio/ogg" | "audio/opus" => Some(AudioFormat::Ogg),
+                        "audio/wav" => Some(AudioFormat::Wav),
+                        _ => None,
+                    })
+                })
+                .unwrap_or(AudioFormat::Mp3);
+
+            let track = if let Some(mut t) = extract_res {
+                if t.album_art_path.is_none() && raw.art_uri.is_some() {
+                    t.album_art_path = raw.art_uri;
+                }
+                t
+            } else {
+                let title = if !raw.title.trim().is_empty() {
+                    raw.title.clone()
+                } else {
+                    path_buf
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Unknown".to_string())
+                };
+                let mut t = Track::new(
+                    title,
+                    path_str.clone(),
+                    (raw.duration_ms / 1000) as u32,
+                    format,
+                );
+                t.artist = raw
+                    .artist
+                    .filter(|s| !s.trim().is_empty() && s != "<unknown>");
+                t.album = raw
+                    .album
+                    .filter(|s| !s.trim().is_empty() && s != "<unknown>");
+                t.track_number = raw.track_number;
+                t.year = raw.year;
+                t.file_size = raw.size;
+                t.album_art_path = raw.art_uri.filter(|s| !s.trim().is_empty());
+                t
+            };
+
+            if let Some(existing_track) = existing {
+                let mut updated_track = track;
+                updated_track.id = existing_track.id;
+                updated_track.date_added = existing_track.date_added;
+                updated_track.last_played = existing_track.last_played;
+                updated_track.play_count = existing_track.play_count;
+                if updated_track.album_art_path.is_none() {
+                    updated_track.album_art_path = existing_track.album_art_path;
+                }
+                track_repo
+                    .update(&updated_track)
+                    .await
+                    .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+                summary.tracks_updated += 1;
+            } else {
+                track_repo
+                    .insert(&track)
+                    .await
+                    .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
+                summary.tracks_added += 1;
+            }
+
+            let processed = idx + 1;
+            let percentage = if total_mediastore > 0 {
+                (processed as f32 / total_mediastore as f32) * 100.0
+            } else {
+                100.0
+            };
+
+            if let Some(ref mut cb) = progress_callback {
+                cb(ScanProgress {
+                    current_file: path_str,
+                    total_files: total_mediastore,
+                    processed_files: processed,
+                    percentage,
+                    tracks_added: summary.tracks_added,
+                    tracks_updated: summary.tracks_updated,
+                    error_count: summary.errors.len(),
+                });
+            }
+        }
+
+        info!(
+            added = summary.tracks_added,
+            updated = summary.tracks_updated,
+            removed = summary.tracks_removed,
+            "Android system-wide and sandboxed scan completed"
+        );
+
+        Ok(summary)
+    }
+}
+
+/// Raw track representation returned by MediaStore ContentResolver query
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MediaStoreRawTrack {
+    pub id: i64,
+    pub path: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: u64,
+    pub track_number: Option<u32>,
+    pub year: Option<i32>,
+    pub size: u64,
+    pub mime_type: Option<String>,
+    pub art_uri: Option<String>,
+}
+
+#[cfg(target_os = "android")]
+fn cached_vm() -> Option<&'static jni::JavaVM> {
+    use std::sync::OnceLock;
+    static VM: OnceLock<jni::JavaVM> = OnceLock::new();
+    if let Some(vm) = VM.get() {
+        return Some(vm);
+    }
+    let ptr = crate::android_jni::INITIAL_VM.load(std::sync::atomic::Ordering::SeqCst);
+    if ptr.is_null() {
+        return None;
+    }
+    if let Ok(vm) = unsafe { jni::JavaVM::from_raw(ptr as *mut jni::sys::JavaVM) } {
+        let _ = VM.set(vm);
+        return VM.get();
+    }
+    None
+}
+
+#[cfg(target_os = "android")]
+fn with_attached_env<T>(
+    f: impl FnOnce(&mut jni::JNIEnv<'_>) -> Result<T, String>,
+) -> Option<Result<T, String>> {
+    let vm = cached_vm()?;
+    let mut guard = vm.attach_current_thread().ok()?;
+    let res = f(&mut guard);
+    if guard.exception_check().unwrap_or(false) {
+        let _ = guard.exception_clear();
+    }
+    match res {
+        Ok(v) => Some(Ok(v)),
+        Err(e) => {
+            if guard.exception_check().unwrap_or(false) {
+                let _ = guard.exception_clear();
+            }
+            Some(Err(e))
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn service_context() -> Option<jni::objects::JObject<'static>> {
+    let ctx = ndk_context::android_context().context();
+    if ctx.is_null() {
+        return None;
+    }
+    Some(unsafe { jni::objects::JObject::from_raw(ctx as jni::sys::jobject) })
+}
+
+#[cfg(target_os = "android")]
+pub fn query_system_mediastore_audio() -> Vec<MediaStoreRawTrack> {
+    let res = with_attached_env(|env| -> Result<String, String> {
+        let ctx = service_context().ok_or_else(|| "no android context".to_string())?;
+        let scanner_class = env
+            .find_class("com/auralis/v2/MediaStoreScanner")
+            .map_err(|e| format!("find MediaStoreScanner class: {e}"))?;
+        let result = env
+            .call_static_method(
+                scanner_class,
+                "queryAllAudio",
+                "(Landroid/content/Context;)Ljava/lang/String;",
+                &[jni::objects::JValue::Object(&ctx)],
+            )
+            .map_err(|e| format!("call queryAllAudio: {e}"))?
+            .l()
+            .map_err(|e| format!("return l: {e}"))?;
+        if result.is_null() {
+            return Ok("[]".to_string());
+        }
+        let j_str: jni::objects::JString<'_> = jni::objects::JString::from(result);
+        let s: String = env
+            .get_string(&j_str)
+            .map(|st| st.into())
+            .unwrap_or_default();
+        Ok(s)
+    });
+
+    let json_str = match res {
+        Some(Ok(s)) => s,
+        Some(Err(e)) => {
+            warn!(error = %e, "Failed to query system MediaStore audio via JNI");
+            return Vec::new();
+        }
+        None => {
+            warn!("JNI environment unavailable for MediaStore query");
+            return Vec::new();
+        }
+    };
+
+    if json_str.is_empty() {
+        return Vec::new();
+    }
+
+    serde_json::from_str(&json_str).unwrap_or_default()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn query_system_mediastore_audio() -> Vec<MediaStoreRawTrack> {
+    Vec::new()
 }

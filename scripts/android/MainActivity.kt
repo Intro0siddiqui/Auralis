@@ -12,20 +12,37 @@ class MainActivity : TauriActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WebView.setWebContentsDebuggingEnabled(true)
-        // Android 13+ (targetSdk 36) requires runtime POST_NOTIFICATIONS for foreground
-        // notification. Request on first launch so subsequent MediaPlaybackService.start()
-        // can actually show the notification; without it startForeground() would be
-        // silently suppressed.
+        
+        val permissionsToRequest = mutableListOf<String>()
+
+        // Notification permission for foreground media playback (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED
             ) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                    1001
-                )
+                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
             }
+            // Audio Media permission for MediaStore system-wide scanning (Android 13+)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_AUDIO)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                permissionsToRequest.add(Manifest.permission.READ_MEDIA_AUDIO)
+            }
+        } else {
+            // Legacy external storage permission (Android 12 and below)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        }
+
+        if (permissionsToRequest.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                this,
+                permissionsToRequest.toTypedArray(),
+                1001
+            )
         }
     }
 }

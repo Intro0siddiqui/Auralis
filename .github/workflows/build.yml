@@ -293,7 +293,8 @@ jobs:
           mkdir -p "$PKG_DIR"
           cp scripts/android/MediaPlaybackService.kt "$PKG_DIR/MediaPlaybackService.kt"
           cp scripts/android/MainActivity.kt "$PKG_DIR/MainActivity.kt"
-          echo "Installed MediaPlaybackService.kt and MainActivity.kt from repo into $PKG_DIR"
+          cp scripts/android/MediaStoreScanner.kt "$PKG_DIR/MediaStoreScanner.kt"
+          echo "Installed MediaPlaybackService.kt, MainActivity.kt, and MediaStoreScanner.kt from repo into $PKG_DIR"
 
       - name: Configure Android SDK versions
         run: |
@@ -586,7 +587,8 @@ jobs:
           mkdir -p "$PKG_DIR"
           cp scripts/android/MediaPlaybackService.kt "$PKG_DIR/MediaPlaybackService.kt"
           cp scripts/android/MainActivity.kt "$PKG_DIR/MainActivity.kt"
-          echo "Installed MediaPlaybackService.kt and MainActivity.kt from repo into $PKG_DIR"
+          cp scripts/android/MediaStoreScanner.kt "$PKG_DIR/MediaStoreScanner.kt"
+          echo "Installed MediaPlaybackService.kt, MainActivity.kt, and MediaStoreScanner.kt from repo into $PKG_DIR"
 
       - name: Configure Android SDK versions
         run: |
