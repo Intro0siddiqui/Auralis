@@ -255,6 +255,14 @@ class PlayerController {
         this.updateShuffleRepeatUI();
         if (wasWired) return;
 
+        this.wireFullScreenButtons();
+        this.wireFullScreenProgressSlider();
+        this.wireFullScreenVolumeSlider();
+
+        if (window.lucide) window.lucide.createIcons();
+    }
+
+    wireFullScreenButtons() {
         // 1. Play / Pause
         const fullPlay = document.getElementById('player-full-play');
         if (fullPlay) {
@@ -304,80 +312,82 @@ class PlayerController {
                 this.toggleLike();
             });
         }
+    }
 
+    wireFullScreenProgressSlider() {
         // 5. Progress Seek
         const fullProgress = document.getElementById('player-full-progress');
-        if (fullProgress) {
-            let isSeeking = false;
-            const getPercent = (e) => {
-                const rect = fullProgress.getBoundingClientRect();
-                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-                return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-            };
+        if (!fullProgress) return;
 
-            const startSeek = (e) => {
-                isSeeking = true;
-                this.isSeeking = true;
+        let isSeeking = false;
+        const getPercent = (e) => {
+            const rect = fullProgress.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        };
+
+        const startSeek = (e) => {
+            isSeeking = true;
+            this.isSeeking = true;
+            const pct = getPercent(e);
+            this.progress = pct * (this.duration || 0);
+            this.updateProgressUI();
+            this.updatePositionState();
+        };
+        const moveSeek = (e) => {
+            if (isSeeking) {
                 const pct = getPercent(e);
                 this.progress = pct * (this.duration || 0);
                 this.updateProgressUI();
                 this.updatePositionState();
-            };
-            const moveSeek = (e) => {
-                if (isSeeking) {
-                    const pct = getPercent(e);
-                    this.progress = pct * (this.duration || 0);
-                    this.updateProgressUI();
-                    this.updatePositionState();
-                }
-            };
-            const endSeek = () => {
-                if (isSeeking) {
-                    isSeeking = false;
-                    this.isSeeking = false;
-                    this.commitSeek();
-                }
-            };
+            }
+        };
+        const endSeek = () => {
+            if (isSeeking) {
+                isSeeking = false;
+                this.isSeeking = false;
+                this.commitSeek();
+            }
+        };
 
-            fullProgress.addEventListener('mousedown', startSeek);
-            document.addEventListener('mousemove', moveSeek);
-            document.addEventListener('mouseup', endSeek);
+        fullProgress.addEventListener('mousedown', startSeek);
+        document.addEventListener('mousemove', moveSeek);
+        document.addEventListener('mouseup', endSeek);
 
-            fullProgress.addEventListener('touchstart', startSeek, { passive: true });
-            fullProgress.addEventListener('touchmove', moveSeek, { passive: true });
-            fullProgress.addEventListener('touchend', endSeek);
-        }
+        fullProgress.addEventListener('touchstart', startSeek, { passive: true });
+        fullProgress.addEventListener('touchmove', moveSeek, { passive: true });
+        fullProgress.addEventListener('touchend', endSeek);
+    }
 
+    wireFullScreenVolumeSlider() {
         // 6. Volume Slider
         const fullVolume = document.getElementById('player-full-volume');
-        if (fullVolume) {
-            let isDragging = false;
-            const getPercent = (e) => {
-                const rect = fullVolume.getBoundingClientRect();
-                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-                return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-            };
+        if (!fullVolume) return;
 
-            const setVol = (e) => {
-                this.setVolumeLevel(getPercent(e));
-            };
+        let isDragging = false;
+        const getPercent = (e) => {
+            const rect = fullVolume.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        };
 
-            fullVolume.addEventListener('mousedown', (e) => {
-                isDragging = true;
-                setVol(e);
-            });
-            document.addEventListener('mousemove', (e) => { if (isDragging) setVol(e); });
-            document.addEventListener('mouseup', () => { isDragging = false; });
+        const setVol = (e) => {
+            this.setVolumeLevel(getPercent(e));
+        };
 
-            fullVolume.addEventListener('touchstart', (e) => {
-                isDragging = true;
-                setVol(e);
-            }, { passive: true });
-            fullVolume.addEventListener('touchmove', (e) => { if (isDragging) setVol(e); }, { passive: true });
-            fullVolume.addEventListener('touchend', () => { isDragging = false; });
-        }
+        fullVolume.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            setVol(e);
+        });
+        document.addEventListener('mousemove', (e) => { if (isDragging) setVol(e); });
+        document.addEventListener('mouseup', () => { isDragging = false; });
 
-        if (window.lucide) window.lucide.createIcons();
+        fullVolume.addEventListener('touchstart', (e) => {
+            isDragging = true;
+            setVol(e);
+        }, { passive: true });
+        fullVolume.addEventListener('touchmove', (e) => { if (isDragging) setVol(e); }, { passive: true });
+        fullVolume.addEventListener('touchend', () => { isDragging = false; });
     }
 
     updateFullScreenMetadata() {
