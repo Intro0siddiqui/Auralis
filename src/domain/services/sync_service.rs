@@ -520,6 +520,48 @@ impl SyncService {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::database::repositories::{
+        SqliteSettingsRepository, SqliteSyncRepository,
+    };
+    use crate::infrastructure::database::Database;
+    use libp2p::identity::Keypair;
+
+    #[tokio::test]
+    async fn test_sync_service_init_warms_alias_map() {
+        let db_path =
+            std::env::temp_dir().join(format!("test_auralis_sync_svc_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+
+        let settings_repo = Arc::new(SqliteSettingsRepository::new(db_arc.clone()));
+        let sync_repo = Arc::new(SqliteSyncRepository::new(db_arc.clone()));
+
+        let sync_engine = Arc::new(SyncEngine::new());
+        sync_engine.runtime().set_persistent_store(db_arc.clone()).await;
+
+        let peer_id = Keypair::generate_ed25519().public().to_peer_id();
+        let device = PairedDevice::with_peer_id(
+            "Paired Phone".to_string(),
+            DeviceType::Mobile,
+            peer_id.to_string(),
+        );
+
+        sync_repo.save_paired_device(&device).await.unwrap();
+
+        let service = SyncService::new(settings_repo, sync_repo, sync_engine.clone());
+        service.init().await.unwrap();
+
+        let resolved = sync_engine.runtime().resolve_peer_id(&device.id.to_string()).await;
+        assert_eq!(resolved, Some(peer_id));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+}
+
 /// Sync-related errors
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
