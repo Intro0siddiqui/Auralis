@@ -354,6 +354,7 @@ export const coreMethods = {
         if (document.body && !document.body.dataset.playDelegationBound) {
             document.body.dataset.playDelegationBound = 'true';
             let _lastDelegatedPlayTime = 0;
+            let _lastDelegatedTrackId = null;
             const handlePlayDelegate = (e) => {
                 if (e.target.closest && e.target.closest('.track-row-actions')) {
                     const playBtn = e.target.closest('[data-role="play-btn"]');
@@ -361,8 +362,9 @@ export const coreMethods = {
                         e.preventDefault(); e.stopPropagation();
                         const tid = playBtn.dataset.trackId;
                         const now = Date.now();
-                        if (tid && (now - _lastDelegatedPlayTime >= 350)) {
+                        if (tid && (_lastDelegatedTrackId !== tid || (now - _lastDelegatedPlayTime >= 350))) {
                             _lastDelegatedPlayTime = now;
+                            _lastDelegatedTrackId = tid;
                             this.playTrack(tid);
                         }
                     }
@@ -372,9 +374,10 @@ export const coreMethods = {
                 if (!playEl) return;
                 const tid = playEl.dataset.trackId;
                 const now = Date.now();
-                if (tid && (now - _lastDelegatedPlayTime >= 350)) {
+                if (tid && (_lastDelegatedTrackId !== tid || (now - _lastDelegatedPlayTime >= 350))) {
                     e.preventDefault();
                     _lastDelegatedPlayTime = now;
+                    _lastDelegatedTrackId = tid;
                     this.playTrack(tid);
                 }
             };

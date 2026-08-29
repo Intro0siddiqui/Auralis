@@ -4,17 +4,22 @@
  */
 
 let _lastPlayTriggerTime = 0;
+let _lastPlayTrackId = null;
 export function _safePlayTrack(trackId) {
     if (!trackId) return;
     const now = Date.now();
-    if (now - _lastPlayTriggerTime < 350) return;
+    if (_lastPlayTrackId === trackId && (now - _lastPlayTriggerTime < 350)) return;
     _lastPlayTriggerTime = now;
+    _lastPlayTrackId = trackId;
     if (window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.playTrack === 'function') {
         window.Auralis.bridge.playTrack(trackId);
     } else if (window.AuralisPlayer && typeof window.AuralisPlayer.playTrack === 'function') {
         window.AuralisPlayer.playTrack(trackId);
     }
 }
+try {
+    window._safePlayTrack = _safePlayTrack;
+} catch (_) {}
 
 document.addEventListener('click', (evt) => {
     const playBtn = evt.target.closest && evt.target.closest('.play-shelf-btn, .play-track-btn');
@@ -804,11 +809,14 @@ export const viewMethods = {
                     <div class="track-row-subtitle">${this.escapeHtml(track.artist || 'Unknown Artist')} — ${this.escapeHtml(track.album || 'Single')}</div>
                 </div>
                 <span class="track-row-duration">${this.formatTime(track.duration_secs || 0)}</span>
-                <div class="track-row-actions" onclick="event.stopPropagation()" ontouchend="event.stopPropagation()">
-                    <button class="btn btn-ghost btn-icon" title="Play" data-role="play-btn" data-track-id="${track.id}">
+                <div class="track-row-actions">
+                    <button type="button" class="btn btn-ghost btn-icon play-track-btn" 
+                            title="Play" data-role="play-btn" data-track-id="${track.id}" 
+                            onclick="event.stopPropagation(); window._safePlayTrack ? window._safePlayTrack('${track.id}') : (window.Auralis && window.Auralis.bridge && window.Auralis.bridge.playTrack('${track.id}'))" 
+                            ontouchend="event.stopPropagation(); window._safePlayTrack ? window._safePlayTrack('${track.id}') : (window.Auralis && window.Auralis.bridge && window.Auralis.bridge.playTrack('${track.id}'))">
                         <i data-lucide="play"></i>
                     </button>
-                    <button class="btn btn-ghost btn-icon ${isFav ? 'liked' : ''}" style="${isFav ? 'color: var(--like);' : ''}" title="Like" onclick="window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)">
+                    <button type="button" class="btn btn-ghost btn-icon ${isFav ? 'liked' : ''}" style="${isFav ? 'color: var(--like);' : ''}" title="Like" onclick="event.stopPropagation(); window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)" ontouchend="event.stopPropagation(); window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)">
                         <i data-lucide="heart"></i>
                     </button>
                 </div>
