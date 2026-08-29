@@ -39,12 +39,15 @@ export const viewMethods = {
     },
 
     async loadLibraryView() {
-        const trackList = document.querySelector('.page-library .track-list');
-        if (!trackList) return;
+        const expected = 'library';
+        if (this.activeView !== expected) return;
 
         try {
             const page = await this.invoke('get_tracks');
-            if (!document.querySelector('.page-library .track-list')) return;
+            if (this.activeView !== expected) return;
+            const content = document.getElementById('content');
+            if (!content || !content.querySelector('.page-library')) return;
+
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
             } else {
@@ -127,6 +130,7 @@ export const viewMethods = {
                 </div>
             `;
             if (window.lucide) window.lucide.createIcons();
+            if (window.htmx) window.htmx.process(trackList);
         }
     },
 
@@ -137,26 +141,37 @@ export const viewMethods = {
                 window.Auralis.player.hydrateState().catch(()=>{});
             }
         } catch (_) {}
-    }
+    },
 
     async loadHomeView() {
         const expected = 'home';
-        // Sync abort before any await — fixes 00:40.5 async gap where Download→Home overwrites after navigation
-        const _contentPre = document.getElementById('content');
-        if (_contentPre && _contentPre.querySelector('.page-downloads, .page-settings, .page-library, .page-albums, .page-artists, .page-playlists, .page-search, .page-sync')) return;
         if (this.activeView !== expected) return;
         try {
             const page = await this.invoke('get_tracks', { filter: { limit: 12 } });
             if (this.activeView !== expected) return;
-            // Abort if #content already shows a different page (fixes 00:13 Welcome jump without breaking initial home load when #content empty)
             const _content = document.getElementById('content');
             if (_content && _content.querySelector('.page-downloads, .page-settings, .page-library, .page-albums, .page-artists, .page-playlists, .page-search, .page-sync')) return;
-            const shelf = document.getElementById('recently-added-shelf') || document.querySelector('.page-home .shelf') || document.querySelector('#content .shelf');
-            const trackList = document.getElementById('continue-listening-tracks') || document.querySelector('.page-home .track-list');
+            let shelf = document.getElementById('recently-added-shelf') || document.querySelector('.page-home .shelf') || document.querySelector('#content .shelf');
+            let trackList = document.getElementById('continue-listening-tracks') || document.querySelector('.page-home .track-list');
             const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home');
 
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
+                if ((!shelf || !trackList) && container) {
+                    container.innerHTML = `
+                        <section class="section-header">
+                            <h2 class="section-title">Recently Added</h2>
+                            <a href="#" class="section-link" hx-get="/partials/library.html" hx-target="#content" hx-swap="innerHTML">See all</a>
+                        </section>
+                        <div class="shelf" id="recently-added-shelf"></div>
+                        <section class="section-header" style="margin-top: var(--space-6);">
+                            <h2 class="section-title">Continue Listening</h2>
+                        </section>
+                        <div class="track-list" id="continue-listening-tracks"></div>
+                    `;
+                    shelf = document.getElementById('recently-added-shelf');
+                    trackList = document.getElementById('continue-listening-tracks');
+                }
                 if (shelf) {
                     shelf.innerHTML = page.tracks.slice(0, 6).map(track => `
                         <div class="card album-card neu-glass" data-track-id="${track.id}" data-role="play-card" style="cursor: pointer; touch-action: manipulation;">
@@ -187,6 +202,7 @@ export const viewMethods = {
                     this.renderTrackRows(trackList, page.tracks.slice(0, 6));
                 }
                 if (window.lucide) window.lucide.createIcons();
+                if (window.htmx && container) window.htmx.process(container);
                 this._syncPlayerBar();
             } else {
                 if (container) {
@@ -214,6 +230,7 @@ export const viewMethods = {
                         </div>
                     `;
                     if (window.lucide) window.lucide.createIcons();
+                    if (window.htmx) window.htmx.process(container);
                 }
             }
         } catch (err) {
@@ -222,12 +239,14 @@ export const viewMethods = {
     },
 
     async loadAlbumsView() {
-        const grid = document.getElementById('albums-grid') || document.querySelector('.page-albums .grid');
-        if (!grid) return;
+        const expected = 'albums';
+        if (this.activeView !== expected) return;
 
         try {
             const page = await this.invoke('get_tracks');
-            if (!document.getElementById('albums-grid') && !document.querySelector('.page-albums .grid')) return;
+            if (this.activeView !== expected) return;
+            const _content = document.getElementById('content');
+            if (!_content || !_content.querySelector('.page-albums')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
                 const albumMap = new Map();
@@ -241,7 +260,7 @@ export const viewMethods = {
                 this._albumMap = albumMap;
 
                 grid.innerHTML = Array.from(albumMap.values()).map(album => `
-                    <div class="card album-card neu-glass" data-album-name="${this.escapeHtml(album.name)}" data-role="play-album" style="cursor: pointer; touch-action: manipulation;">
+                    <div class="card album-card neu-glass" data-album-name="${this.escapeHtml(album.name)}" data-first-track-id="${album.tracks[0] ? album.tracks[0].id : ''}" data-role="play-album" style="cursor: pointer; touch-action: manipulation;">
                         <div class="card-artwork">
                             ${album.art ? this.artImgTag(album.art, album.name) : `<i data-lucide="disc-3"></i>`}
                         </div>
@@ -262,6 +281,8 @@ export const viewMethods = {
                         if (alb && alb.tracks && alb.tracks.length > 0) {
                             this.tracks = alb.tracks;
                             window.Auralis.bridge.playTrack(alb.tracks[0].id);
+                        } else if (card.dataset.firstTrackId) {
+                            window.Auralis.bridge.playTrack(card.dataset.firstTrackId);
                         }
                     };
                     grid.addEventListener('click', handler);
@@ -284,12 +305,14 @@ export const viewMethods = {
     },
 
     async loadArtistsView() {
-        const grid = document.getElementById('artists-grid') || document.querySelector('.page-artists .grid');
-        if (!grid) return;
+        const expected = 'artists';
+        if (this.activeView !== expected) return;
 
         try {
             const page = await this.invoke('get_tracks');
-            if (!document.getElementById('artists-grid') && !document.querySelector('.page-artists .grid')) return;
+            if (this.activeView !== expected) return;
+            const _content = document.getElementById('content');
+            if (!_content || !_content.querySelector('.page-artists')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
                 const artistMap = new Map();
@@ -303,7 +326,7 @@ export const viewMethods = {
                 this._artistMap = artistMap;
 
                 grid.innerHTML = Array.from(artistMap.values()).map(artist => `
-                    <div class="card artist-card neu-glass" data-artist-name="${this.escapeHtml(artist.name)}" data-role="play-artist" style="cursor: pointer; touch-action: manipulation;">
+                    <div class="card artist-card neu-glass" data-artist-name="${this.escapeHtml(artist.name)}" data-first-track-id="${artist.tracks[0] ? artist.tracks[0].id : ''}" data-role="play-artist" style="cursor: pointer; touch-action: manipulation;">
                         <div class="card-artwork">
                             <i data-lucide="user"></i>
                         </div>
@@ -324,6 +347,8 @@ export const viewMethods = {
                         if (art && art.tracks && art.tracks.length > 0) {
                             this.tracks = art.tracks;
                             window.Auralis.bridge.playTrack(art.tracks[0].id);
+                        } else if (card.dataset.firstTrackId) {
+                            window.Auralis.bridge.playTrack(card.dataset.firstTrackId);
                         }
                     };
                     grid.addEventListener('click', handler);
@@ -346,6 +371,8 @@ export const viewMethods = {
     },
 
     async loadPlaylistsView() {
+        const expected = 'playlists';
+        if (this.activeView !== expected) return;
         const grid = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
         const detail = document.getElementById('playlist-detail');
         if (detail && detail.style.display !== 'block') {
@@ -356,7 +383,9 @@ export const viewMethods = {
 
         try {
             const playlists = await this.invoke('get_playlists');
-            if (!document.getElementById('playlists-grid') && !document.querySelector('.page-playlists .grid')) return;
+            if (this.activeView !== expected) return;
+            const _content = document.getElementById('content');
+            if (!_content || !_content.querySelector('.page-playlists')) return;
             if (playlists && playlists.length > 0) {
                 grid.innerHTML = playlists.map(pl => {
                     const isSmart = Boolean(pl.is_smart);

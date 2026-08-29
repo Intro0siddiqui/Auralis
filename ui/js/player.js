@@ -409,7 +409,7 @@ class PlayerController {
 
     bindKeyboard() {
         document.addEventListener('keydown', (e) => {
-            if (e.target.matches('input, textarea, select, [contenteditable="true"]')) return;
+            if (e.target.matches('input, textarea, select, button, [contenteditable="true"], [role="switch"], .toggle, .theme-option')) return;
 
             switch (e.code) {
                 case 'Space':
@@ -585,17 +585,20 @@ class PlayerController {
     }
 
     seek(secs) {
-        if (!this.duration || this.duration <= 0) return;
+        if (!this.duration || this.duration <= 0 || !isFinite(this.duration) || !isFinite(secs)) return;
         const pct = Math.max(0, Math.min(1, secs / this.duration));
         this.seekToPercent(pct);
     }
 
     seekToPercent(pct) {
+        if (!isFinite(pct) || !this.duration || this.duration <= 0 || !isFinite(this.duration)) return;
         this.progress = pct * (this.duration || 0);
         this.updateProgressUI();
         this.updatePositionState();
         if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } }).catch((err)=>{
+            const pos = Math.floor(this.progress);
+            if (!isFinite(pos) || pos < 0) return;
+            window.Auralis.bridge.invoke('seek', { request: { position_secs: pos } }).catch((err)=>{
                 const msg = String(err || 'seek failed');
                 console.warn('Seek failed:', msg);
                 window.Auralis.bridge.showToast(`Seek failed: ${msg}`, 'error', 5000);
@@ -604,10 +607,12 @@ class PlayerController {
     }
 
     commitSeek() {
-        if (!this.duration || this.duration <= 0) return;
+        if (!this.duration || this.duration <= 0 || !isFinite(this.duration) || !isFinite(this.progress)) return;
+        const pos = Math.floor(this.progress);
+        if (!isFinite(pos) || pos < 0) return;
         this.updatePositionState();
         if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('seek', { request: { position_secs: Math.floor(this.progress) } }).catch((err)=>{
+            window.Auralis.bridge.invoke('seek', { request: { position_secs: pos } }).catch((err)=>{
                 const msg = String(err || 'seek failed');
                 console.warn('Seek (commit) failed:', msg);
                 window.Auralis.bridge.showToast(`Seek failed: ${msg}`, 'error', 5000);
@@ -645,7 +650,9 @@ class PlayerController {
         if (!('mediaSession' in navigator) || typeof navigator.mediaSession.setPositionState !== 'function') return;
         try {
             if (!this.duration || this.duration <= 0 || !isFinite(this.duration) || !isFinite(this.progress)) return;
-            navigator.mediaSession.setPositionState({ duration: this.duration, playbackRate: 1, position: Math.min(Math.max(0, this.progress), this.duration) });
+            const pos = Math.min(Math.max(0, this.progress), this.duration);
+            if (!isFinite(pos) || pos < 0) return;
+            navigator.mediaSession.setPositionState({ duration: this.duration, playbackRate: 1, position: pos });
         } catch (_) {}
     }
 

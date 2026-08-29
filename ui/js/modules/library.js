@@ -62,7 +62,9 @@ export const libraryMethods = {
                 this.appendScanLog('ℹ️ Audio picker was cancelled');
             }
         } catch (err) {
-            this.appendScanLog(`⚠️ Audio picker error: ${err}`);
+            const msg = err && err.message ? err.message : String(err);
+            this.appendScanLog(`⚠️ Audio picker error: ${msg}`);
+            this.showToast(`Audio picker error: ${msg}`, 'error');
             console.warn('pick_audio_files_and_import error:', err);
         }
     },
@@ -294,9 +296,11 @@ export const libraryMethods = {
         if (successCount > 0) {
             this.showToast(`Successfully imported ${successCount} track(s)!`, 'success');
             this.appendScanLog(`🎉 Import session completed: ${successCount} track(s) added, ${errors.length} error(s). Reloading UI...`);
-        } else {
-            this.showToast('Import failed. Check scan logs for details.', 'error');
+        } else if (errors.length > 0) {
+            this.showToast(`Import failed: ${errors[0]}`, 'error', 7000);
             this.appendScanLog(`⚠️ Import session finished with 0 tracks imported (${errors.length} error(s))`);
+        } else {
+            this.showToast('No audio files were imported.', 'warning');
         }
 
         try {
