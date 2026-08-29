@@ -17,6 +17,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { coreMethods } from '../../ui/js/modules/core.js';
+import { downloadMethods } from '../../ui/js/modules/downloads.js';
 
 // ── helpers extracted verbatim from youtube.js so tests don't need a WebView ──
 function isDirectAudio(url) { return /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|webm)(\?.*)?$/i.test(url); }
@@ -313,6 +315,54 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         const m = src.match(/(?:const|let)\s+orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
         assert.ok(m, 'orderedClients must still be TV-first when no poToken');
         assert.equal(m[2].replace(/\s/g, ''), "'TV','ANDROID_VR','MWEB','WEB','IOS','ANDROID'", 'TV/ANDROID_VR-first ordering must be preserved');
+    });
+});
+
+describe('Download error payload handling (error vs error_message)', () => {
+    it('downloads.js updateDownloadProgressUI extracts error or error_message correctly', () => {
+        let capturedHtml = '';
+        const mockRow = {
+            classList: { add: () => {}, remove: () => {} },
+            style: {},
+            dataset: {},
+            set innerHTML(val) { capturedHtml = val; }
+        };
+        const mockList = {
+            dataset: {},
+            addEventListener: () => {},
+            querySelector: () => mockRow,
+            prepend: () => {}
+        };
+
+        // Minimal mock document for downloads.js updateDownloadProgressUI
+        global.document = {
+            getElementById: (id) => (id === 'downloads-list' ? mockList : null)
+        };
+
+        const context = {
+            ...downloadMethods,
+            escapeHtml: (str) => str || ''
+        };
+
+        // Test with `error` field
+        context.updateDownloadProgressUI({ id: 'd1', status: 'failed', error: 'HTTP 403 Forbidden', url: 'https://example.com/audio' });
+        assert.ok(capturedHtml.includes('HTTP 403 Forbidden'), 'HTML should contain error message from `error` property');
+
+        // Test with `error_message` field
+        context.updateDownloadProgressUI({ id: 'd2', status: 'failed', error_message: 'Connection timed out', url: 'https://example.com/audio' });
+        assert.ok(capturedHtml.includes('Connection timed out'), 'HTML should contain error message from `error_message` property');
+
+        // Clean up global mock
+        delete global.document;
+    });
+
+    it('coreMethods.extractErrorMessage handles error, error_message, message, and fallbacks', () => {
+        assert.equal(coreMethods.extractErrorMessage({ error: 'Direct error' }), 'Direct error');
+        assert.equal(coreMethods.extractErrorMessage({ error_message: 'Error message field' }), 'Error message field');
+        assert.equal(coreMethods.extractErrorMessage({ error: 'Primary error', error_message: 'Secondary error_message' }), 'Primary error');
+        assert.equal(coreMethods.extractErrorMessage({ message: 'Message field' }), 'Message field');
+        assert.equal(coreMethods.extractErrorMessage(null, 'Custom fallback'), 'Custom fallback');
+        assert.equal(coreMethods.extractErrorMessage('Plain string error'), 'Plain string error');
     });
 });
 

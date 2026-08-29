@@ -18,6 +18,12 @@ export class Bridge {
 }
 
 export const coreMethods = {
+    extractErrorMessage(p, fallback = 'Stream error') {
+        if (!p) return fallback;
+        if (typeof p === 'string') return p;
+        return p.error || p.error_message || p.message || fallback;
+    },
+
     async init() {
         if (this.initialized) return;
         this.initialized = true;
@@ -51,7 +57,9 @@ export const coreMethods = {
                 });
 
                 await tauriListen('playback:error', (event) => {
-                    const msg = typeof event.payload === 'string' ? event.payload : JSON.stringify(event.payload);
+                    const msg = typeof event.payload === 'string'
+                        ? event.payload
+                        : this.extractErrorMessage(event.payload, JSON.stringify(event.payload));
                     this.emit('playback:error', msg);
                     console.error('[playback:error]', msg);
                     this.showToast(`Playback failed: ${msg}`, 'error', 6000);
@@ -70,7 +78,7 @@ export const coreMethods = {
                         this.showToast(`Download complete: ${(p && p.title) || 'Audio track'}`, 'success');
                         this.scanLibrary();
                     } else if (p && p.status === 'failed') {
-                        const rawErr = p.error || p.error_message || 'Stream error';
+                        const rawErr = this.extractErrorMessage(p, 'Stream error');
                         // 403 auto-retry: if downloads.js has pending context with retryClients, suppress immediate failure toast
                         // (downloads.js listener already emitted via this.emit above and will re-resolve with next orderedClient TV→ANDROID+pot→WEB_SAFARI)
                         const is403 = rawErr.includes('403') || rawErr.includes('Forbidden') || rawErr.includes('HTTP 403');
@@ -274,7 +282,7 @@ export const coreMethods = {
             return null;
         } catch (err) {
             console.error(`Error executing command '${command}':`, err);
-            const msg = typeof err === 'string' ? err : (err.message || JSON.stringify(err));
+            const msg = typeof err === 'string' ? err : this.extractErrorMessage(err, err.message || JSON.stringify(err));
             throw msg;
         }
     },
