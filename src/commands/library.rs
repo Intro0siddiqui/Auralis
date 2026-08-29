@@ -128,6 +128,62 @@ pub async fn delete_tracks(db: State<'_, Database>, ids: Vec<Uuid>) -> Result<u3
     Ok(count)
 }
 
+/// Helper: Emit log messages when starting a library scan.
+fn emit_scan_start_logs(
+    app: &tauri::AppHandle,
+    title: &str,
+    path_label: &str,
+    paths: &[std::path::PathBuf],
+) {
+    let _ = app.emit(
+        "library:scan_log",
+        format!("🚀 Starting {title} across {} target paths", paths.len()),
+    );
+    for p in paths {
+        let _ = app.emit(
+            "library:scan_log",
+            format!("📂 {path_label}: {} (exists: {})", p.display(), p.exists()),
+        );
+    }
+}
+
+/// Helper: Create progress callback for library scanner.
+fn create_scan_progress_callback(
+    app: &tauri::AppHandle,
+) -> impl FnMut(crate::infrastructure::filesystem::scanner::ScanProgress) + Send + 'static {
+    let app_handle = app.clone();
+    let app_log_handle = app.clone();
+    move |progress: crate::infrastructure::filesystem::scanner::ScanProgress| {
+        if !progress.current_file.is_empty() {
+            let _ = app_log_handle.emit(
+                "library:scan_log",
+                format!("🎵 Processing: {}", progress.current_file),
+            );
+        }
+        let _ = app_handle.emit("library:scan_progress", &progress);
+    }
+}
+
+/// Helper: Emit log messages and event when library scan finishes.
+fn emit_scan_completion(app: &tauri::AppHandle, summary: &ScanSummary, error_label: &str) {
+    for err in &summary.errors {
+        let _ = app.emit("library:scan_log", format!("⚠️ {error_label}: {err}"));
+    }
+
+    let _ = app.emit(
+        "library:scan_log",
+        format!(
+            "🎉 Scan finished: +{} tracks added, {} updated, {} removed, {} errors",
+            summary.tracks_added,
+            summary.tracks_updated,
+            summary.tracks_removed,
+            summary.errors.len()
+        ),
+    );
+
+    let _ = app.emit("library:scan_complete", summary);
+}
+
 /// Trigger a library scan over the configured paths.
 #[tauri::command]
 pub async fn scan_library_paths(
@@ -136,8 +192,6 @@ pub async fn scan_library_paths(
     paths: Option<Vec<String>>,
 ) -> Result<ScanSummary, String> {
     let repo = track_repo(&db);
-    let app_handle = app.clone();
-    let app_log_handle = app.clone();
 
     #[cfg(target_os = "android")]
     {
@@ -162,40 +216,14 @@ pub async fn scan_library_paths(
             }
         };
 
-        let _ = app.emit(
-            "library:scan_log",
-            format!(
-                "🚀 Starting Android sandboxed library scan across {} path(s)",
-                scan_paths.len()
-            ),
-        );
-        for p in &scan_paths {
-            let _ = app.emit(
-                "library:scan_log",
-                format!(
-                    "📂 Sandboxed path: {} (exists: {})",
-                    p.display(),
-                    p.exists()
-                ),
-            );
-        }
+        emit_scan_start_logs(&app, "Android sandboxed library scan", "Sandboxed path", &scan_paths);
 
         let android_scanner = crate::infrastructure::filesystem::AndroidScanner::new();
         let summary = android_scanner
             .scan_sandboxed_dir(
                 &scan_paths,
                 repo,
-                Some(
-                    move |progress: crate::infrastructure::filesystem::scanner::ScanProgress| {
-                        if !progress.current_file.is_empty() {
-                            let _ = app_log_handle.emit(
-                                "library:scan_log",
-                                format!("🎵 Processing: {}", progress.current_file),
-                            );
-                        }
-                        let _ = app_handle.emit("library:scan_progress", &progress);
-                    },
-                ),
+                Some(create_scan_progress_callback(&app)),
             )
             .await
             .map_err(|e| {
@@ -204,22 +232,7 @@ pub async fn scan_library_paths(
                 format!("Scan failed: {e}")
             })?;
 
-        for err in &summary.errors {
-            let _ = app.emit("library:scan_log", format!("⚠️ Error: {err}"));
-        }
-
-        let _ = app.emit(
-            "library:scan_log",
-            format!(
-                "🎉 Scan finished: +{} tracks added, {} updated, {} removed, {} errors",
-                summary.tracks_added,
-                summary.tracks_updated,
-                summary.tracks_removed,
-                summary.errors.len()
-            ),
-        );
-
-        let _ = app.emit("library:scan_complete", &summary);
+        emit_scan_completion(&app, &summary, "Error");
         Ok(summary)
     }
 
@@ -256,40 +269,14 @@ pub async fn scan_library_paths(
             }
         };
 
-        let _ = app.emit(
-            "library:scan_log",
-            format!(
-                "🚀 Starting desktop library scan across {} target paths",
-                scan_paths.len()
-            ),
-        );
-        for p in &scan_paths {
-            let _ = app.emit(
-                "library:scan_log",
-                format!(
-                    "📂 Candidate path: {} (exists: {})",
-                    p.display(),
-                    p.exists()
-                ),
-            );
-        }
+        emit_scan_start_logs(&app, "desktop library scan", "Candidate path", &scan_paths);
 
         let desktop_scanner = crate::infrastructure::filesystem::DesktopScanner::default_audio();
         let summary = desktop_scanner
             .scan_library_paths_with_progress(
                 &scan_paths,
                 repo,
-                Some(
-                    move |progress: crate::infrastructure::filesystem::scanner::ScanProgress| {
-                        if !progress.current_file.is_empty() {
-                            let _ = app_log_handle.emit(
-                                "library:scan_log",
-                                format!("🎵 Processing: {}", progress.current_file),
-                            );
-                        }
-                        let _ = app_handle.emit("library:scan_progress", &progress);
-                    },
-                ),
+                Some(create_scan_progress_callback(&app)),
             )
             .await
             .map_err(|e| {
@@ -298,22 +285,7 @@ pub async fn scan_library_paths(
                 format!("Scan failed: {e}")
             })?;
 
-        for err in &summary.errors {
-            let _ = app.emit("library:scan_log", format!("⚠️ Warning/Error: {err}"));
-        }
-
-        let _ = app.emit(
-            "library:scan_log",
-            format!(
-                "🎉 Scan finished: +{} tracks added, {} updated, {} removed, {} errors",
-                summary.tracks_added,
-                summary.tracks_updated,
-                summary.tracks_removed,
-                summary.errors.len()
-            ),
-        );
-
-        let _ = app.emit("library:scan_complete", &summary);
+        emit_scan_completion(&app, &summary, "Warning/Error");
         Ok(summary)
     }
 }
