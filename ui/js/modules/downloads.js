@@ -22,6 +22,13 @@ export const downloadMethods = {
         // Subscribe to Bridge's download:completed for 403 auto-retry (once, minimal invasive)
         try {
             this.on('download:completed', (p) => {
+                if (!p) return;
+                const map = this._ensurePendingMap();
+                if (p.status === 'completed' || p.status === 'cancelled') {
+                    map.delete(p.id);
+                    try { if (window.__auralisDownloadRetryingIds) window.__auralisDownloadRetryingIds.delete(p.id); } catch (_) {}
+                    return;
+                }
                 // fire-and-forget; internal handler is async
                 this._handle403AutoRetry(p).catch((e) => console.warn('[Downloads] 403 auto-retry handler error', e?.message || e));
             });
@@ -43,12 +50,15 @@ export const downloadMethods = {
 
     async _handle403AutoRetry(p) {
         if (!p || p.status !== 'failed') return;
-        const errRaw = p.error || p.error_message || '';
-        if (!errRaw.includes('403') && !errRaw.includes('Forbidden') && !errRaw.includes('HTTP 403')) return;
         const map = this._ensurePendingMap();
+        const errRaw = p.error || p.error_message || '';
+        if (!errRaw.includes('403') && !errRaw.includes('Forbidden') && !errRaw.includes('HTTP 403')) {
+            map.delete(p.id);
+            return;
+        }
         const ctx = map.get(p.id);
         if (!ctx) return;
-        if (ctx.retryCount >= 1) return; // auto-retry once only
+        if (ctx.retryCount >= 1 || ctx._retrying) return; // auto-retry once only & guard concurrent calls
         const resolved = ctx.resolved;
         const nextClient = resolved?.retryClients?.[0]
             || (() => {
@@ -93,6 +103,7 @@ export const downloadMethods = {
             const msg = e?.message || String(e);
             console.error(`[Downloads] 403 auto-retry re-resolve failed for ${p.id}:`, msg);
             this.showToast(`Retry with ${nextClient} failed: ${msg}`, 'error', 6000);
+            map.delete(p.id);
         } finally {
             ctx._retrying = false;
         }
@@ -331,6 +342,20 @@ export const downloadMethods = {
         const list = document.getElementById('downloads-list');
         if (!list) return;
 
+        if (!list.dataset.copyBound) {
+            list.dataset.copyBound = 'true';
+            list.addEventListener('click', (e) => {
+                const btn = e.target.closest && e.target.closest('[data-action="copy-download-error"]');
+                if (!btn) return;
+                const errText = btn.dataset.error || '';
+                if (navigator.clipboard) {
+                    navigator.clipboard.writeText(errText)
+                        .then(() => this.showToast('Copied error to clipboard', 'success'))
+                        .catch(() => this.showToast('Copy failed', 'error'));
+                }
+            });
+        }
+
         let row = list.querySelector(`[data-download-id="${progress.id}"]`);
         if (!row) {
             row = document.createElement('div');
@@ -359,7 +384,7 @@ export const downloadMethods = {
         const errBlock = isFailed && errRaw
             ? `<div style="margin-top:6px;padding:8px 10px;background:rgba(255,77,79,0.08);border:1px solid rgba(255,77,79,0.25);border-radius:8px;font-family:monospace;font-size:11px;line-height:1.4;white-space:pre-wrap;word-break:break-all;user-select:text;max-height:120px;overflow:auto;color:var(--text-2)">${this.escapeHtml(errRaw)}</div>
                <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                 <button type="button" class="btn btn-secondary btn-sm" onclick="navigator.clipboard&&navigator.clipboard.writeText(${JSON.stringify(errRaw).replace(/"/g,'&quot;')}).then(()=>window.Auralis&&window.Auralis.bridge&&window.Auralis.bridge.showToast&&window.Auralis.bridge.showToast('Copied error to clipboard','success')).catch(()=>window.Auralis&&window.Auralis.bridge&&window.Auralis.bridge.showToast&&window.Auralis.bridge.showToast('Copy failed','error'))" title="Copy full error (for bug report)">Copy error</button>
+                 <button type="button" class="btn btn-secondary btn-sm" data-action="copy-download-error" data-error="${this.escapeHtml(errRaw)}" title="Copy full error (for bug report)">Copy error</button>
                   <span style="font-size:11px;color:var(--text-3)">${errRaw.includes('403') ? '403 [rr1---sn-gwpa-cived] Jio now gates TV too — auto-retrying with ANDROID+pot / WEB_SAFARI; if still fails set youtube_po_token via BgUtils mint or Settings cookie.' : errRaw.includes('timeout') || errRaw.includes('stalled') ? 'Network timeout — retry on stable connection.' : errRaw.includes('404') ? 'URL expired — resolve again.' : 'Tap Copy and include in bug report; also check adb logcat chromium.'}</span>
                </div>`
             : '';

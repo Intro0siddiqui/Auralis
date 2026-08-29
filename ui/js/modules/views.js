@@ -39,12 +39,15 @@ export const viewMethods = {
     },
 
     async loadLibraryView() {
-        const trackList = document.querySelector('.page-library .track-list');
-        if (!trackList) return;
+        const expected = 'library';
+        if (this.activeView !== expected) return;
 
         try {
             const page = await this.invoke('get_tracks');
-            if (!document.querySelector('.page-library .track-list')) return;
+            if (this.activeView !== expected) return;
+            const content = document.getElementById('content');
+            if (!content || !content.querySelector('.page-library')) return;
+
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
             } else {
@@ -141,16 +144,12 @@ export const viewMethods = {
 
     async loadHomeView() {
         const expected = 'home';
-        // Sync abort before any await — fixes 00:40.5 async gap where Download→Home overwrites after navigation
-        const _contentPre = document.getElementById('content');
-        if (_contentPre && _contentPre.querySelector('.page-downloads, .page-settings, .page-library, .page-albums, .page-artists, .page-playlists, .page-search, .page-sync')) return;
         if (this.activeView !== expected) return;
         try {
             const page = await this.invoke('get_tracks', { filter: { limit: 12 } });
             if (this.activeView !== expected) return;
-            // Abort if #content already shows a different page (fixes 00:13 Welcome jump without breaking initial home load when #content empty)
             const _content = document.getElementById('content');
-            if (_content && _content.querySelector('.page-downloads, .page-settings, .page-library, .page-albums, .page-artists, .page-playlists, .page-search, .page-sync')) return;
+            if (_content && _content.firstElementChild && !_content.querySelector('.page-home')) return;
             const shelf = document.getElementById('recently-added-shelf') || document.querySelector('.page-home .shelf') || document.querySelector('#content .shelf');
             const trackList = document.getElementById('continue-listening-tracks') || document.querySelector('.page-home .track-list');
             const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home');
@@ -222,12 +221,14 @@ export const viewMethods = {
     },
 
     async loadAlbumsView() {
-        const grid = document.getElementById('albums-grid') || document.querySelector('.page-albums .grid');
-        if (!grid) return;
+        const expected = 'albums';
+        if (this.activeView !== expected) return;
 
         try {
             const page = await this.invoke('get_tracks');
-            if (!document.getElementById('albums-grid') && !document.querySelector('.page-albums .grid')) return;
+            if (this.activeView !== expected) return;
+            const _content = document.getElementById('content');
+            if (!_content || !_content.querySelector('.page-albums')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
                 const albumMap = new Map();
@@ -284,12 +285,14 @@ export const viewMethods = {
     },
 
     async loadArtistsView() {
-        const grid = document.getElementById('artists-grid') || document.querySelector('.page-artists .grid');
-        if (!grid) return;
+        const expected = 'artists';
+        if (this.activeView !== expected) return;
 
         try {
             const page = await this.invoke('get_tracks');
-            if (!document.getElementById('artists-grid') && !document.querySelector('.page-artists .grid')) return;
+            if (this.activeView !== expected) return;
+            const _content = document.getElementById('content');
+            if (!_content || !_content.querySelector('.page-artists')) return;
             if (page && page.tracks && page.tracks.length > 0) {
                 this.tracks = page.tracks;
                 const artistMap = new Map();
@@ -346,6 +349,8 @@ export const viewMethods = {
     },
 
     async loadPlaylistsView() {
+        const expected = 'playlists';
+        if (this.activeView !== expected) return;
         const grid = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
         const detail = document.getElementById('playlist-detail');
         if (detail && detail.style.display !== 'block') {
@@ -356,7 +361,9 @@ export const viewMethods = {
 
         try {
             const playlists = await this.invoke('get_playlists');
-            if (!document.getElementById('playlists-grid') && !document.querySelector('.page-playlists .grid')) return;
+            if (this.activeView !== expected) return;
+            const _content = document.getElementById('content');
+            if (!_content || !_content.querySelector('.page-playlists')) return;
             if (playlists && playlists.length > 0) {
                 grid.innerHTML = playlists.map(pl => {
                     const isSmart = Boolean(pl.is_smart);

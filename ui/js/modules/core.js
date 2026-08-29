@@ -331,6 +331,31 @@ export const coreMethods = {
                 document.dispatchEvent(new CustomEvent('auralis:submit:search', { detail: { form: t } }));
             }
         }, true);
+
+        // Delegated track play handlers across all views (Home, Library, Search)
+        if (document.body && !document.body.dataset.playDelegationBound) {
+            document.body.dataset.playDelegationBound = 'true';
+            const handlePlayDelegate = (e) => {
+                if (e.target.closest && e.target.closest('.track-row-actions')) {
+                    const playBtn = e.target.closest('[data-role="play-btn"]');
+                    if (playBtn) {
+                        e.preventDefault(); e.stopPropagation();
+                        const tid = playBtn.dataset.trackId;
+                        if (tid) this.playTrack(tid);
+                    }
+                    return;
+                }
+                const playEl = e.target.closest && e.target.closest('[data-role="play-row"], [data-role="play-card"]');
+                if (!playEl) return;
+                const tid = playEl.dataset.trackId;
+                if (tid) {
+                    e.preventDefault();
+                    this.playTrack(tid);
+                }
+            };
+            document.addEventListener('click', handlePlayDelegate);
+            document.addEventListener('touchend', handlePlayDelegate, { passive: false });
+        }
     },
 
     on(event, callback) {
