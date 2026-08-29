@@ -170,7 +170,8 @@ export const libraryMethods = {
 
                     const result = await this.invoke('import_audio_file', {
                         name: file.name,
-                        data_base64: base64Data
+                        data_base64: base64Data,
+                        dataBase64: base64Data
                     });
                     if (result) {
                         importedCount++;
@@ -267,7 +268,8 @@ export const libraryMethods = {
                     this.appendScanLog(`📡 Sending buffer to Tauri backend: ${file.name} (${base64Data.length} chars base64)`);
                     const result = await this.invoke('import_audio_file', {
                         name: file.name,
-                        data_base64: base64Data
+                        data_base64: base64Data,
+                        dataBase64: base64Data
                     });
 
                     if (result) {
@@ -313,7 +315,7 @@ export const libraryMethods = {
 
     handleTrackImported(track) {
         if (!track || !track.id) return;
-        const existingIdx = this.tracks.findIndex(t => t.id === track.id);
+        const existingIdx = this.tracks.findIndex(t => String(t.id) === String(track.id));
         if (existingIdx >= 0) {
             this.tracks[existingIdx] = track;
         } else {
@@ -321,6 +323,8 @@ export const libraryMethods = {
         }
         if (this.activeView === 'library') {
             this.renderLibraryTracks();
+        } else {
+            this.refreshCurrentView();
         }
     }
 };
