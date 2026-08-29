@@ -1166,4 +1166,53 @@ mod tests {
         fn assert_error<E: std::error::Error>() {}
         assert_error::<NetworkError>();
     }
+
+    #[tokio::test]
+    async fn test_alias_map_hydration_and_persistence() {
+        use crate::infrastructure::database::Database;
+        use uuid::Uuid;
+
+        let db_path =
+            std::env::temp_dir().join(format!("test_auralis_net_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+
+        let runtime = NetworkRuntime::new();
+        runtime.set_persistent_store(db_arc.clone()).await;
+
+        let device_id = Uuid::new_v4().to_string();
+        let peer_id = Keypair::generate_ed25519().public().to_peer_id();
+
+        let conn = db_arc.connection().unwrap();
+        conn.execute(
+            "INSERT INTO paired_devices (id, name, device_type, paired_at, library_version, peer_id) VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                device_id,
+                "Test Device",
+                "desktop",
+                chrono::Utc::now().to_rfc3339(),
+                0,
+                peer_id.to_string()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let count = runtime.hydrate_aliases().await.unwrap();
+        assert_eq!(count, 1);
+
+        let resolved = runtime.resolve_peer_id(&device_id).await;
+        assert_eq!(resolved, Some(peer_id));
+
+        let new_peer_id = Keypair::generate_ed25519().public().to_peer_id();
+        runtime
+            .register_device_alias(device_id.clone(), new_peer_id)
+            .await;
+
+        let resolved_new = runtime.resolve_peer_id(&device_id).await;
+        assert_eq!(resolved_new, Some(new_peer_id));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 }
