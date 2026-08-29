@@ -44,8 +44,9 @@ export const coreMethods = {
                 });
 
                 await tauriListen('playback:track_changed', (event) => {
-                    this.emit('playback:track', event.payload);
-                    this.updatePlayerBar(event.payload);
+                    const track = (event.payload && event.payload.track) ? event.payload.track : event.payload;
+                    this.emit('playback:track', track);
+                    this.updatePlayerBar(track);
                 });
 
                 await tauriListen('playback:queue_updated', (event) => {
@@ -352,21 +353,28 @@ export const coreMethods = {
         // Delegated track play handlers across all views (Home, Library, Search)
         if (document.body && !document.body.dataset.playDelegationBound) {
             document.body.dataset.playDelegationBound = 'true';
+            let _lastDelegatedPlayTime = 0;
             const handlePlayDelegate = (e) => {
                 if (e.target.closest && e.target.closest('.track-row-actions')) {
                     const playBtn = e.target.closest('[data-role="play-btn"]');
                     if (playBtn) {
                         e.preventDefault(); e.stopPropagation();
                         const tid = playBtn.dataset.trackId;
-                        if (tid) this.playTrack(tid);
+                        const now = Date.now();
+                        if (tid && (now - _lastDelegatedPlayTime >= 350)) {
+                            _lastDelegatedPlayTime = now;
+                            this.playTrack(tid);
+                        }
                     }
                     return;
                 }
                 const playEl = e.target.closest && e.target.closest('[data-role="play-row"], [data-role="play-card"]');
                 if (!playEl) return;
                 const tid = playEl.dataset.trackId;
-                if (tid) {
+                const now = Date.now();
+                if (tid && (now - _lastDelegatedPlayTime >= 350)) {
                     e.preventDefault();
+                    _lastDelegatedPlayTime = now;
                     this.playTrack(tid);
                 }
             };

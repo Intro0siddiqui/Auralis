@@ -127,15 +127,20 @@ export const playerMethods = {
     },
 
     updatePlayerBar(track) {
+        const actualTrack = (track && track.track) ? track.track : track;
+        if (!actualTrack) return;
         const title = document.getElementById('track-title');
         const artist = document.getElementById('track-artist');
         const artwork = document.getElementById('current-artwork');
 
-        if (title) title.textContent = track.title || 'No track playing';
-        if (artist) artist.textContent = track.artist || 'Select a song';
+        if (title) title.textContent = actualTrack.title || 'No track playing';
+        if (artist) {
+            artist.textContent = actualTrack.artist || 'Select a song';
+            artist.style.color = '';
+        }
         if (artwork) {
-            if (track.album_art_path) {
-                artwork.innerHTML = this.artImgTag(track.album_art_path, track.title);
+            if (actualTrack.album_art_path) {
+                artwork.innerHTML = this.artImgTag(actualTrack.album_art_path, actualTrack.title);
             } else {
                 artwork.innerHTML = `<i data-lucide="music"></i>`;
                 if (window.lucide) window.lucide.createIcons();

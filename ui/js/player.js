@@ -38,9 +38,11 @@ class PlayerController {
             this.updatePlayButton();
         });
 
-        window.Auralis.bridge.on('playback:track', (track) => {
+        window.Auralis.bridge.on('playback:track', (payload) => {
+            const track = (payload && payload.track) ? payload.track : payload;
+            if (!track) return;
             this.currentTrack = track;
-            this.duration = track.duration_secs || 0;
+            this.duration = track.duration_secs || track.duration || 0;
             this.progress = 0;
             this.isLiked = Boolean(track.is_favorite);
             this.updateLikeUI();
@@ -55,9 +57,9 @@ class PlayerController {
         });
 
         window.Auralis.bridge.on('playback:progress', (data) => {
-            if (this.isSeeking) return;
-            this.progress = data.position;
-            this.duration = data.duration;
+            if (this.isSeeking || !data) return;
+            this.progress = data.position_secs !== undefined ? data.position_secs : (data.position || 0);
+            this.duration = data.duration_secs !== undefined ? data.duration_secs : (data.duration || 0);
             this.updateProgressUI();
             this.updatePositionState();
         });

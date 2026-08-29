@@ -3,17 +3,26 @@
  * Handles loading, rendering, filtering and UI state transitions for all app views.
  */
 
+let _lastPlayTriggerTime = 0;
+export function _safePlayTrack(trackId) {
+    if (!trackId) return;
+    const now = Date.now();
+    if (now - _lastPlayTriggerTime < 350) return;
+    _lastPlayTriggerTime = now;
+    if (window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.playTrack === 'function') {
+        window.Auralis.bridge.playTrack(trackId);
+    } else if (window.AuralisPlayer && typeof window.AuralisPlayer.playTrack === 'function') {
+        window.AuralisPlayer.playTrack(trackId);
+    }
+}
+
 document.addEventListener('click', (evt) => {
     const playBtn = evt.target.closest && evt.target.closest('.play-shelf-btn, .play-track-btn');
     if (!playBtn) return;
 
     const trackId = playBtn.dataset.firstTrackId || playBtn.dataset.trackId;
     if (trackId) {
-        if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.playTrack(trackId);
-        } else if (window.AuralisPlayer && typeof window.AuralisPlayer.playTrack === 'function') {
-            window.AuralisPlayer.playTrack(trackId);
-        }
+        _safePlayTrack(trackId);
     }
 });
 
@@ -190,7 +199,7 @@ export const viewMethods = {
                             if (!card || !shelf.contains(card)) return;
                             e.preventDefault();
                             const tid = card.dataset.trackId;
-                            if (tid) window.Auralis.bridge.playTrack(tid);
+                            if (tid) _safePlayTrack(tid);
                         };
                         shelf.addEventListener('click', handler);
                         shelf.addEventListener('touchend', handler, { passive: false });
@@ -276,7 +285,7 @@ export const viewMethods = {
                         const alb = albName && this._albumMap && this._albumMap.get(albName);
                         if (alb && alb.tracks && alb.tracks.length > 0) {
                             this.tracks = alb.tracks;
-                            window.Auralis.bridge.playTrack(alb.tracks[0].id);
+                            _safePlayTrack(alb.tracks[0].id);
                         }
                     };
                     grid.addEventListener('click', handler);
@@ -340,7 +349,7 @@ export const viewMethods = {
                         const art = artName && this._artistMap && this._artistMap.get(artName);
                         if (art && art.tracks && art.tracks.length > 0) {
                             this.tracks = art.tracks;
-                            window.Auralis.bridge.playTrack(art.tracks[0].id);
+                            _safePlayTrack(art.tracks[0].id);
                         }
                     };
                     grid.addEventListener('click', handler);
@@ -817,7 +826,7 @@ export const viewMethods = {
                     if (playBtn) {
                         e.preventDefault(); e.stopPropagation();
                         const tid = playBtn.dataset.trackId;
-                        if (tid) window.Auralis.bridge.playTrack(tid);
+                        if (tid) _safePlayTrack(tid);
                     }
                     return;
                 }
@@ -825,7 +834,7 @@ export const viewMethods = {
                 if (!row || !container.contains(row)) return;
                 e.preventDefault();
                 const tid = row.dataset.trackId;
-                if (tid) window.Auralis.bridge.playTrack(tid);
+                if (tid) _safePlayTrack(tid);
             };
             container.addEventListener('click', rowHandler);
             container.addEventListener('touchend', rowHandler, { passive: false });
