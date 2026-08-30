@@ -359,7 +359,7 @@ impl NetworkRuntime {
         }
 
         let chunk_size = chunk_size.max(64 * 1024);
-        let total_chunks = ((file_len + chunk_size - 1) / chunk_size) as u32;
+        let total_chunks = file_len.div_ceil(chunk_size) as u32;
 
         if chunk_index >= total_chunks {
             return None;

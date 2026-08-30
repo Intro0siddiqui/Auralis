@@ -111,36 +111,43 @@ pub async fn connect_peer_address(
     })
 }
 
+/// Request payload for streaming a P2P track directly to RAM.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StreamP2pTrackRequest {
+    pub peer_id: String,
+    pub track_id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub file_extension: String,
+    pub auto_play: bool,
+}
+
 /// Request and stream audio file chunks from a peer directly over libp2p binary sub-protocol into RAM buffer with instant playback option.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn stream_p2p_track_to_ram(
     app_handle: AppHandle,
     service: State<'_, SyncService>,
     player: State<'_, AudioPlayer>,
-    peer_id: String,
-    track_id: String,
-    title: String,
-    artist: String,
-    album: Option<String>,
-    file_extension: String,
-    auto_play: bool,
+    request: StreamP2pTrackRequest,
 ) -> Result<RamTrackBuffer, String> {
     let ram_track = service
         .fetch_and_buffer_track_from_peer(
-            &peer_id,
-            &track_id,
-            title.clone(),
-            artist.clone(),
-            album,
-            file_extension,
+            &request.peer_id,
+            &request.track_id,
+            request.title.clone(),
+            request.artist.clone(),
+            request.album,
+            request.file_extension,
         )
         .await
         .map_err(|e| {
-            tracing::error!(peer = %peer_id, track_id = %track_id, error = %e, "Failed to stream P2P track to RAM");
+            tracing::error!(peer = %request.peer_id, track_id = %request.track_id, error = %e, "Failed to stream P2P track to RAM");
             format!("Failed to stream track from peer: {e}")
         })?;
 
-    if auto_play {
+    if request.auto_play {
         player.play_bytes(ram_track.data.clone()).await.map_err(|e| {
             tracing::error!(error = %e, "Failed to start instant RAM audio playback");
             format!("Instant RAM playback failed: {e}")
@@ -148,11 +155,11 @@ pub async fn stream_p2p_track_to_ram(
     }
 
     let payload = serde_json::json!({
-        "track_id": track_id,
-        "title": title,
-        "artist": artist,
-        "auto_play": auto_play,
-        "peer_id": peer_id,
+        "track_id": request.track_id,
+        "title": request.title,
+        "artist": request.artist,
+        "auto_play": request.auto_play,
+        "peer_id": request.peer_id,
     });
 
     let _ = app_handle.emit("sync:track_received_in_ram", payload);
