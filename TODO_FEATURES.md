@@ -2,6 +2,40 @@
 
 This document tracks all missing, stubbed, or partially wired features across the Auralis codebase (Desktop and Android targets), prioritized into actionable implementation milestones.
 
+## 🚨 Milestone 0: Download & Stream Integrity Engine Overhaul (Independent High-Priority Focus)
+> **Goal:** Eliminate partial/truncated audio downloads, enforce strict stream integrity validation, auto-resume broken HTTP streams, and prevent truncated audio playback.
+
+- [ ] **1. Strict Stream Completion & Content-Length Verification**
+  - **Location:** `src/infrastructure/media/downloader.rs:478-523`
+  - **Problem:** When an HTTP stream drops or terminates prematurely (e.g. at 27 seconds of a 3-minute song), the downloader encounters EOF (`chunk_opt == None`), exits the stream loop, and immediately marks the download as `Completed` without checking if all bytes were received.
+  - **Action:**
+    - If `total_bytes` is known from Content-Length or stream metadata, verify `downloaded_bytes == total_bytes`.
+    - If `downloaded_bytes < total_bytes`, flag as `IncompleteStream` and trigger automatic Range-based retry before marking complete.
+- [ ] **2. Automatic Stream Reconnection & HTTP Range Retry Loop**
+  - **Location:** `src/infrastructure/media/downloader.rs:460-515`
+  - **Problem:** Transient mobile connection drops or YouTube googlevideo stream resets cause immediate failure or truncated partial files.
+  - **Action:**
+    - Implement an exponential backoff retry loop (up to 3-5 attempts) inside `run_stream`.
+    - Automatically issue `Range: bytes=<downloaded_bytes>-` on reconnection to seamlessly append remaining bytes to the temporary file.
+    - If the server responds with 403 Forbidden on retry, request an updated PO-token / client rotation from `youtube.js` before retrying the range request.
+- [ ] **3. Post-Download Audio Container & Duration Integrity Validation**
+  - **Location:** `src/infrastructure/media/downloader.rs:515-525`, `src/infrastructure/filesystem/metadata.rs`
+  - **Problem:** Truncated audio files with intact container headers are indexed into SQLite with full metadata duration (e.g. 3m:15s), but player only plays 27s/1m.
+  - **Action:**
+    - Before moving file from `.tmp` to final destination and before publishing to MediaStore, probe the downloaded file with `lofty` / `rodio::Decoder`.
+    - Check that the actual decoded audio stream duration matches the expected duration within a small tolerance (e.g., ±2 seconds).
+    - Check for decoding corruption / truncated container frames (e.g. missing MP4 `moov` or truncated AAC packets).
+- [ ] **4. Atomic File Publication & Corrupt Partial Cleanup**
+  - **Location:** `src/infrastructure/media/downloader.rs:190-210`, `android_downloads.rs`
+  - **Action:**
+    - Stream directly to a dedicated `.part` / `.tmp` file (`app_data_dir/downloads/.tmp/<id>.part`).
+    - Only rename to final destination filename (`app_data_dir/downloads/<title>.<ext>`) once audio integrity and duration validation pass 100%.
+    - If a download fails, is cancelled, or fails validation after max retries, automatically delete the incomplete `.part` file so corrupt tracks never enter the user library or MediaStore.
+- [ ] **5. Duration Mismatch Diagnostic & Auto-Repair in Player**
+  - **Location:** `src/infrastructure/media/player.rs:154-165`
+  - **Action:**
+    - When `AudioPlayer::play` detects a severe duration mismatch between DB and actual decoded stream (e.g. DB says 180s, stream only has 27s), log a clear diagnostic warning and update track record to reflect true playable length or flag track for re-download.
+
 ---
 
 ## 🎯 Milestone 1: High-Impact Core Completeness & Missing UI Wiring
