@@ -946,6 +946,21 @@ class PlayerController {
         }
     }
 
+    renderQueueTrackRow(track, index) {
+        if (!track) return '';
+        return `
+            <div class="track-row neu-glass" style="margin-bottom: var(--space-2); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); display: flex; justify-content: space-between; align-items: center;">
+                <div class="track-row-info" style="flex: 1; overflow: hidden;">
+                    <div class="track-row-title">${this.escapeHtml(track.title)}</div>
+                    <div class="track-row-subtitle">${this.escapeHtml(track.artist || 'Unknown Artist')}</div>
+                </div>
+                <button class="btn btn-ghost btn-icon" onclick="window.Auralis.player.removeFromQueue(${index})" title="Remove">
+                    <i data-lucide="trash-2"></i>
+                </button>
+            </div>
+        `;
+    }
+
     async renderQueuePanel() {
         if (!this.queuePanel) this.queuePanel = document.getElementById('queue-panel');
         if (!this.queuePanel) return;
@@ -960,13 +975,6 @@ class PlayerController {
             console.warn('Failed to fetch queue:', e);
         }
 
-        const escapeHtml = (str) => {
-            if (!str) return '';
-            return str.replace(/[&<>"']/g, match => ({
-                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-            }[match]));
-        };
-
         this.queuePanel.innerHTML = `
             <div style="padding: var(--space-4); height: 100%; display: flex; flex-direction: column;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-4);">
@@ -980,23 +988,13 @@ class PlayerController {
                         <div style="font-size: var(--text-xs); color: var(--text-3); text-transform: uppercase; margin-bottom: var(--space-2); font-weight: var(--font-semibold);">Now Playing</div>
                         <div class="track-row neu-glass" style="margin-bottom: var(--space-4); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3);">
                             <div class="track-row-info">
-                                <div class="track-row-title" style="color: var(--accent);">${escapeHtml(this.currentTrack.title)}</div>
-                                <div class="track-row-subtitle">${escapeHtml(this.currentTrack.artist || 'Unknown Artist')}</div>
+                                <div class="track-row-title" style="color: var(--accent);">${this.escapeHtml(this.currentTrack.title)}</div>
+                                <div class="track-row-subtitle">${this.escapeHtml(this.currentTrack.artist || 'Unknown Artist')}</div>
                             </div>
                         </div>
                     ` : ''}
                     <div style="font-size: var(--text-xs); color: var(--text-3); text-transform: uppercase; margin-bottom: var(--space-2); font-weight: var(--font-semibold);">Next Up (${queueTracks.length})</div>
-                    ${queueTracks.length > 0 ? queueTracks.map((t, i) => `
-                        <div class="track-row neu-glass" style="margin-bottom: var(--space-2); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); display: flex; justify-content: space-between; align-items: center;">
-                            <div class="track-row-info" style="flex: 1; overflow: hidden;">
-                                <div class="track-row-title">${escapeHtml(t.title)}</div>
-                                <div class="track-row-subtitle">${escapeHtml(t.artist || 'Unknown Artist')}</div>
-                            </div>
-                            <button class="btn btn-ghost btn-icon" onclick="window.Auralis.player.removeFromQueue(${i})" title="Remove">
-                                <i data-lucide="trash-2"></i>
-                            </button>
-                        </div>
-                    `).join('') : `
+                    ${queueTracks.length > 0 ? queueTracks.map((t, i) => this.renderQueueTrackRow(t, i)).join('') : `
                         <div class="empty-state glass neu" style="padding: var(--space-4); text-align: center; border-radius: var(--radius-md);">
                             <p style="color: var(--text-3); font-size: var(--text-xs);">No tracks in queue</p>
                         </div>
