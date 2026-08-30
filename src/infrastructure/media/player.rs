@@ -313,8 +313,7 @@ impl AudioPlayer {
                 None
             } else {
                 // Prefer an unvisited track, fall back to any not-current.
-                let visited_set: std::collections::HashSet<usize> =
-                    visited.into_iter().collect();
+                let visited_set: std::collections::HashSet<usize> = visited.into_iter().collect();
                 let mut rng = rand::rng();
                 let mut candidates: Vec<usize> = (0..queue_len).collect();
                 candidates.shuffle(&mut rng);
@@ -357,7 +356,8 @@ impl AudioPlayer {
         let next_index = if for_auto_advance && repeat == RepeatMode::One {
             current_idx.or(Some(0))
         } else if shuffle {
-            self.next_shuffle_index(queue.len(), current_idx, repeat).await
+            self.next_shuffle_index(queue.len(), current_idx, repeat)
+                .await
         } else {
             match (current_idx, repeat) {
                 (Some(idx), RepeatMode::All) if idx + 1 >= queue.len() => Some(0),
@@ -630,9 +630,7 @@ mod tests {
     async fn test_next_shuffle_index_single_track() {
         let player = AudioPlayer::new().unwrap();
         assert_eq!(
-            player
-                .next_shuffle_index(1, Some(0), RepeatMode::Off)
-                .await,
+            player.next_shuffle_index(1, Some(0), RepeatMode::Off).await,
             None
         );
         assert_eq!(
@@ -640,9 +638,7 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            player
-                .next_shuffle_index(1, Some(0), RepeatMode::All)
-                .await,
+            player.next_shuffle_index(1, Some(0), RepeatMode::All).await,
             Some(0)
         );
     }
@@ -650,9 +646,7 @@ mod tests {
     #[tokio::test]
     async fn test_next_shuffle_index_repeat_all() {
         let player = AudioPlayer::new().unwrap();
-        let idx = player
-            .next_shuffle_index(3, Some(0), RepeatMode::All)
-            .await;
+        let idx = player.next_shuffle_index(3, Some(0), RepeatMode::All).await;
         assert!(idx.is_some());
         assert_ne!(idx, Some(0));
         assert!(idx.unwrap() < 3);
@@ -668,9 +662,7 @@ mod tests {
             hist.push(2);
         }
         assert_eq!(
-            player
-                .next_shuffle_index(3, Some(2), RepeatMode::Off)
-                .await,
+            player.next_shuffle_index(3, Some(2), RepeatMode::Off).await,
             None
         );
     }
