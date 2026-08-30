@@ -283,6 +283,67 @@ impl AudioPlayer {
         self.next_internal(true).await
     }
 
+    /// Calculates the next track index when shuffle mode is enabled.
+    async fn next_shuffle_index(
+        &self,
+        queue_len: usize,
+        current_idx: Option<usize>,
+        repeat: RepeatMode,
+    ) -> Option<usize> {
+        if queue_len == 1 {
+            return match (current_idx, repeat) {
+                (Some(_), RepeatMode::Off) => None,
+                _ => Some(0),
+            };
+        }
+
+        if repeat == RepeatMode::Off {
+            // Shuffle + RepeatOff: exhaust when all tracks have been visited.
+            let history = self.shuffle_history.read().await;
+            let mut visited = history.clone();
+            if let Some(ci) = current_idx {
+                if !visited.contains(&ci) {
+                    visited.push(ci);
+                }
+            }
+            let mut uniq = visited.clone();
+            uniq.sort_unstable();
+            uniq.dedup();
+            if uniq.len() >= queue_len {
+                None
+            } else {
+                // Prefer an unvisited track, fall back to any not-current.
+                let visited_set: std::collections::HashSet<usize> =
+                    visited.into_iter().collect();
+                let mut rng = rand::rng();
+                let mut candidates: Vec<usize> = (0..queue_len).collect();
+                candidates.shuffle(&mut rng);
+                let idx = candidates
+                    .iter()
+                    .find(|i| !visited_set.contains(i))
+                    .copied()
+                    .or_else(|| {
+                        candidates
+                            .iter()
+                            .find(|i| Some(**i) != current_idx)
+                            .copied()
+                    })
+                    .unwrap_or_else(|| rng.random_range(0..queue_len));
+                Some(idx)
+            }
+        } else {
+            // Shuffle + RepeatAll (or RepeatOne manual): pick random != current
+            let mut rng = rand::rng();
+            let mut candidates: Vec<usize> = (0..queue_len).collect();
+            candidates.shuffle(&mut rng);
+            let idx = candidates
+                .into_iter()
+                .find(|&i| Some(i) != current_idx)
+                .unwrap_or_else(|| rng.random_range(0..queue_len));
+            Some(idx)
+        }
+    }
+
     async fn next_internal(&self, for_auto_advance: bool) -> Result<Option<Track>, PlayerError> {
         let queue = self.queue.read().await;
         if queue.is_empty() {
@@ -296,56 +357,7 @@ impl AudioPlayer {
         let next_index = if for_auto_advance && repeat == RepeatMode::One {
             current_idx.or(Some(0))
         } else if shuffle {
-            if queue.len() == 1 {
-                match (current_idx, repeat) {
-                    (Some(_), RepeatMode::Off) => None,
-                    _ => Some(0),
-                }
-            } else if repeat == RepeatMode::Off {
-                // Shuffle + RepeatOff: exhaust when all tracks have been visited.
-                let history = self.shuffle_history.read().await;
-                let mut visited = history.clone();
-                if let Some(ci) = current_idx {
-                    if !visited.contains(&ci) {
-                        visited.push(ci);
-                    }
-                }
-                let mut uniq = visited.clone();
-                uniq.sort_unstable();
-                uniq.dedup();
-                if uniq.len() >= queue.len() {
-                    None
-                } else {
-                    // Prefer an unvisited track, fall back to any not-current.
-                    let visited_set: std::collections::HashSet<usize> =
-                        visited.into_iter().collect();
-                    let mut rng = rand::rng();
-                    let mut candidates: Vec<usize> = (0..queue.len()).collect();
-                    candidates.shuffle(&mut rng);
-                    let idx = candidates
-                        .iter()
-                        .find(|i| !visited_set.contains(i))
-                        .copied()
-                        .or_else(|| {
-                            candidates
-                                .iter()
-                                .find(|i| Some(**i) != current_idx)
-                                .copied()
-                        })
-                        .unwrap_or_else(|| rng.random_range(0..queue.len()));
-                    Some(idx)
-                }
-            } else {
-                // Shuffle + RepeatAll (or RepeatOne manual): pick random != current
-                let mut rng = rand::rng();
-                let mut candidates: Vec<usize> = (0..queue.len()).collect();
-                candidates.shuffle(&mut rng);
-                let idx = candidates
-                    .into_iter()
-                    .find(|&i| Some(i) != current_idx)
-                    .unwrap_or_else(|| rng.random_range(0..queue.len()));
-                Some(idx)
-            }
+            self.next_shuffle_index(queue.len(), current_idx, repeat).await
         } else {
             match (current_idx, repeat) {
                 (Some(idx), RepeatMode::All) if idx + 1 >= queue.len() => Some(0),
@@ -608,4 +620,58 @@ pub enum PlayerError {
     DecodeError(String),
     #[error("State error: {0}")]
     StateError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_next_shuffle_index_single_track() {
+        let player = AudioPlayer::new().unwrap();
+        assert_eq!(
+            player
+                .next_shuffle_index(1, Some(0), RepeatMode::Off)
+                .await,
+            None
+        );
+        assert_eq!(
+            player.next_shuffle_index(1, None, RepeatMode::Off).await,
+            Some(0)
+        );
+        assert_eq!(
+            player
+                .next_shuffle_index(1, Some(0), RepeatMode::All)
+                .await,
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_next_shuffle_index_repeat_all() {
+        let player = AudioPlayer::new().unwrap();
+        let idx = player
+            .next_shuffle_index(3, Some(0), RepeatMode::All)
+            .await;
+        assert!(idx.is_some());
+        assert_ne!(idx, Some(0));
+        assert!(idx.unwrap() < 3);
+    }
+
+    #[tokio::test]
+    async fn test_next_shuffle_index_repeat_off_exhaustion() {
+        let player = AudioPlayer::new().unwrap();
+        {
+            let mut hist = player.shuffle_history.write().await;
+            hist.push(0);
+            hist.push(1);
+            hist.push(2);
+        }
+        assert_eq!(
+            player
+                .next_shuffle_index(3, Some(2), RepeatMode::Off)
+                .await,
+            None
+        );
+    }
 }
