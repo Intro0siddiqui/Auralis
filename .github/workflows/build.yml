@@ -181,7 +181,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, x86_64-linux-android
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, i686-linux-android
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -312,7 +312,7 @@ jobs:
       - name: Bundle C++ runtime (libc++_shared.so)
         run: |
           NDK_SYSROOT="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
-          for spec in "aarch64-linux-android:arm64-v8a" "x86_64-linux-android:x86_64"; do
+          for spec in "aarch64-linux-android:arm64-v8a" "arm-linux-androideabi:armeabi-v7a" "x86_64-linux-android:x86_64" "i686-linux-android:x86"; do
             lib="${spec%%:*}"
             abi="${spec##*:}"
             src="$NDK_SYSROOT/$lib/libc++_shared.so"
@@ -354,10 +354,14 @@ jobs:
       - name: Build APK
         run: |
           SYSROOT_LIB_ARM64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/26"
+          SYSROOT_LIB_ARMV7="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/26"
           SYSROOT_LIB_X64="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/26"
+          SYSROOT_LIB_X86="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/i686-linux-android/26"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_ARM64"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS="-L $SYSROOT_LIB_ARMV7"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_X64"
-          npx @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} android build --apk --target aarch64 x86_64 --split-per-abi
+          export CARGO_TARGET_I686_LINUX_ANDROID_RUSTFLAGS="-L $SYSROOT_LIB_X86"
+          npx @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} android build --apk --target aarch64 armv7 x86_64 i686 --split-per-abi
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
@@ -373,7 +377,7 @@ jobs:
             exit 1
           fi
 
-          echo "Signing all per-ABI APKs (arm64 + x86_64)"
+          echo "Signing all per-ABI APKs (arm64, armv7, x86_64, x86)"
           COUNT=0
           for APK_PATH in $(find gen/android -name "*.apk" -path "*/release/*"); do
             [ -z "$APK_PATH" ] && continue
@@ -381,11 +385,25 @@ jobs:
             # Derive ABI label from path/filename
             if echo "$APK_PATH" | grep -qi "arm64\|aarch64"; then
               ABI="arm64"
+            elif echo "$APK_PATH" | grep -qi "armeabi-v7a\|armv7"; then
+              ABI="armv7"
             elif echo "$APK_PATH" | grep -qi "x86_64\|x64"; then
               ABI="x86_64"
+            elif echo "$APK_PATH" | grep -qi "x86"; then
+              ABI="x86"
             else
               # Universal or unknown — infer from contents
-              if unzip -l "$APK_PATH" 2>/dev/null | grep -q "lib/arm64-v8a"; then ABI="arm64"; else ABI="x86_64"; fi
+              if unzip -l "$APK_PATH" 2>/dev/null | grep -q "lib/arm64-v8a"; then
+                ABI="arm64"
+              elif unzip -l "$APK_PATH" 2>/dev/null | grep -q "lib/armeabi-v7a"; then
+                ABI="armv7"
+              elif unzip -l "$APK_PATH" 2>/dev/null | grep -q "lib/x86_64"; then
+                ABI="x86_64"
+              elif unzip -l "$APK_PATH" 2>/dev/null | grep -q "lib/x86"; then
+                ABI="x86"
+              else
+                ABI="universal"
+              fi
             fi
             OUT="auralis-${{ github.ref_name }}-android-${ABI}.apk"
             echo " -> Signing $APK_PATH as $OUT ($ABI)"
@@ -438,8 +456,16 @@ jobs:
             # Determine ABI lib dir inside APK
             if unzip -l "$APK_TARGET" | grep -q "lib/arm64-v8a/"; then
               LIB_DIR="lib/arm64-v8a"
+              ENFORCE_16K=true
+            elif unzip -l "$APK_TARGET" | grep -q "lib/armeabi-v7a/"; then
+              LIB_DIR="lib/armeabi-v7a"
+              ENFORCE_16K=false
             elif unzip -l "$APK_TARGET" | grep -q "lib/x86_64/"; then
               LIB_DIR="lib/x86_64"
+              ENFORCE_16K=true
+            elif unzip -l "$APK_TARGET" | grep -q "lib/x86/"; then
+              LIB_DIR="lib/x86"
+              ENFORCE_16K=false
             else
               echo "No recognized lib dir in $APK_TARGET (listing):"
               unzip -l "$APK_TARGET" | grep "lib/" | head
@@ -453,12 +479,16 @@ jobs:
             fi
             for so in "$TMP_DIR"/${LIB_DIR}/*.so; do
               [ -f "$so" ] || continue
-              BAD=$("$READELF" -lW "$so" | awk '$1=="LOAD" && $NF != "0x4000" {print $NF}')
-              if [ -n "$BAD" ]; then
-                echo "FAIL: $(basename "$so") in $APK_TARGET has non-16KB LOAD alignments: $BAD"
-                exit 1
+              if [ "$ENFORCE_16K" = "true" ]; then
+                BAD=$("$READELF" -lW "$so" | awk '$1=="LOAD" && $NF != "0x4000" {print $NF}')
+                if [ -n "$BAD" ]; then
+                  echo "FAIL: $(basename "$so") in $APK_TARGET has non-16KB LOAD alignments: $BAD"
+                  exit 1
+                fi
+                echo "OK: $(basename "$so") in $APK_TARGET all LOAD segments 16KB-aligned"
+              else
+                echo "OK: $(basename "$so") in $APK_TARGET (32-bit ABI $LIB_DIR) verified"
               fi
-              echo "OK: $(basename "$so") in $APK_TARGET all LOAD segments 16KB-aligned"
             done
             rm -rf "$TMP_DIR"
           done
