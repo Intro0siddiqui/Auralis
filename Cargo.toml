@@ -65,7 +65,7 @@ rand = "0.10"
 # P2P networking (light use — main runtime would be libp2p over IPC)
 # `macros` enables the NetworkBehaviour derive; `json` enables the serde_json
 # request-response codec for sync payload transfer.
-libp2p = { version = "0.56", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "json"] }
+libp2p = { version = "0.56", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "relay", "dcutr", "tokio", "macros", "json"] }
 
 # QR code generation
 qrcode = "0.14"

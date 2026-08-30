@@ -35,16 +35,29 @@ function _wirePlayer() {
     if (p && typeof p.initBridgeListeners === 'function') p.initBridgeListeners();
     if (p && typeof p.hydrateState === 'function') p.hydrateState().catch(()=>{});
 }
+
+function _wireRamSyncListeners() {
+    window.Auralis.bridge.on('sync:track_received_in_ram', (event) => {
+        const payload = event.payload || event;
+        console.log('[Auralis] Track received in RAM:', payload);
+        if (window.Auralis.showToast) {
+            window.Auralis.showToast(`Received track "${payload.title}" in RAM. Instant playback ready.`);
+        }
+    });
+}
+
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
         window.Auralis.bridge.init();
         _wirePlayer();
+        _wireRamSyncListeners();
         // Retry shortly for case where player.js loaded after this module
         setTimeout(_wirePlayer, 300);
     });
 } else {
     window.Auralis.bridge.init();
     _wirePlayer();
+    _wireRamSyncListeners();
     setTimeout(_wirePlayer, 300);
 }
 

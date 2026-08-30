@@ -235,11 +235,19 @@ pub struct PairingInfo {
 
     /// Expiration time
     pub expires_at: DateTime<Utc>,
+
+    /// Node PeerId string embedded in pairing info
+    #[serde(default)]
+    pub peer_id: Option<String>,
+
+    /// Public Multiaddrs (LAN and WAN relay addresses) embedded in pairing info
+    #[serde(default)]
+    pub addrs: Vec<String>,
 }
 
 impl PairingInfo {
-    /// Generate a new pairing request
-    pub fn generate() -> Self {
+    /// Generate a new pairing request with optional network identity (PeerId + addresses)
+    pub fn generate_with_identity(peer_id: Option<String>, addrs: Vec<String>) -> Self {
         use rand::prelude::*;
 
         let mut rng = rand::rng();
@@ -247,14 +255,26 @@ impl PairingInfo {
             .map(|_| rng.random_range(0..10).to_string())
             .collect();
 
-        let qr_data = format!("auralis://pair?pin={}", pin);
+        let qr_payload = serde_json::json!({
+            "pin": pin,
+            "peer_id": peer_id,
+            "addrs": addrs,
+        });
+        let qr_data = qr_payload.to_string();
 
         Self {
             pin,
             qr_data: qr_data.clone(),
             qr_image: Self::generate_qr_code(&qr_data),
             expires_at: Utc::now() + chrono::Duration::minutes(5),
+            peer_id,
+            addrs,
         }
+    }
+
+    /// Generate a default pairing request without network identity
+    pub fn generate() -> Self {
+        Self::generate_with_identity(None, Vec::new())
     }
 
     /// Generate QR code as base64 PNG
@@ -306,6 +326,21 @@ mod tests {
         assert_eq!(info.pin.len(), 6);
         assert!(info.pin.chars().all(|c| c.is_ascii_digit()));
         assert!(!info.is_expired());
+    }
+
+    #[test]
+    fn test_pairing_info_with_identity() {
+        let peer_id = "12D3KooWTestPeerId12345".to_string();
+        let addrs = vec!["/ip4/192.168.1.50/tcp/4001".to_string()];
+        let info = PairingInfo::generate_with_identity(Some(peer_id.clone()), addrs.clone());
+
+        assert_eq!(info.peer_id, Some(peer_id.clone()));
+        assert_eq!(info.addrs, addrs);
+
+        let parsed_qr: serde_json::Value = serde_json::from_str(&info.qr_data).unwrap();
+        assert_eq!(parsed_qr["peer_id"], peer_id);
+        assert_eq!(parsed_qr["pin"], info.pin);
+        assert_eq!(parsed_qr["addrs"][0], "/ip4/192.168.1.50/tcp/4001");
     }
 
     #[test]

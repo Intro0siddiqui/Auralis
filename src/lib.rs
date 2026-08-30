@@ -174,6 +174,10 @@ impl AuralisApp {
                 commands::sync::sync_with_device,
                 commands::sync::get_sync_status,
                 commands::sync::connect_peer_address,
+                commands::sync::stream_p2p_track_to_ram,
+                commands::sync::receive_ram_track,
+                commands::sync::save_ram_track,
+                commands::sync::discard_ram_track,
                 // Settings commands
                 commands::settings::get_settings,
                 commands::settings::update_settings,

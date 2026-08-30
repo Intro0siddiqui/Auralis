@@ -81,6 +81,17 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// An audio track buffered in RAM before deciding to save to disk or discard.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RamTrackBuffer {
+    pub track_id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub file_extension: String,
+    pub data: Vec<u8>,
+}
+
 /// Sync service for managing P2P synchronization
 pub struct SyncService {
     settings_repository: Arc<dyn SettingsRepository>,
@@ -91,6 +102,7 @@ pub struct SyncService {
     sync_status: Arc<RwLock<SyncStatus>>,
     active_pairing: Arc<RwLock<Option<PairingInfo>>>,
     pairing_rate_limiter: Mutex<PairingRateLimiter>,
+    ram_track_buffers: Arc<RwLock<HashMap<String, RamTrackBuffer>>>,
 }
 
 impl SyncService {
@@ -109,6 +121,7 @@ impl SyncService {
             sync_status: Arc::new(RwLock::new(SyncStatus::default())),
             active_pairing: Arc::new(RwLock::new(None)),
             pairing_rate_limiter: Mutex::new(PairingRateLimiter::default()),
+            ram_track_buffers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -196,8 +209,22 @@ impl SyncService {
             .await
             .map_err(|e| SyncError::SettingsError(e.to_string()))?;
 
-        // Generate pairing info
-        let pairing_info = PairingInfo::generate();
+        // Extract network PeerId and known multiaddrs for instant QR connection
+        let peer_id = Some(self.sync_engine.peer_id().to_string());
+        let addrs = if let Ok(pid) = self.sync_engine.peer_id().parse::<libp2p::PeerId>() {
+            self.sync_engine
+                .runtime()
+                .addresses_of_alias(&pid.to_string())
+                .await
+                .into_iter()
+                .map(|a| a.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Generate pairing info with PeerId & Multiaddrs embedded in QR code
+        let pairing_info = PairingInfo::generate_with_identity(peer_id, addrs);
 
         // Store active pairing
         {
@@ -205,19 +232,19 @@ impl SyncService {
             *active = Some(pairing_info.clone());
         }
 
-        info!("Pairing initiated (PIN not logged)");
+        info!("Pairing initiated with network identity embedded in QR");
         Ok(pairing_info)
     }
 
-    /// Complete pairing with PIN
-    pub async fn complete_pairing(
+    /// Complete pairing using PIN and optional scanned QR payload data
+    pub async fn complete_pairing_with_qr(
         &self,
         pin: String,
         device_name: String,
+        qr_payload: Option<String>,
     ) -> Result<PairedDevice, SyncError> {
-        info!(device = %device_name, "Completing pairing");
+        info!(device = %device_name, "Completing pairing with QR/PIN data");
 
-        // Rate limit failed pairing attempts per peer identifier.
         let limiter_key = device_name.trim().to_lowercase();
         {
             let mut limiter = lock_pairing_limiter(&self.pairing_rate_limiter);
@@ -227,50 +254,92 @@ impl SyncService {
             }
         }
 
-        // Check active pairing
-        let active = {
+        // Try extracting embedded identity (PeerId & multiaddrs) from QR payload if scanned
+        let mut qr_peer_id: Option<String> = None;
+        let mut qr_addrs: Vec<String> = Vec::new();
+
+        if let Some(payload_str) = &qr_payload {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(payload_str) {
+                if let Some(pid) = parsed.get("peer_id").and_then(|v| v.as_str()) {
+                    qr_peer_id = Some(pid.to_string());
+                }
+                if let Some(arr) = parsed.get("addrs").and_then(|v| v.as_array()) {
+                    for addr in arr {
+                        if let Some(a) = addr.as_str() {
+                            qr_addrs.push(a.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check active pairing PIN (if local initiator) or QR payload PIN (if scanner)
+        let active_opt = {
             let pairing = self.active_pairing.read().await;
             pairing.clone()
+        };
+
+        if let Some(active) = active_opt {
+            if !constant_time_eq(active.pin.as_bytes(), pin.as_bytes()) {
+                warn!(device = %device_name, "Pairing failed: invalid PIN");
+                lock_pairing_limiter(&self.pairing_rate_limiter).record_failure(&limiter_key);
+                return Err(SyncError::InvalidPin);
+            }
+            if active.is_expired() {
+                return Err(SyncError::PairingExpired);
+            }
         }
-        .ok_or(SyncError::NoActivePairing)?;
 
-        // Validate PIN (constant-time comparison; failures rate limited)
-        if !constant_time_eq(active.pin.as_bytes(), pin.as_bytes()) {
-            warn!(device = %device_name, "Pairing failed: invalid PIN");
-            lock_pairing_limiter(&self.pairing_rate_limiter).record_failure(&limiter_key);
-            return Err(SyncError::InvalidPin);
+        // Dial multiaddrs directly (WAN relay or LAN mDNS) if provided
+        for addr_str in &qr_addrs {
+            if let Err(e) = self.sync_engine.connect(addr_str).await {
+                debug!(addr = %addr_str, error = %e, "Instant QR dial attempt logged");
+            }
         }
 
-        if active.is_expired() {
-            return Err(SyncError::PairingExpired);
+        let device = if let Some(pid_str) = &qr_peer_id {
+            PairedDevice::with_peer_id(device_name.clone(), DeviceType::Desktop, pid_str.clone())
+        } else {
+            PairedDevice::new(device_name.clone(), DeviceType::Desktop)
+        };
+
+        if let Some(pid_str) = &qr_peer_id {
+            if let Ok(pid) = pid_str.parse::<libp2p::PeerId>() {
+                self.sync_engine
+                    .runtime()
+                    .register_device_alias(device.id.to_string(), pid)
+                    .await;
+            }
         }
 
-        // TODO: Implement actual network pairing via libp2p
-        let device = PairedDevice::new(device_name, DeviceType::Desktop);
-
-        // Save to repository
         self.sync_repository
             .save_paired_device(&device)
             .await
             .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
 
-        // Update cache
         {
             let mut devices = self.paired_devices.write().await;
             devices.insert(device.id, device.clone());
         }
 
-        // Clear active pairing
         {
             let mut active = self.active_pairing.write().await;
             *active = None;
         }
 
-        // Successful pairing resets the failure counter for this peer.
         lock_pairing_limiter(&self.pairing_rate_limiter).clear(&limiter_key);
 
-        info!(device_id = %device.id, "Pairing completed");
+        info!(device_id = %device.id, peer_id = ?qr_peer_id, "Pairing completed successfully");
         Ok(device)
+    }
+
+    /// Complete pairing with PIN (legacy wrapper)
+    pub async fn complete_pairing(
+        &self,
+        pin: String,
+        device_name: String,
+    ) -> Result<PairedDevice, SyncError> {
+        self.complete_pairing_with_qr(pin, device_name, None).await
     }
 
     /// Unpair a device
@@ -498,6 +567,75 @@ impl SyncService {
         Ok(())
     }
 
+    /// Stream a track's audio chunks directly from a P2P peer over libp2p binary file transfer into RAM buffer.
+    pub async fn fetch_and_buffer_track_from_peer(
+        &self,
+        peer_id_str: &str,
+        track_id: &str,
+        title: String,
+        artist: String,
+        album: Option<String>,
+        file_extension: String,
+    ) -> Result<RamTrackBuffer, SyncError> {
+        info!(peer = %peer_id_str, track_id = %track_id, "Fetching binary track chunks over libp2p");
+        let mut accumulated_bytes = Vec::new();
+        let mut current_chunk = 0u32;
+
+        loop {
+            let chunk_response = self
+                .sync_engine
+                .request_file_chunk(peer_id_str, track_id.to_string(), current_chunk)
+                .await
+                .map_err(|e| SyncError::NetworkError(format!("Failed to stream file chunk {current_chunk}: {e}")))?;
+
+            if chunk_response.data.is_empty() && chunk_response.total_chunks == 0 {
+                return Err(SyncError::NetworkError(format!("Peer returned empty track data for {track_id}")));
+            }
+
+            accumulated_bytes.extend_from_slice(&chunk_response.data);
+
+            if chunk_response.is_last || (current_chunk + 1 >= chunk_response.total_chunks) {
+                break;
+            }
+            current_chunk += 1;
+        }
+
+        let ram_track = RamTrackBuffer {
+            track_id: track_id.to_string(),
+            title,
+            artist,
+            album,
+            file_extension,
+            data: accumulated_bytes,
+        };
+
+        self.buffer_track_in_ram(ram_track.clone()).await;
+        Ok(ram_track)
+    }
+
+    /// Buffer an incoming track stream in RAM before disk decision
+    pub async fn buffer_track_in_ram(&self, ram_track: RamTrackBuffer) {
+        info!(track_id = %ram_track.track_id, title = %ram_track.title, len = ram_track.data.len(), "Buffering track in RAM");
+        let mut buffers = self.ram_track_buffers.write().await;
+        buffers.insert(ram_track.track_id.clone(), ram_track);
+    }
+
+    /// Retrieve a RAM-buffered track by track_id
+    pub async fn get_ram_track(&self, track_id: &str) -> Option<RamTrackBuffer> {
+        let buffers = self.ram_track_buffers.read().await;
+        buffers.get(track_id).cloned()
+    }
+
+    /// Discard a RAM-buffered track without writing to disk
+    pub async fn discard_ram_track(&self, track_id: &str) -> bool {
+        let mut buffers = self.ram_track_buffers.write().await;
+        let removed = buffers.remove(track_id).is_some();
+        if removed {
+            info!(track_id = %track_id, "Discarded RAM track buffer with zero disk writes");
+        }
+        removed
+    }
+
     /// Clear all pending changes
     pub async fn clear_pending_changes(&self) -> Result<(), SyncError> {
         self.sync_repository
@@ -563,6 +701,44 @@ mod tests {
             .resolve_peer_id(&device.id.to_string())
             .await;
         assert_eq!(resolved, Some(peer_id));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_ram_track_buffering_and_discard() {
+        let db_path =
+            std::env::temp_dir().join(format!("test_auralis_ram_buf_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+
+        let settings_repo = Arc::new(SqliteSettingsRepository::new(db_arc.clone()));
+        let sync_repo = Arc::new(SqliteSyncRepository::new(db_arc.clone()));
+        let sync_engine = Arc::new(SyncEngine::new());
+
+        let service = SyncService::new(settings_repo, sync_repo, sync_engine);
+
+        let ram_track = RamTrackBuffer {
+            track_id: "test-track-1".to_string(),
+            title: "Test Stream".to_string(),
+            artist: "Auralis".to_string(),
+            album: None,
+            file_extension: "wav".to_string(),
+            data: vec![0, 1, 2, 3, 4],
+        };
+
+        service.buffer_track_in_ram(ram_track.clone()).await;
+
+        let retrieved = service.get_ram_track("test-track-1").await;
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().data, vec![0, 1, 2, 3, 4]);
+
+        let discarded = service.discard_ram_track("test-track-1").await;
+        assert!(discarded);
+
+        let let_after = service.get_ram_track("test-track-1").await;
+        assert!(let_after.is_none());
 
         let _ = std::fs::remove_file(&db_path);
     }

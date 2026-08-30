@@ -121,6 +121,33 @@ impl AudioPlayer {
         Err(PlayerError::InitError("audio output unavailable".into()))
     }
 
+    /// Decode and play audio directly from an in-memory byte buffer with zero disk I/O delay.
+    pub async fn play_bytes(&self, data: Vec<u8>) -> Result<(), PlayerError> {
+        info!(len = data.len(), "Starting in-memory playback");
+        self.stop().await?;
+
+        let vol = *self.volume.read().await;
+        let cursor = std::io::Cursor::new(data);
+        let source = Decoder::new(BufReader::new(cursor))
+            .map_err(|e| PlayerError::DecodeError(format!("In-memory audio decode failed: {e}")))?;
+
+        if let Some(dec_dur) = source.total_duration() {
+            *self.track_duration.write().await = dec_dur;
+        }
+
+        let mixer = self.output_stream_handle().await?;
+        let player = Player::connect_new(&mixer);
+
+        player.set_volume(vol);
+        player.append(source);
+
+        *self.sink.write().await = Some(player);
+        self.mark_playing().await;
+
+        debug!("In-memory playback started");
+        Ok(())
+    }
+
     pub async fn play(&self, path: &str) -> Result<(), PlayerError> {
         info!(path = %path, "Starting playback");
         self.stop().await?;

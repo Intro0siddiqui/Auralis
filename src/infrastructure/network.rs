@@ -14,7 +14,7 @@ use libp2p::core::{ConnectedPoint, Multiaddr};
 use libp2p::identity::Keypair;
 use libp2p::request_response;
 use libp2p::swarm::{Swarm, SwarmEvent};
-use libp2p::{gossipsub, mdns};
+use libp2p::{gossipsub, mdns, Transport};
 use libp2p::{PeerId, StreamProtocol};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,9 +27,15 @@ use tracing::{debug, error, info, warn};
 
 type PendingResponseMap =
     HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<(), NetworkError>>>;
+type PendingFileChunkMap = HashMap<
+    request_response::OutboundRequestId,
+    oneshot::Sender<Result<FileChunkResponse, NetworkError>>,
+>;
 
 /// Protocol name used for direct peer-to-peer sync transfers.
 pub const SYNC_PROTOCOL_NAME: &str = "/auralis/sync/1";
+/// Protocol name used for dedicated binary file transfers.
+pub const FILE_TRANSFER_PROTOCOL_NAME: &str = "/auralis/file-transfer/1.0";
 /// Gossipsub topic used to broadcast change announcements to the mesh.
 pub const SYNC_TOPIC: &str = "auralis/sync";
 
@@ -46,15 +52,35 @@ pub struct SyncResponse {
     pub message: String,
 }
 
+/// Request for a binary audio chunk over `/auralis/file-transfer/1.0`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChunkRequest {
+    pub track_id: String,
+    pub chunk_index: u32,
+}
+
+/// Binary chunk response containing raw audio bytes (e.g. 256KB-1MB).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChunkResponse {
+    pub track_id: String,
+    pub chunk_index: u32,
+    pub total_chunks: u32,
+    pub data: Vec<u8>,
+    pub is_last: bool,
+}
+
 /// Combined libp2p behaviour used by every Auralis node.
 ///
 /// The derive macro generates the `SwarmBehaviourEvent` enum aggregating the
-/// events of all three sub-behaviours.
+/// events of all sub-behaviours.
 #[derive(libp2p::swarm::NetworkBehaviour)]
 pub struct SwarmBehaviour {
-    mdns: mdns::tokio::Behaviour,
-    gossipsub: gossipsub::Behaviour,
-    request_response: request_response::json::Behaviour<SyncRequest, SyncResponse>,
+    pub mdns: mdns::tokio::Behaviour,
+    pub gossipsub: gossipsub::Behaviour,
+    pub request_response: request_response::json::Behaviour<SyncRequest, SyncResponse>,
+    pub file_transfer: request_response::json::Behaviour<FileChunkRequest, FileChunkResponse>,
+    pub relay: libp2p::relay::client::Behaviour,
+    pub dcutr: libp2p::dcutr::Behaviour,
 }
 
 /// Commands sent from the public API to the background swarm task.
@@ -68,6 +94,11 @@ enum NetworkCommand {
         peer_id: PeerId,
         request: SyncRequest,
         reply: oneshot::Sender<Result<(), NetworkError>>,
+    },
+    RequestFileChunk {
+        peer_id: PeerId,
+        request: FileChunkRequest,
+        reply: oneshot::Sender<Result<FileChunkResponse, NetworkError>>,
     },
     Publish {
         topic: String,
@@ -299,6 +330,59 @@ impl NetworkRuntime {
                 debug!(device_id = %device_id, peer_id = %peer_str, "Persisted device alias");
             }
         }
+    }
+
+    /// Read a binary audio chunk from disk for a local track by ID.
+    pub async fn read_track_file_chunk(
+        &self,
+        track_id: &str,
+        chunk_index: u32,
+        chunk_size: usize,
+    ) -> Option<FileChunkResponse> {
+        let db = self.alias_db.read().await.clone()?;
+        let file_path = {
+            let conn_guard = match db.try_connection() {
+                Some(g) => Some(g),
+                None => db.connection().ok(),
+            }?;
+            let mut stmt = conn_guard
+                .prepare("SELECT file_path FROM tracks WHERE id = ?1 OR lower(id) = lower(?1) LIMIT 1")
+                .ok()?;
+            stmt.query_row(rusqlite::params![track_id], |row| row.get::<_, String>(0))
+                .ok()?
+        };
+
+        let file = std::fs::File::open(&file_path).ok()?;
+        let file_len = file.metadata().ok()?.len() as usize;
+        if file_len == 0 {
+            return None;
+        }
+
+        let chunk_size = chunk_size.max(64 * 1024);
+        let total_chunks = ((file_len + chunk_size - 1) / chunk_size) as u32;
+
+        if chunk_index >= total_chunks {
+            return None;
+        }
+
+        use std::io::{Read, Seek, SeekFrom};
+        let mut reader = std::io::BufReader::new(file);
+        let offset = (chunk_index as u64) * (chunk_size as u64);
+        reader.seek(SeekFrom::Start(offset)).ok()?;
+
+        let bytes_to_read = chunk_size.min(file_len - offset as usize);
+        let mut buffer = vec![0u8; bytes_to_read];
+        reader.read_exact(&mut buffer).ok()?;
+
+        let is_last = chunk_index + 1 == total_chunks;
+
+        Some(FileChunkResponse {
+            track_id: track_id.to_string(),
+            chunk_index,
+            total_chunks,
+            data: buffer,
+            is_last,
+        })
     }
 
     /// Resolve a `device_id` (UUID string) or a raw PeerId string to a real
@@ -783,6 +867,52 @@ impl SyncEngine {
             Err(_) => Err(NetworkError::Timeout),
         }
     }
+
+    /// Request a binary file chunk for a track from a peer.
+    pub async fn request_file_chunk(
+        &self,
+        peer: &str,
+        track_id: String,
+        chunk_index: u32,
+    ) -> Result<FileChunkResponse, NetworkError> {
+        let peer_id = if let Some(pid) = self.runtime.resolve_peer_id(peer).await {
+            pid
+        } else {
+            return Err(NetworkError::PeerNotFound(peer.to_string()));
+        };
+
+        let tx = self
+            .runtime
+            .command_tx
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| {
+                NetworkError::ConnectionError("network runtime not started".to_string())
+            })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let request = FileChunkRequest {
+            track_id,
+            chunk_index,
+        };
+
+        tx.send(NetworkCommand::RequestFileChunk {
+            peer_id,
+            request,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|e| NetworkError::SendError(e.to_string()))?;
+
+        match tokio::time::timeout(Duration::from_secs(30), reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(NetworkError::ConnectionError(
+                "file chunk channel closed before a response".to_string(),
+            )),
+            Err(_) => Err(NetworkError::Timeout),
+        }
+    }
 }
 
 impl Default for SyncEngine {
@@ -855,6 +985,8 @@ pub fn build_swarm(
     keypair: &Keypair,
     _listen_port: u16,
 ) -> Result<Swarm<SwarmBehaviour>, NetworkError> {
+    let (relay_transport, relay_client) = libp2p::relay::client::new(keypair.public().to_peer_id());
+
     let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
         .with_tokio()
         .with_tcp(
@@ -862,6 +994,13 @@ pub fn build_swarm(
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )
+        .map_err(|e| NetworkError::DiscoveryError(e.to_string()))?
+        .with_other_transport(|key| {
+            relay_transport
+                .upgrade(libp2p::core::upgrade::Version::V1)
+                .authenticate(libp2p::noise::Config::new(key).unwrap())
+                .multiplex(libp2p::yamux::Config::default())
+        })
         .map_err(|e| NetworkError::DiscoveryError(e.to_string()))?
         .with_behaviour(
             |key| -> Result<SwarmBehaviour, Box<dyn std::error::Error + Send + Sync + 'static>> {
@@ -889,10 +1028,24 @@ pub fn build_swarm(
                         request_response::Config::default(),
                     );
 
+                let file_transfer =
+                    request_response::json::Behaviour::<FileChunkRequest, FileChunkResponse>::new(
+                        [(
+                            StreamProtocol::new(FILE_TRANSFER_PROTOCOL_NAME),
+                            request_response::ProtocolSupport::Full,
+                        )],
+                        request_response::Config::default(),
+                    );
+
+                let dcutr = libp2p::dcutr::Behaviour::new(local_peer_id);
+
                 Ok(SwarmBehaviour {
                     mdns,
                     gossipsub,
                     request_response,
+                    file_transfer,
+                    relay: relay_client,
+                    dcutr,
                 })
             },
         )
@@ -909,10 +1062,8 @@ async fn run_swarm(
     mut swarm: Swarm<SwarmBehaviour>,
     mut command_rx: mpsc::Receiver<NetworkCommand>,
 ) {
-    // Shared pending map so timeout tasks can clean up the entry even when the
-    // caller dropped its `reply_rx` after a 30s timeout. Previously a timed-out
-    // request leaked forever (never removed until a late response arrived).
     let pending: Arc<TokioMutex<PendingResponseMap>> = Arc::new(TokioMutex::new(HashMap::new()));
+    let pending_chunks: Arc<TokioMutex<PendingFileChunkMap>> = Arc::new(TokioMutex::new(HashMap::new()));
 
     info!(peer_id = %runtime.local_peer_id, "Swarm event loop started");
     loop {
@@ -944,9 +1095,27 @@ async fn run_swarm(
                             let mut map = pending.lock().await;
                             map.insert(request_id, reply);
                         }
-                        // Timeout cleanup: remove pending entry after 30s if no
-                        // response / OutboundFailure cleaned it already.
                         let pending_clone = pending.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            let mut map = pending_clone.lock().await;
+                            if let Some(sender) = map.remove(&request_id) {
+                                let _ = sender.send(Err(NetworkError::Timeout));
+                            }
+                        });
+                    }
+                    Some(NetworkCommand::RequestFileChunk { peer_id, request, reply }) => {
+                        let addrs = runtime.addresses_of(&peer_id).await;
+                        for addr in addrs {
+                            swarm.add_peer_address(peer_id, addr);
+                        }
+                        let request_id =
+                            swarm.behaviour_mut().file_transfer.send_request(&peer_id, request);
+                        {
+                            let mut map = pending_chunks.lock().await;
+                            map.insert(request_id, reply);
+                        }
+                        let pending_clone = pending_chunks.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(Duration::from_secs(30)).await;
                             let mut map = pending_clone.lock().await;
@@ -971,7 +1140,7 @@ async fn run_swarm(
             event = swarm.next() => {
                 match event {
                     Some(event) => {
-                        handle_swarm_event(&runtime, &mut swarm, &pending, event).await;
+                        handle_swarm_event(&runtime, &mut swarm, &pending, &pending_chunks, event).await;
                     }
                     None => break,
                 }
@@ -990,6 +1159,7 @@ async fn handle_swarm_event(
     runtime: &Arc<NetworkRuntime>,
     swarm: &mut Swarm<SwarmBehaviour>,
     pending: &Arc<TokioMutex<PendingResponseMap>>,
+    pending_chunks: &Arc<TokioMutex<PendingFileChunkMap>>,
     event: SwarmEvent<<SwarmBehaviour as libp2p::swarm::NetworkBehaviour>::ToSwarm>,
 ) {
     match event {
@@ -1082,6 +1252,72 @@ async fn handle_swarm_event(
         )) => {
             warn!(?error, "Inbound sync failure");
         }
+        SwarmEvent::Behaviour(SwarmBehaviourEvent::FileTransfer(
+            request_response::Event::Message {
+                peer,
+                message,
+                ..
+            },
+        )) => match message {
+            request_response::Message::Request {
+                request, channel, ..
+            } => {
+                info!(%peer, track_id = %request.track_id, chunk_index = request.chunk_index, "Received file chunk request");
+                let response = match runtime.read_track_file_chunk(&request.track_id, request.chunk_index, 256 * 1024).await {
+                    Some(resp) => resp,
+                    None => FileChunkResponse {
+                        track_id: request.track_id.clone(),
+                        chunk_index: request.chunk_index,
+                        total_chunks: 0,
+                        data: Vec::new(),
+                        is_last: true,
+                    },
+                };
+                let _ = swarm
+                    .behaviour_mut()
+                    .file_transfer
+                    .send_response(channel, response);
+            }
+            request_response::Message::Response {
+                request_id,
+                response,
+            } => {
+                let reply = {
+                    let mut map = pending_chunks.lock().await;
+                    map.remove(&request_id)
+                };
+                if let Some(reply) = reply {
+                    runtime.record_bytes_received(response.data.len() as u64);
+                    let _ = reply.send(Ok(response));
+                }
+            }
+        },
+        SwarmEvent::Behaviour(SwarmBehaviourEvent::FileTransfer(
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            },
+        )) => {
+            let reply = {
+                let mut map = pending_chunks.lock().await;
+                map.remove(&request_id)
+            };
+            if let Some(reply) = reply {
+                let _ = reply.send(Err(NetworkError::ConnectionError(format!(
+                    "outbound file chunk request failed: {error:?}"
+                ))));
+            }
+        }
+        SwarmEvent::Behaviour(SwarmBehaviourEvent::FileTransfer(
+            request_response::Event::InboundFailure { error, .. },
+        )) => {
+            warn!(?error, "Inbound file chunk failure");
+        }
+        SwarmEvent::Behaviour(SwarmBehaviourEvent::Relay(event)) => {
+            debug!(?event, "Relay client event");
+        }
+        SwarmEvent::Behaviour(SwarmBehaviourEvent::Dcutr(event)) => {
+            debug!(?event, "DCUtR hole-punching event");
+        }
         SwarmEvent::ConnectionEstablished {
             peer_id, endpoint, ..
         } => {
@@ -1150,6 +1386,32 @@ mod tests {
         let back: SyncRequest = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.payload["type"], "add_track");
         assert_eq!(back.payload["id"], "abc-123");
+    }
+
+    #[test]
+    fn test_file_chunk_serialization_roundtrip() {
+        let chunk_req = FileChunkRequest {
+            track_id: "track-123".to_string(),
+            chunk_index: 2,
+        };
+        let req_bytes = serde_json::to_vec(&chunk_req).unwrap();
+        let back_req: FileChunkRequest = serde_json::from_slice(&req_bytes).unwrap();
+        assert_eq!(back_req.track_id, "track-123");
+        assert_eq!(back_req.chunk_index, 2);
+
+        let chunk_resp = FileChunkResponse {
+            track_id: "track-123".to_string(),
+            chunk_index: 2,
+            total_chunks: 5,
+            data: vec![1, 2, 3, 4, 5],
+            is_last: false,
+        };
+        let resp_bytes = serde_json::to_vec(&chunk_resp).unwrap();
+        let back_resp: FileChunkResponse = serde_json::from_slice(&resp_bytes).unwrap();
+        assert_eq!(back_resp.track_id, "track-123");
+        assert_eq!(back_resp.total_chunks, 5);
+        assert_eq!(back_resp.data, vec![1, 2, 3, 4, 5]);
+        assert!(!back_resp.is_last);
     }
 
     #[test]
