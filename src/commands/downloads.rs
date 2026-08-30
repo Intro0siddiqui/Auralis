@@ -35,6 +35,9 @@ pub struct DownloadRequest {
     pub thumbnail: Option<String>,
     /// Optional headers (UA/Referer/Origin) matched to the InnerTube client.
     pub headers: Option<HashMap<String, String>>,
+    /// Expected duration in seconds if known up-front from metadata.
+    #[serde(alias = "duration", alias = "duration_secs", default)]
+    pub expected_duration_secs: Option<u32>,
 }
 
 /// Playlist download request — a pre-resolved list of items.
@@ -84,6 +87,7 @@ pub async fn download_audio(
         total_bytes: request.total_bytes,
         thumbnail: request.thumbnail.clone(),
         headers: request.headers.clone(),
+        expected_duration_secs: request.expected_duration_secs,
     };
 
     let id = downloader.download(stream).await.map_err(|e| {
@@ -184,6 +188,7 @@ pub async fn download_playlist(
             total_bytes: item.total_bytes,
             thumbnail: item.thumbnail,
             headers: item.headers.clone(),
+            expected_duration_secs: item.expected_duration_secs,
         };
 
         match downloader.download(stream).await {

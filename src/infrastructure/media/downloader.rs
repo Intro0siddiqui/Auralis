@@ -10,12 +10,13 @@
 
 use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
 use chrono::Utc;
+use lofty::file::{AudioFile, FileType};
+use lofty::probe::Probe;
 use std::collections::HashMap;
-use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -43,6 +44,8 @@ pub struct StreamDownload {
     /// matched to the InnerTube client that generated the URL). If absent,
     /// sane YouTube defaults are injected.
     pub headers: Option<HashMap<String, String>>,
+    /// Expected duration in seconds if known up-front from metadata.
+    pub expected_duration_secs: Option<u32>,
 }
 
 /// Per-job bookkeeping required to (re)start and resume a download.
@@ -50,8 +53,13 @@ pub struct StreamDownload {
 struct DownloadJob {
     stream_url: String,
     output_path: PathBuf,
+    staging_path: PathBuf,
     thumbnail: Option<String>,
     headers: Option<HashMap<String, String>>,
+    expected_duration_secs: Option<u32>,
+    total_bytes: Option<u64>,
+    format: AudioFormat,
+    ext: String,
 }
 
 /// Streams a resolved audio URL to disk with progress tracking.
@@ -109,10 +117,8 @@ fn sanitize_ext(raw: &str, fallback: &str) -> String {
 /// Strips path separators, control chars, "..", reserved Windows names, and
 /// limits length to 200 chars. Never returns empty or "." / "..".
 fn sanitize_filename(name: &str) -> String {
-    // Take basename only — strip any directory components
-    let base = name.rsplit(&['/', '\\'][..]).next().unwrap_or(name);
-    // Remove control chars then replace unsafe chars
-    let filtered: String = base.chars().filter(|c| !c.is_control()).collect();
+    // Replace control chars and map path separators/unsafe chars to '_'
+    let filtered: String = name.chars().filter(|c| !c.is_control()).collect();
     let cleaned: String = filtered
         .chars()
         .map(|c| {
@@ -152,9 +158,70 @@ fn sanitize_filename(name: &str) -> String {
     trimmed
 }
 
+/// Validate downloaded audio file integrity using lofty.
+/// Checks that the file is non-empty, contains valid audio headers/properties,
+/// and that decoded duration matches expected duration within ±5s tolerance (if expected is known).
+pub fn validate_audio_file(
+    path: &Path,
+    expected_duration_secs: Option<u32>,
+    ext: &str,
+    format: AudioFormat,
+) -> Result<u32, String> {
+    if !path.exists() {
+        return Err(format!("Staging file does not exist: {}", path.display()));
+    }
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("Failed to read metadata for {}: {e}", path.display()))?;
+    let file_size = metadata.len();
+    if file_size == 0 {
+        return Err("Staging file is empty (0 bytes)".to_string());
+    }
+
+    let mut probe =
+        Probe::open(path).map_err(|e| format!("Failed to open file for lofty probe: {e}"))?;
+
+    if probe.file_type().is_none() {
+        probe = probe
+            .guess_file_type()
+            .map_err(|e| format!("Failed to guess audio file type: {e}"))?;
+    }
+
+    if probe.file_type().is_none() {
+        if let Some(ft) = FileType::from_ext(ext) {
+            probe = probe.set_file_type(ft);
+        } else if let Some(ft) = FileType::from_ext(format.extension()) {
+            probe = probe.set_file_type(ft);
+        }
+    }
+
+    let tagged_file = probe
+        .read()
+        .map_err(|e| format!("Corrupt or unreadable audio headers: {e}"))?;
+
+    let duration_secs = tagged_file.properties().duration().as_secs() as u32;
+
+    if let Some(expected) = expected_duration_secs {
+        if expected > 0 && duration_secs > 0 {
+            let diff = (duration_secs as i64 - expected as i64).abs();
+            if diff > 5 {
+                return Err(format!(
+                    "Decoded duration ({}s) differs by > 5s from expected duration ({}s, diff={}s)",
+                    duration_secs, expected, diff
+                ));
+            }
+        }
+    }
+
+    Ok(duration_secs)
+}
+
 impl Downloader {
     /// Create a new downloader that writes files into `output_dir`.
     pub fn new(output_dir: PathBuf) -> Self {
+        // Ensure staging directory exists
+        let tmp_dir = output_dir.join(".tmp");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+
         Self {
             output_dir,
             active_downloads: Arc::new(RwLock::new(HashMap::new())),
@@ -174,7 +241,18 @@ impl Downloader {
             .as_ref()
             .map(|h| h.keys().cloned().collect::<Vec<_>>().join(","))
             .unwrap_or_default();
-        info!(url = %req.stream_url, title = %req.title, platform = %req.platform, ext = %req.ext, total_bytes = ?req.total_bytes, host = %host, has_headers = %has_headers, headers = %header_keys, "Starting download");
+        info!(
+            url = %req.stream_url,
+            title = %req.title,
+            platform = %req.platform,
+            ext = %req.ext,
+            total_bytes = ?req.total_bytes,
+            expected_duration = ?req.expected_duration_secs,
+            host = %host,
+            has_headers = %has_headers,
+            headers = %header_keys,
+            "Starting download"
+        );
         debug!(url = %req.stream_url, headers = ?req.headers, "Download request headers");
 
         if !req.stream_url.starts_with("https://") && !req.stream_url.starts_with("http://") {
@@ -200,10 +278,15 @@ impl Downloader {
             path = self.output_dir.join(&filename);
         }
 
+        let tmp_dir = self.output_dir.join(".tmp");
+        let staging_path = tmp_dir.join(format!("{}.part", id));
+        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+
         let mut progress =
             DownloadProgress::new(req.stream_url.clone(), req.title.clone(), req.format);
         progress.platform = req.platform.clone();
         progress.total_bytes = req.total_bytes;
+        progress.expected_duration_secs = req.expected_duration_secs;
         progress.status = DownloadStatus::Downloading;
         progress.output_path = Some(path.to_string_lossy().to_string());
         progress.started_at = Utc::now();
@@ -220,8 +303,13 @@ impl Downloader {
                 DownloadJob {
                     stream_url: req.stream_url.clone(),
                     output_path: path,
+                    staging_path,
                     thumbnail: req.thumbnail,
                     headers: req.headers,
+                    expected_duration_secs: req.expected_duration_secs,
+                    total_bytes: req.total_bytes,
+                    format: req.format,
+                    ext,
                 },
             );
         }
@@ -248,8 +336,14 @@ impl Downloader {
 
             if let Err(e) = Self::run_stream(id, &job, start_byte, active.clone()).await {
                 let url_host = job.stream_url.split('/').nth(2).unwrap_or("unknown");
-                error!(download_id = %id, url_host = %url_host, url = %job.stream_url, start_byte = start_byte, error = %e, "Download failed — will mark as failed with diagnostic");
+                error!(download_id = %id, url_host = %url_host, url = %job.stream_url, start_byte = start_byte, error = %e, "Download failed — cleaning staging file and marking failed");
                 warn!(download_id = %id, error = %e, "DIAGNOSTIC download_failed id={} host={} url={} error={}", id, url_host, job.stream_url, e);
+
+                // Clean up staging file and output file on unrecoverable failure
+                let _ = tokio::fs::remove_file(&job.staging_path).await;
+                let _ = tokio::fs::remove_file(&job.output_path).await;
+                let _ = tokio::fs::remove_file(job.output_path.with_extension("jpg")).await;
+
                 let mut guard = active.write().await;
                 if let Some(state) = guard.get_mut(&id) {
                     state.fail(e.to_string());
@@ -263,15 +357,12 @@ impl Downloader {
         tasks.insert(id, handle);
     }
 
-    /// Stream `job.stream_url` to `job.output_path`, updating progress.
-    /// On failure the returned `DownloaderError` string is intentionally
-    /// verbose (status + body snippet + host + byte counts) so it surfaces
-    /// in the `download:completed` event's `error` field, the toast, and
-    /// `adb logcat` — users diagnose without devtools.
+    /// Stream `job.stream_url` to `job.staging_path`, verifying integrity and atomically
+    /// moving to `job.output_path`.
     async fn run_stream(
         id: Uuid,
         job: &DownloadJob,
-        start_byte: u64,
+        initial_start_byte: u64,
         active: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
     ) -> Result<(), DownloaderError> {
         let host = job.stream_url.split('/').nth(2).unwrap_or("unknown");
@@ -280,14 +371,27 @@ impl Downloader {
         } else {
             job.stream_url.clone()
         };
-        // Build client: use supplied UA if present, otherwise sane default.
+
+        // Ensure staging and output directories exist
+        if let Some(parent) = job.staging_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(DownloaderError::IoError)?;
+        }
+        if let Some(parent) = job.output_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(DownloaderError::IoError)?;
+        }
+
+        // Build HTTP client: use supplied UA if present, otherwise sane default.
         let ua = job
             .headers
             .as_ref()
             .and_then(|h| h.get("User-Agent").or_else(|| h.get("user-agent")).cloned())
             .unwrap_or_else(|| "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36".to_string());
 
-        debug!(download_id = %id, host = %host, ua = %ua, start_byte = start_byte, "Building HTTP client for stream");
+        debug!(download_id = %id, host = %host, ua = %ua, "Building HTTP client for stream");
         let client = reqwest::Client::builder()
             .use_rustls_tls()
             .user_agent(ua.clone())
@@ -299,238 +403,430 @@ impl Downloader {
                 DownloaderError::HttpError(format!("failed to build HTTP client: {e}"))
             })?;
 
-        let mut req = client.get(&job.stream_url);
-        // Inject headers that googlevideo validates: Referer/Origin/Accept.
-        // Caller (youtube.js) supplies a client-matched UA; we add the rest.
-        let mut injected: HashMap<String, String> = HashMap::new();
-        injected.insert(
-            "Referer".to_string(),
-            "https://www.youtube.com/".to_string(),
-        );
-        injected.insert("Origin".to_string(), "https://www.youtube.com".to_string());
-        injected.insert("Accept".to_string(), "*/*".to_string());
-        injected.insert("Accept-Language".to_string(), "en-US,en;q=0.9".to_string());
-        injected.insert("Sec-Fetch-Mode".to_string(), "no-cors".to_string());
-        injected.insert("Connection".to_string(), "keep-alive".to_string());
-        if let Some(h) = &job.headers {
-            for (k, v) in h {
-                if k.eq_ignore_ascii_case("user-agent") {
-                    continue;
-                }
-                injected.insert(k.clone(), v.clone());
+        const MAX_STREAM_RETRIES: usize = 5;
+        const MIN_VALID_STREAM_BYTES: u64 = 10 * 1024; // 10KB
+
+        let mut attempt: usize = 0;
+        let mut total_bytes: Option<u64> = job.total_bytes;
+        let mut current_downloaded: u64 = initial_start_byte;
+
+        // Check if staging file already exists on disk and has bytes for resuming
+        if initial_start_byte > 0 && job.staging_path.exists() {
+            if let Ok(meta) = tokio::fs::metadata(&job.staging_path).await {
+                current_downloaded = meta.len();
             }
         }
-        let injected_keys = injected.keys().cloned().collect::<Vec<_>>().join(",");
-        info!(download_id = %id, host = %host, injected = %injected_keys, start_byte = start_byte, "Sending GET for stream");
-        for (k, v) in injected {
-            req = req.header(k, v);
-        }
-        if start_byte > 0 {
-            req = req.header("Range", format!("bytes={}-", start_byte));
-        }
-        let mut res = tokio::time::timeout(Duration::from_secs(30), req.send())
-            .await
-            .map_err(|_| {
-                let msg = format!("request timed out after 30s [{host}] start_byte={start_byte} url={url_snip}");
-                error!(download_id = %id, host = %host, start_byte = start_byte, "Request timeout (30s)");
-                warn!(download_id = %id, "DIAGNOSTIC download_timeout id={} host={} start_byte={} url={} ua={}", id, host, start_byte, url_snip, ua);
-                DownloaderError::HttpError(msg)
-            })?
-            .map_err(|e| {
-                let msg = format!("request failed [{host}] start_byte={start_byte}: {e} (url={url_snip})");
-                error!(download_id = %id, host = %host, error = %e, "Request failed");
-                DownloaderError::HttpError(msg)
-            })?;
 
-        let status = res.status();
-        // Use reqwest StatusCode for correctness; 206 = PartialContent
-        let resuming = start_byte > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
-        if start_byte > 0 && status == reqwest::StatusCode::OK {
-            // Server ignored Range — must truncate and restart from 0, otherwise
-            // `downloaded = start_byte` overcounts and file contains duplicate prefix
-            warn!(download_id = %id, start_byte = start_byte, "Range request got 200 not 206 — truncating file and resetting to 0 (server does not support resume)");
+        let overall_start = Instant::now();
+
+        loop {
+            attempt += 1;
+            if attempt > 1 {
+                let backoff_ms = 500 * (1 << (attempt - 2).min(5));
+                info!(
+                    download_id = %id,
+                    attempt = attempt,
+                    max_attempts = MAX_STREAM_RETRIES,
+                    backoff_ms = backoff_ms,
+                    downloaded = current_downloaded,
+                    "Stream retry/reconnect attempt with exponential backoff"
+                );
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            }
+
+            let mut req = client.get(&job.stream_url);
+            // Inject headers that googlevideo validates: Referer/Origin/Accept.
+            let mut injected: HashMap<String, String> = HashMap::new();
+            injected.insert(
+                "Referer".to_string(),
+                "https://www.youtube.com/".to_string(),
+            );
+            injected.insert("Origin".to_string(), "https://www.youtube.com".to_string());
+            injected.insert("Accept".to_string(), "*/*".to_string());
+            injected.insert("Accept-Language".to_string(), "en-US,en;q=0.9".to_string());
+            injected.insert("Sec-Fetch-Mode".to_string(), "no-cors".to_string());
+            injected.insert("Connection".to_string(), "keep-alive".to_string());
+            if let Some(h) = &job.headers {
+                for (k, v) in h {
+                    if k.eq_ignore_ascii_case("user-agent") {
+                        continue;
+                    }
+                    injected.insert(k.clone(), v.clone());
+                }
+            }
+            for (k, v) in injected {
+                req = req.header(k, v);
+            }
+
+            if current_downloaded > 0 {
+                req = req.header("Range", format!("bytes={}-", current_downloaded));
+            }
+
+            info!(
+                download_id = %id,
+                host = %host,
+                attempt = attempt,
+                start_byte = current_downloaded,
+                "Sending GET for stream"
+            );
+
+            let send_res = tokio::time::timeout(Duration::from_secs(30), req.send()).await;
+            let mut res = match send_res {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    let msg = format!("request failed [{host}] start_byte={current_downloaded}: {e} (url={url_snip})");
+                    warn!(download_id = %id, host = %host, error = %e, attempt = attempt, "Request send error");
+                    if attempt < MAX_STREAM_RETRIES {
+                        continue;
+                    }
+                    return Err(DownloaderError::HttpError(msg));
+                }
+                Err(_) => {
+                    let msg = format!("request timed out after 30s [{host}] start_byte={current_downloaded} url={url_snip}");
+                    warn!(download_id = %id, host = %host, attempt = attempt, "Request send timed out");
+                    if attempt < MAX_STREAM_RETRIES {
+                        continue;
+                    }
+                    return Err(DownloaderError::HttpError(msg));
+                }
+            };
+
+            let status = res.status();
+            let resuming = current_downloaded > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
+
+            if current_downloaded > 0 && status == reqwest::StatusCode::OK {
+                // Server ignored Range — must truncate and restart from 0
+                warn!(
+                    download_id = %id,
+                    start_byte = current_downloaded,
+                    "Range request got 200 not 206 — resetting downloaded to 0 and truncating staging file"
+                );
+                current_downloaded = 0;
+                {
+                    let mut guard = active.write().await;
+                    if let Some(state) = guard.get_mut(&id) {
+                        state.downloaded_bytes = 0;
+                        state.progress = 0.0;
+                        state.updated_at = Utc::now();
+                    }
+                }
+            }
+
+            if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                warn!(
+                    download_id = %id,
+                    start_byte = current_downloaded,
+                    "416 Range Not Satisfiable — resetting downloaded to 0 and retrying"
+                );
+                current_downloaded = 0;
+                let _ = tokio::fs::remove_file(&job.staging_path).await;
+                if attempt < MAX_STREAM_RETRIES {
+                    continue;
+                }
+            }
+
+            let ct = res
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_string();
+            let cl_hdr = res
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_string();
+
+            let response_total: Option<u64> = if resuming {
+                res.headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.rsplit('/').next())
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .or_else(|| res.content_length().map(|cl| cl + current_downloaded))
+            } else {
+                res.content_length()
+            };
+
+            if response_total.is_some() {
+                total_bytes = response_total;
+            }
+
+            info!(
+                download_id = %id,
+                host = %host,
+                status = %status,
+                content_type = %ct,
+                content_length = %cl_hdr,
+                total = ?total_bytes,
+                resuming = resuming,
+                "Received response headers"
+            );
+
+            if !status.is_success() && status.as_u16() != 206 {
+                let body_snip = match tokio::time::timeout(Duration::from_secs(5), res.text()).await
+                {
+                    Ok(Ok(t)) => {
+                        let s = t.chars().take(500).collect::<String>().replace('\n', " ");
+                        if s.is_empty() {
+                            "(empty body)".to_string()
+                        } else {
+                            s
+                        }
+                    }
+                    Ok(Err(e)) => format!("(failed to read body: {e})"),
+                    Err(_) => "(body read timed out)".to_string(),
+                };
+                let hint = match status.as_u16() {
+                    403 => " — 403 Forbidden: googlevideo rejected UA/Referer/Origin/PO-token or URL expired [rr1---sn-gwpa-cived]",
+                    404 => " — 404: URL expired or invalid (re-resolve the video)",
+                    416 => " — 416 Range Not Satisfiable: resume offset beyond file size",
+                    429 => " — 429 Too Many Requests: rate-limited, retry later",
+                    500..=599 => " — server error, retry later",
+                    _ => "",
+                };
+                let msg = format!("HTTP {status} [{host}]{hint} body: {body_snip} (url={url_snip}, start_byte={current_downloaded}, ct={ct})");
+                error!(download_id = %id, host = %host, status = %status, body = %body_snip, "HTTP error response");
+                warn!(download_id = %id, "DIAGNOSTIC download_http_error id={} host={} status={} ct={} hint={} body={} url={}", id, host, status, ct, hint, body_snip, url_snip);
+
+                if status.as_u16() == 403 || status.as_u16() == 404 {
+                    return Err(DownloaderError::HttpError(msg));
+                }
+
+                if attempt < MAX_STREAM_RETRIES {
+                    continue;
+                }
+                return Err(DownloaderError::HttpError(msg));
+            }
+
             {
                 let mut guard = active.write().await;
                 if let Some(state) = guard.get_mut(&id) {
-                    state.downloaded_bytes = 0;
-                    state.progress = 0.0;
+                    state.status = DownloadStatus::Downloading;
+                    if total_bytes.is_some() {
+                        state.total_bytes = total_bytes;
+                    }
                     state.updated_at = Utc::now();
                 }
             }
-        }
-        let ct = res
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("-")
-            .to_string();
-        let cl_hdr = res
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("-")
-            .to_string();
 
-        let total: Option<u64> = if resuming {
-            res.headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.rsplit('/').next())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .or_else(|| res.content_length())
-        } else {
-            res.content_length()
-        };
+            let mut file = if resuming {
+                tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&job.staging_path)
+                    .await
+                    .map_err(|e| {
+                        error!(download_id = %id, path = ?job.staging_path, error = %e, "Failed to open staging file for append (resume)");
+                        DownloaderError::IoError(e)
+                    })?
+            } else {
+                tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&job.staging_path)
+                    .await
+                    .map_err(|e| {
+                        error!(download_id = %id, path = ?job.staging_path, error = %e, "Failed to create/truncate staging file");
+                        DownloaderError::IoError(e)
+                    })?
+            };
 
-        info!(download_id = %id, host = %host, status = %status, content_type = %ct, content_length = %cl_hdr, total = ?total, resuming = resuming, "Received response headers");
+            let stream_start_instant = Instant::now();
+            let mut stream_interrupted = false;
 
-        if !status.is_success() && status.as_u16() != 206 {
-            let body_snip = match tokio::time::timeout(Duration::from_secs(5), res.text()).await {
-                Ok(Ok(t)) => {
-                    let s = t.chars().take(500).collect::<String>().replace('\n', " ");
-                    if s.is_empty() {
-                        "(empty body)".to_string()
-                    } else {
-                        s
+            loop {
+                let chunk_opt =
+                    match tokio::time::timeout(Duration::from_secs(30), res.chunk()).await {
+                        Ok(Ok(c)) => c,
+                        Ok(Err(e)) => {
+                            warn!(
+                                download_id = %id,
+                                host = %host,
+                                error = %e,
+                                downloaded = current_downloaded,
+                                total = ?total_bytes,
+                                "Stream read error — will trigger range resume"
+                            );
+                            stream_interrupted = true;
+                            break;
+                        }
+                        Err(_) => {
+                            let elapsed = stream_start_instant.elapsed().as_secs();
+                            warn!(
+                                download_id = %id,
+                                host = %host,
+                                downloaded = current_downloaded,
+                                total = ?total_bytes,
+                                elapsed = elapsed,
+                                "Stream stalled (30s timeout) — will trigger range resume"
+                            );
+                            stream_interrupted = true;
+                            break;
+                        }
+                    };
+
+                let Some(chunk) = chunk_opt else {
+                    // Stream reached EOF
+                    break;
+                };
+
+                if chunk.is_empty() {
+                    continue;
+                }
+
+                if let Err(e) = file.write_all(&chunk).await {
+                    error!(download_id = %id, path = ?job.staging_path, error = %e, chunk_len = chunk.len(), "Staging file write failed");
+                    return Err(DownloaderError::DownloadFailed(format!(
+                        "failed to write {} bytes to staging file {:?}: {e}",
+                        chunk.len(),
+                        job.staging_path
+                    )));
+                }
+
+                current_downloaded += chunk.len() as u64;
+
+                let elapsed_total = overall_start.elapsed().as_secs_f64();
+                let speed = if elapsed_total > 0.0 {
+                    (current_downloaded as f64 / elapsed_total) as u64
+                } else {
+                    0
+                };
+
+                let mut guard = active.write().await;
+                if let Some(state) = guard.get_mut(&id) {
+                    state.downloaded_bytes = current_downloaded;
+                    if let Some(t) = total_bytes {
+                        if t > 0 {
+                            state.progress = (current_downloaded as f32) / (t as f32);
+                            let remaining = t.saturating_sub(current_downloaded);
+                            state.eta_secs = (remaining as u32).checked_div(speed as u32);
+                        }
                     }
+                    state.speed_bps = speed;
+                    state.updated_at = Utc::now();
                 }
-                Ok(Err(e)) => format!("(failed to read body: {e})"),
-                Err(_) => "(body read timed out)".to_string(),
-            };
-            let hint = match status.as_u16() {
-                403 => " — 403 Forbidden: googlevideo rejected UA/Referer/Origin/PO-token or URL expired [rr1---sn-gwpa-cived] — 2026 Jio sn-gwpa-cived now gates TV too (try re-resolving with ANDROID+pot or WEB_SAFARI; set youtube_po_token via BgUtils mint or Settings cookie)",
-                404 => " — 404: URL expired or invalid (re-resolve the video)",
-                416 => " — 416 Range Not Satisfiable: resume offset beyond file size (will retry from 0)",
-                429 => " — 429 Too Many Requests: rate-limited, retry later",
-                500..=599 => " — server error, retry later",
-                _ => "",
-            };
-            let msg = format!("HTTP {status} [{host}]{hint} body: {body_snip} (url={url_snip}, start_byte={start_byte}, ct={ct})");
-            error!(download_id = %id, host = %host, status = %status, body = %body_snip, "HTTP error response");
-            warn!(download_id = %id, "DIAGNOSTIC download_http_error id={} host={} status={} ct={} hint={} body={} url={}", id, host, status, ct, hint, body_snip, url_snip);
-            return Err(DownloaderError::HttpError(msg));
-        }
+            }
 
-        {
-            let mut guard = active.write().await;
-            if let Some(state) = guard.get_mut(&id) {
-                state.status = DownloadStatus::Downloading;
-                if total.is_some() {
-                    state.total_bytes = total;
+            let _ = file.flush().await;
+
+            if stream_interrupted {
+                if attempt < MAX_STREAM_RETRIES {
+                    continue;
                 }
-                state.updated_at = Utc::now();
-            }
-        }
-
-        let mut file = if resuming {
-            // File already holds the `start_byte` bytes we committed before the
-            // pause; append the remainder.
-            tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&job.output_path)
-                .await
-                .map_err(|e| {
-                    error!(download_id = %id, path = ?job.output_path, error = %e, "Failed to open file for append (resume)");
-                    DownloaderError::IoError(e)
-                })?
-        } else {
-            tokio::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&job.output_path)
-                .await
-                .map_err(|e| {
-                    error!(download_id = %id, path = ?job.output_path, error = %e, "Failed to create/truncate output file");
-                    DownloaderError::IoError(e)
-                })?
-        };
-
-        if !resuming {
-            if let Err(e) = file.seek(SeekFrom::Start(0)).await {
-                warn!(download_id = %id, error = %e, "Seek to start failed (non-fatal)");
-            }
-        }
-
-        let start_instant = Instant::now();
-        // If server returned 200 to a Range request, we truncated the file —
-        // downloaded must start at 0, not start_byte (otherwise overcount)
-        let effective_start = if resuming { start_byte } else { 0 };
-        let mut downloaded = effective_start;
-
-        loop {
-            let chunk_opt = tokio::time::timeout(Duration::from_secs(30), res.chunk())
-                .await
-                .map_err(|_| {
-                    let elapsed = start_instant.elapsed().as_secs();
-                    let msg = format!("stream stalled: no data for 30s [{host}] downloaded={downloaded}/{:?} elapsed={elapsed}s (url={url_snip})", total);
-                    error!(download_id = %id, host = %host, downloaded = downloaded, total = ?total, elapsed = elapsed, "Stream stalled (30s timeout)");
-                    warn!(download_id = %id, "DIAGNOSTIC download_stalled id={} host={} downloaded={}/{:?} elapsed={}s url={}", id, host, downloaded, total, elapsed, url_snip);
-                    DownloaderError::HttpError(msg)
-                })?
-                .map_err(|e| {
-                    let msg = format!("stream read error [{host}] downloaded={downloaded}/{:?}: {e} (url={url_snip})", total);
-                    error!(download_id = %id, host = %host, error = %e, downloaded = downloaded, "Stream read error");
-                    DownloaderError::HttpError(msg)
-                })?;
-
-            let Some(chunk) = chunk_opt else { break };
-            if chunk.is_empty() {
-                continue;
-            }
-            if let Err(e) = file.write_all(&chunk).await {
-                error!(download_id = %id, path = ?job.output_path, error = %e, chunk_len = chunk.len(), "File write failed");
-                warn!(download_id = %id, "DIAGNOSTIC download_io_error id={} path={:?} error={} downloaded={}", id, job.output_path, e, downloaded);
-                return Err(DownloaderError::DownloadFailed(format!(
-                    "failed to write {} bytes to {:?}: {e} (downloaded={}/{:?})",
-                    chunk.len(),
-                    job.output_path,
-                    downloaded,
-                    total
+                return Err(DownloaderError::HttpError(format!(
+                    "Stream interrupted and max retries ({MAX_STREAM_RETRIES}) reached [{host}] ({current_downloaded}/{:?} bytes)",
+                    total_bytes
                 )));
             }
-            downloaded += chunk.len() as u64;
 
-            let elapsed = start_instant.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 {
-                ((downloaded - effective_start) as f64 / elapsed) as u64
-            } else {
-                0
-            };
-
-            let mut guard = active.write().await;
-            if let Some(state) = guard.get_mut(&id) {
-                state.downloaded_bytes = downloaded;
-                if let Some(t) = total {
-                    if t > 0 {
-                        state.progress = (downloaded as f32) / (t as f32);
+            // Strict Stream Completion & Content-Length Verification
+            if let Some(total) = total_bytes {
+                if current_downloaded < total {
+                    warn!(
+                        download_id = %id,
+                        downloaded = current_downloaded,
+                        total = total,
+                        attempt = attempt,
+                        "Stream ended prematurely (downloaded < total) — triggering range resume retry"
+                    );
+                    if attempt < MAX_STREAM_RETRIES {
+                        continue;
                     }
+                    return Err(DownloaderError::DownloadFailed(format!(
+                        "Stream incomplete: downloaded {current_downloaded} of {total} bytes after {MAX_STREAM_RETRIES} attempts"
+                    )));
                 }
-                state.speed_bps = speed;
-                state.updated_at = Utc::now();
+            }
+
+            // Abnormally small stream check (unless expected total size is explicitly smaller)
+            let is_expected_small = total_bytes.is_some_and(|t| t < MIN_VALID_STREAM_BYTES);
+            if current_downloaded < MIN_VALID_STREAM_BYTES && !is_expected_small {
+                warn!(
+                    download_id = %id,
+                    downloaded = current_downloaded,
+                    attempt = attempt,
+                    "Stream ended with abnormally small byte count (< 10KB) — treating as dropped stream"
+                );
+                if attempt < MAX_STREAM_RETRIES {
+                    current_downloaded = 0;
+                    let _ = tokio::fs::remove_file(&job.staging_path).await;
+                    continue;
+                }
+                return Err(DownloaderError::DownloadFailed(format!(
+                    "Stream abnormally small ({current_downloaded} bytes < 10KB) after {MAX_STREAM_RETRIES} attempts"
+                )));
+            }
+
+            // Post-Download Audio Stream Integrity & Duration Validation
+            info!(
+                download_id = %id,
+                staging_path = %job.staging_path.display(),
+                expected_duration = ?job.expected_duration_secs,
+                "Validating audio stream integrity with lofty"
+            );
+
+            match validate_audio_file(
+                &job.staging_path,
+                job.expected_duration_secs,
+                &job.ext,
+                job.format,
+            ) {
+                Ok(decoded_duration) => {
+                    info!(
+                        download_id = %id,
+                        decoded_duration = decoded_duration,
+                        "Audio stream validation succeeded"
+                    );
+                    break;
+                }
+                Err(val_err) => {
+                    warn!(
+                        download_id = %id,
+                        error = %val_err,
+                        attempt = attempt,
+                        "Audio stream validation failed on staging file"
+                    );
+                    if attempt < MAX_STREAM_RETRIES {
+                        current_downloaded = 0;
+                        let _ = tokio::fs::remove_file(&job.staging_path).await;
+                        continue;
+                    }
+                    return Err(DownloaderError::DownloadFailed(format!(
+                        "Audio stream integrity validation failed: {val_err}"
+                    )));
+                }
             }
         }
 
-        file.flush().await.map_err(DownloaderError::IoError)?;
+        // All validation passed! Now perform atomic rename to destination
+        info!(
+            download_id = %id,
+            staging = %job.staging_path.display(),
+            destination = %job.output_path.display(),
+            "Atomically moving verified staging file to final destination"
+        );
 
-        {
-            let mut guard = active.write().await;
-            if let Some(state) = guard.get_mut(&id) {
-                state.complete(job.output_path.to_string_lossy().to_string());
-            }
+        if let Err(e) = tokio::fs::rename(&job.staging_path, &job.output_path).await {
+            warn!(
+                download_id = %id,
+                error = %e,
+                "tokio::fs::rename failed, falling back to copy + remove"
+            );
+            tokio::fs::copy(&job.staging_path, &job.output_path)
+                .await
+                .map_err(DownloaderError::IoError)?;
+            let _ = tokio::fs::remove_file(&job.staging_path).await;
         }
 
+        // Save thumbnail sidecar if requested
         if let Some(thumb) = &job.thumbnail {
             Self::save_thumbnail(&client, thumb, &job.output_path).await;
         }
 
-        // Android: also publish a copy to the user-visible Download/Auralis/ via MediaStore
-        // so it appears in the system Files app like a browser download. Non-fatal;
-        // pause/resume continues to use the sandboxed file.
-        // Dual-save is gated by `use_system_downloads` (default true per settings.rs
-        // `default_true`). We evaluate the persisted setting at publish time so the
-        // default `true` path always publishes; only an explicit `false` skips it.
+        // MediaStore Publishing on Android
         #[cfg(target_os = "android")]
         {
             let should_publish = std::panic::catch_unwind(|| {
@@ -555,14 +851,25 @@ impl Downloader {
                     }
                     info!(download_id = %id, public = %pub_path, internal = %job.output_path.display(), "Published download to Download/Auralis");
                 } else {
-                    // publish_to_downloads already warns with source/error, add call-site context.
-                    // Common causes: JNI env unavailable, is_pending insert failure, empty source.
-                    warn!(download_id = %id, src = %job.output_path.display(), "MediaStore publish returned None — keeping internal path (see prior warn for root cause; no permission needed on API 29+ via MediaStore)");
+                    warn!(download_id = %id, src = %job.output_path.display(), "MediaStore publish returned None — keeping internal path");
                 }
             }
         }
 
-        info!(download_id = %id, path = ?job.output_path, download_dir = %job.output_path.display(), "Download complete (internal retained; public copy was attempted above on Android when enabled)");
+        // Mark completed in active downloads
+        {
+            let mut guard = active.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.complete(job.output_path.to_string_lossy().to_string());
+            }
+        }
+
+        info!(
+            download_id = %id,
+            path = %job.output_path.display(),
+            "Download complete and verified"
+        );
+
         Ok(())
     }
 
@@ -588,7 +895,7 @@ impl Downloader {
     }
 
     /// Pause an in-progress download by aborting its task and truncating the
-    /// partial file to the last fully-written byte (so resume is clean).
+    /// staging file to the last fully-written byte.
     pub async fn pause(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Pausing download");
 
@@ -596,15 +903,19 @@ impl Downloader {
             handle.abort();
         }
 
-        let snapshot = {
-            let downloads = self.active_downloads.read().await;
-            downloads
-                .get(&id)
-                .map(|s| (s.output_path.clone(), s.downloaded_bytes))
+        let staging_path = {
+            let jobs = self.jobs.read().await;
+            jobs.get(&id).map(|j| j.staging_path.clone())
         };
-        if let Some((Some(path), downloaded)) = snapshot {
+
+        let downloaded = {
+            let downloads = self.active_downloads.read().await;
+            downloads.get(&id).map(|s| s.downloaded_bytes)
+        };
+
+        if let (Some(path), Some(bytes)) = (staging_path, downloaded) {
             if let Ok(f) = tokio::fs::OpenOptions::new().write(true).open(&path).await {
-                let _ = f.set_len(downloaded).await;
+                let _ = f.set_len(bytes).await;
             }
         }
 
@@ -642,7 +953,7 @@ impl Downloader {
         Ok(())
     }
 
-    /// Cancel a download, killing its task and removing any partial file.
+    /// Cancel a download, killing its task and removing any staging and partial files.
     pub async fn cancel(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Cancelling download");
 
@@ -650,12 +961,16 @@ impl Downloader {
             handle.abort();
         }
 
-        let path = {
-            let downloads = self.active_downloads.read().await;
-            downloads.get(&id).and_then(|s| s.output_path.clone())
+        let paths = {
+            let jobs = self.jobs.read().await;
+            jobs.get(&id)
+                .map(|j| (j.staging_path.clone(), j.output_path.clone()))
         };
-        if let Some(path) = path {
-            let _ = tokio::fs::remove_file(&path).await;
+
+        if let Some((staging, output)) = paths {
+            let _ = tokio::fs::remove_file(&staging).await;
+            let _ = tokio::fs::remove_file(&output).await;
+            let _ = tokio::fs::remove_file(output.with_extension("jpg")).await;
         }
 
         let mut downloads = self.active_downloads.write().await;
@@ -676,5 +991,89 @@ impl Downloader {
     pub async fn list_active(&self) -> Vec<DownloadProgress> {
         let downloads = self.active_downloads.read().await;
         downloads.values().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_filename() {
+        assert_eq!(sanitize_filename("Valid Name"), "Valid Name");
+        assert_eq!(sanitize_filename("Slash/In/Name"), "Slash_In_Name");
+        assert_eq!(sanitize_filename("Back\\Slash"), "Back_Slash");
+        assert_eq!(sanitize_filename("../../etc/passwd"), "etc_passwd");
+        assert_eq!(sanitize_filename("AUX"), "AUX_track");
+        assert_eq!(sanitize_filename("COM1"), "COM1_track");
+    }
+
+    #[test]
+    fn test_sanitize_ext() {
+        assert_eq!(sanitize_ext("mp3", "mp3"), "mp3");
+        assert_eq!(sanitize_ext("m4a", "m4a"), "m4a");
+        assert_eq!(sanitize_ext("..exe", "mp3"), "mp3");
+        assert_eq!(sanitize_ext("unknown", "flac"), "flac");
+    }
+
+    #[test]
+    fn test_validate_audio_file_nonexistent() {
+        let path = PathBuf::from("/nonexistent/path/audio.mp3");
+        let res = validate_audio_file(&path, Some(100), "mp3", AudioFormat::Mp3);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_validate_audio_file_empty() {
+        let dir = std::env::temp_dir().join(format!("auralis_test_{}", Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let empty_path = dir.join("empty.mp3");
+        std::fs::write(&empty_path, b"").unwrap();
+
+        let res = validate_audio_file(&empty_path, None, "mp3", AudioFormat::Mp3);
+        assert!(res.is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_validate_audio_file_valid_wav() {
+        let dir = std::env::temp_dir().join(format!("auralis_test_{}", Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let wav_path = dir.join("test.part");
+
+        // 1s 8000Hz 8-bit mono WAV = 8044 bytes
+        let sample_rate: u32 = 8000;
+        let num_samples: u32 = 8000;
+        let mut data = Vec::with_capacity(44 + num_samples as usize);
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36 + num_samples).to_le_bytes());
+        data.extend_from_slice(b"WAVEfmt ");
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        data.extend_from_slice(&1u16.to_le_bytes()); // Mono
+        data.extend_from_slice(&sample_rate.to_le_bytes());
+        data.extend_from_slice(&sample_rate.to_le_bytes()); // Byte rate
+        data.extend_from_slice(&1u16.to_le_bytes()); // Block align
+        data.extend_from_slice(&8u16.to_le_bytes()); // Bits per sample
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&num_samples.to_le_bytes());
+        data.resize(44 + num_samples as usize, 0x80);
+
+        std::fs::write(&wav_path, &data).unwrap();
+
+        // Valid with expected duration 1s
+        let res = validate_audio_file(&wav_path, Some(1), "wav", AudioFormat::Wav);
+        assert!(
+            res.is_ok(),
+            "Expected valid WAV to pass validation: {:?}",
+            res
+        );
+        assert_eq!(res.unwrap(), 1);
+
+        // Fails if expected duration is 60s (diff > 5s)
+        let res_fail = validate_audio_file(&wav_path, Some(60), "wav", AudioFormat::Wav);
+        assert!(res_fail.is_err(), "Expected duration mismatch to fail");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

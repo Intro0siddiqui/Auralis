@@ -94,6 +94,14 @@ pub struct DownloadProgress {
     /// Output file path (set when completed)
     pub output_path: Option<String>,
 
+    /// Optional expected duration in seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_duration_secs: Option<u32>,
+
+    /// Validated decoded duration in seconds (set when complete)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u32>,
+
     /// Error message (if failed)
     pub error: Option<String>,
 
@@ -124,6 +132,8 @@ impl DownloadProgress {
             eta_secs: None,
             format,
             output_path: None,
+            expected_duration_secs: None,
+            duration_secs: None,
             error: None,
             started_at: now,
             updated_at: now,
