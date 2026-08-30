@@ -151,15 +151,45 @@ impl AudioPlayer {
         };
         let source = Decoder::new(BufReader::new(file))
             .map_err(|e| PlayerError::DecodeError(format!("{path}: {e}")))?;
-        // Reconcile duration: decoder total_duration may differ from DB/lofty by >2s for truncated files
+        // Auto-repair duration: compare actual decoded stream duration with expected database duration
         if let Some(dec_dur) = source.total_duration() {
             let db_dur = *self.track_duration.read().await;
-            if !db_dur.is_zero() && (dec_dur.as_secs() as i64 - db_dur.as_secs() as i64).abs() > 2 {
-                warn!(path=%path, db_secs=db_dur.as_secs(), dec_secs=dec_dur.as_secs(), "Duration mismatch DB vs decoder, using max");
-                let reconciled = db_dur.max(dec_dur);
-                *self.track_duration.write().await = reconciled;
-            } else if db_dur.is_zero() {
-                *self.track_duration.write().await = dec_dur;
+            let dec_secs = dec_dur.as_secs();
+            let db_secs = db_dur.as_secs();
+
+            let reconciled = if !db_dur.is_zero() {
+                let diff = (dec_secs as i64 - db_secs as i64).abs();
+                if diff > 5 {
+                    warn!(
+                        path = %path,
+                        db_secs = db_secs,
+                        dec_secs = dec_secs,
+                        diff_secs = diff,
+                        "Severe duration mismatch (>5s) between DB metadata and decoder; auto-repairing track duration"
+                    );
+                    dec_dur
+                } else if diff > 2 {
+                    warn!(path = %path, db_secs = db_secs, dec_secs = dec_secs, "Minor duration mismatch DB vs decoder, using max");
+                    db_dur.max(dec_dur)
+                } else {
+                    db_dur
+                }
+            } else {
+                dec_dur
+            };
+
+            *self.track_duration.write().await = reconciled;
+
+            let mut curr = self.current_track.write().await;
+            if let Some(ref mut t) = *curr {
+                t.duration_secs = reconciled.as_secs() as u32;
+            }
+
+            if let Some(idx) = *self.current_index.read().await {
+                let mut q = self.queue.write().await;
+                if let Some(t) = q.get_mut(idx) {
+                    t.duration_secs = reconciled.as_secs() as u32;
+                }
             }
         }
 
@@ -550,6 +580,22 @@ impl AudioPlayer {
             q.len()
         };
         // Retain shuffle session; only invalidate out-of-bounds indices.
+        self.shuffle_history.write().await.retain(|i| *i < new_len);
+    }
+
+    pub async fn play_next(&self, track: Track) {
+        let current_idx = *self.current_index.read().await;
+        let new_len = {
+            let mut q = self.queue.write().await;
+            if q.is_empty() {
+                q.push(track);
+                1
+            } else {
+                let insert_idx = current_idx.map(|i| i + 1).unwrap_or(0).min(q.len());
+                q.insert(insert_idx, track);
+                q.len()
+            }
+        };
         self.shuffle_history.write().await.retain(|i| *i < new_len);
     }
 

@@ -36,6 +36,10 @@ const EMBEDDED_PARTIALS: &[(&str, &str)] = &[
     ("search", include_str!("../../ui/partials/search.html")),
     ("settings", include_str!("../../ui/partials/settings.html")),
     ("sync", include_str!("../../ui/partials/sync.html")),
+    (
+        "modal-tag-editor",
+        include_str!("../../ui/partials/modal-tag-editor.html"),
+    ),
 ];
 
 static PARTIAL_CACHE: OnceLock<HashMap<String, String>> = OnceLock::new();
@@ -96,5 +100,6 @@ mod tests {
         assert!(get_partial("nav").is_some());
         assert!(get_partial("settings").is_some());
         assert!(get_partial("sync").is_some());
+        assert!(get_partial("modal-tag-editor").is_some());
     }
 }

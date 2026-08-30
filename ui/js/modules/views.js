@@ -819,6 +819,12 @@ export const viewMethods = {
                     <button type="button" class="btn btn-ghost btn-icon ${isFav ? 'liked' : ''}" style="${isFav ? 'color: var(--like);' : ''}" title="Like" onclick="event.stopPropagation(); window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)" ontouchend="event.stopPropagation(); window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)">
                         <i data-lucide="heart"></i>
                     </button>
+                    <button type="button" class="btn btn-ghost btn-icon track-menu-btn" 
+                            title="More options" data-role="menu-btn" data-track-id="${track.id}" 
+                            onclick="event.stopPropagation(); window.Auralis && window.Auralis.bridge && window.Auralis.bridge.openTrackContextMenu(event, '${track.id}')" 
+                            ontouchend="event.stopPropagation(); window.Auralis && window.Auralis.bridge && window.Auralis.bridge.openTrackContextMenu(event, '${track.id}')">
+                        <i data-lucide="more-vertical"></i>
+                    </button>
                 </div>
             </div>
         `;
@@ -849,5 +855,514 @@ export const viewMethods = {
         }
 
         if (window.lucide) window.lucide.createIcons();
+    },
+
+    closeTrackContextMenu() {
+        const existing = document.getElementById('floating-track-context-menu');
+        if (existing) existing.remove();
+        if (this._contextMenuOutsideListener) {
+            document.removeEventListener('click', this._contextMenuOutsideListener);
+            document.removeEventListener('touchend', this._contextMenuOutsideListener);
+            document.removeEventListener('keydown', this._contextMenuKeyHandler);
+            this._contextMenuOutsideListener = null;
+            this._contextMenuKeyHandler = null;
+        }
+    },
+
+    openTrackContextMenu(event, trackId) {
+        if (event) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+        this.closeTrackContextMenu();
+        if (!trackId) return;
+
+        const track = (this.tracks && this.tracks.find(t => String(t.id) === String(trackId))) || { id: trackId };
+        const menu = document.createElement('div');
+        menu.id = 'floating-track-context-menu';
+        menu.className = 'context-menu';
+
+        menu.innerHTML = `
+            <button type="button" class="context-menu-item" data-action="play-next">
+                <i data-lucide="play-circle"></i>
+                <span>Play Next</span>
+            </button>
+            <button type="button" class="context-menu-item" data-action="add-queue">
+                <i data-lucide="list-plus"></i>
+                <span>Add to Queue</span>
+            </button>
+            <button type="button" class="context-menu-item" data-action="add-playlist">
+                <i data-lucide="folder-plus"></i>
+                <span>Add to Playlist</span>
+            </button>
+            <div class="context-menu-divider"></div>
+            ${track.artist ? `
+            <button type="button" class="context-menu-item" data-action="go-artist">
+                <i data-lucide="user"></i>
+                <span>Go to Artist</span>
+            </button>` : ''}
+            ${track.album ? `
+            <button type="button" class="context-menu-item" data-action="go-album">
+                <i data-lucide="disc"></i>
+                <span>Go to Album</span>
+            </button>` : ''}
+            <button type="button" class="context-menu-item" data-action="edit-metadata">
+                <i data-lucide="pencil"></i>
+                <span>Edit Metadata</span>
+            </button>
+            <div class="context-menu-divider"></div>
+            <button type="button" class="context-menu-item danger" data-action="delete-track">
+                <i data-lucide="trash-2"></i>
+                <span>Delete Track</span>
+            </button>
+        `;
+
+        document.body.appendChild(menu);
+        if (window.lucide) window.lucide.createIcons();
+
+        // Calculate positioning
+        const triggerEl = event.currentTarget || event.target;
+        const rect = triggerEl && triggerEl.getBoundingClientRect ? triggerEl.getBoundingClientRect() : null;
+        const clientX = (event.touches && event.touches[0] ? event.touches[0].clientX : event.clientX) || (rect ? rect.left : 100);
+        const clientY = (event.touches && event.touches[0] ? event.touches[0].clientY : event.clientY) || (rect ? rect.bottom : 100);
+
+        const menuRect = menu.getBoundingClientRect();
+        const menuWidth = menuRect.width || 190;
+        const menuHeight = menuRect.height || 260;
+
+        let left = clientX;
+        let top = clientY + 6;
+
+        if (rect) {
+            left = rect.right - menuWidth;
+            top = rect.bottom + 4;
+        }
+
+        if (left + menuWidth > window.innerWidth - 8) {
+            left = window.innerWidth - menuWidth - 8;
+        }
+        if (left < 8) left = 8;
+
+        if (top + menuHeight > window.innerHeight - 8) {
+            if (rect && rect.top - menuHeight > 8) {
+                top = rect.top - menuHeight - 4;
+            } else {
+                top = window.innerHeight - menuHeight - 8;
+            }
+        }
+        if (top < 8) top = 8;
+
+        menu.style.left = `${Math.round(left)}px`;
+        menu.style.top = `${Math.round(top)}px`;
+
+        // Wire item actions
+        menu.querySelector('[data-action="play-next"]')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.closeTrackContextMenu();
+            this.playNextTrack(trackId);
+        });
+
+        menu.querySelector('[data-action="add-queue"]')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.closeTrackContextMenu();
+            this.addToQueue(trackId);
+        });
+
+        menu.querySelector('[data-action="add-playlist"]')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.closeTrackContextMenu();
+            this.openAddToPlaylistModal(trackId);
+        });
+
+        menu.querySelector('[data-action="go-artist"]')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.closeTrackContextMenu();
+            this.goToArtist(track.artist);
+        });
+
+        menu.querySelector('[data-action="go-album"]')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.closeTrackContextMenu();
+            this.goToAlbum(track.album);
+        });
+
+        menu.querySelector('[data-action="edit-metadata"]')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.closeTrackContextMenu();
+            this.openTagEditor(track);
+        });
+
+        menu.querySelector('[data-action="delete-track"]')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.closeTrackContextMenu();
+            this.deleteTracks([trackId]);
+        });
+
+        // Click outside & ESC listener
+        this._contextMenuOutsideListener = (e) => {
+            if (!menu.contains(e.target)) {
+                this.closeTrackContextMenu();
+            }
+        };
+        this._contextMenuKeyHandler = (e) => {
+            if (e.key === 'Escape') {
+                this.closeTrackContextMenu();
+            }
+        };
+
+        setTimeout(() => {
+            document.addEventListener('click', this._contextMenuOutsideListener);
+            document.addEventListener('touchend', this._contextMenuOutsideListener);
+            document.addEventListener('keydown', this._contextMenuKeyHandler);
+        }, 20);
+    },
+
+    async openTagEditor(trackOrId) {
+        let track = typeof trackOrId === 'object' ? trackOrId : null;
+        const trackId = track ? track.id : trackOrId;
+        if (!track && trackId) {
+            track = (this.tracks && this.tracks.find(t => String(t.id) === String(trackId)));
+            if (!track) {
+                try {
+                    track = await this.invoke('get_track', { id: trackId });
+                } catch (_) {}
+            }
+        }
+        if (!track) {
+            this.showToast('Track not found', 'error');
+            return;
+        }
+
+        const existingModal = document.getElementById('tag-editor-modal');
+        if (existingModal) existingModal.remove();
+
+        const backdrop = document.createElement('div');
+        backdrop.id = 'tag-editor-modal';
+        backdrop.className = 'modal-backdrop';
+
+        backdrop.innerHTML = `
+            <div class="modal-dialog glass neu" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <h3 class="modal-title">Edit Metadata</h3>
+                    <button type="button" class="modal-close" id="tag-editor-close" aria-label="Close">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
+                <form id="tag-editor-form" class="modal-body" onsubmit="return false">
+                    <div class="form-group">
+                        <label class="form-label">Title</label>
+                        <input type="text" name="title" class="input" value="${this.escapeHtml(track.title || '')}" required>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Artist</label>
+                            <input type="text" name="artist" class="input" value="${this.escapeHtml(track.artist || '')}">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Album Artist</label>
+                            <input type="text" name="album_artist" class="input" value="${this.escapeHtml(track.album_artist || '')}">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Album</label>
+                        <input type="text" name="album" class="input" value="${this.escapeHtml(track.album || '')}">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Genre</label>
+                            <input type="text" name="genre" class="input" value="${this.escapeHtml(track.genre || '')}">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Year</label>
+                            <input type="number" name="year" class="input" value="${track.year || ''}" placeholder="YYYY">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Track #</label>
+                            <input type="number" name="track_number" class="input" value="${track.track_number || ''}">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Disc #</label>
+                            <input type="number" name="disc_number" class="input" value="${track.disc_number || ''}">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary neu" id="tag-editor-cancel">Cancel</button>
+                        <button type="submit" class="btn btn-primary neu" id="tag-editor-save">
+                            <i data-lucide="check"></i>
+                            Save Changes
+                        </button>
+                    </div>
+                </form>
+            </div>
+        `;
+
+        document.body.appendChild(backdrop);
+        if (window.lucide) window.lucide.createIcons();
+
+        const closeModal = () => {
+            backdrop.remove();
+            document.removeEventListener('keydown', escListener);
+        };
+
+        const escListener = (e) => {
+            if (e.key === 'Escape') closeModal();
+        };
+        document.addEventListener('keydown', escListener);
+
+        backdrop.addEventListener('click', closeModal);
+        backdrop.querySelector('#tag-editor-close')?.addEventListener('click', closeModal);
+        backdrop.querySelector('#tag-editor-cancel')?.addEventListener('click', closeModal);
+
+        const form = backdrop.querySelector('#tag-editor-form');
+        form?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const title = form.querySelector('input[name="title"]').value.trim();
+            const artist = form.querySelector('input[name="artist"]').value.trim() || null;
+            const albumArtist = form.querySelector('input[name="album_artist"]').value.trim() || null;
+            const album = form.querySelector('input[name="album"]').value.trim() || null;
+            const genre = form.querySelector('input[name="genre"]').value.trim() || null;
+            const yearVal = form.querySelector('input[name="year"]').value.trim();
+            const trackNumVal = form.querySelector('input[name="track_number"]').value.trim();
+            const discNumVal = form.querySelector('input[name="disc_number"]').value.trim();
+
+            const update = {
+                title: title || track.title,
+                artist,
+                album,
+                album_artist: albumArtist,
+                genre,
+                year: yearVal ? parseInt(yearVal, 10) : null,
+                track_number: trackNumVal ? parseInt(trackNumVal, 10) : null,
+                disc_number: discNumVal ? parseInt(discNumVal, 10) : null,
+            };
+
+            try {
+                const updatedTrack = await this.invoke('update_track_metadata', { id: track.id, update });
+                if (updatedTrack) {
+                    const idx = this.tracks.findIndex(t => String(t.id) === String(track.id));
+                    if (idx >= 0) this.tracks[idx] = updatedTrack;
+
+                    if (window.Auralis && window.Auralis.player && window.Auralis.player.currentTrack && String(window.Auralis.player.currentTrack.id) === String(track.id)) {
+                        Object.assign(window.Auralis.player.currentTrack, updatedTrack);
+                        window.Auralis.player.updateFullScreenMetadata();
+                        this.updatePlayerBar(updatedTrack);
+                    }
+
+                    this.showToast('Metadata updated successfully!', 'success');
+                    closeModal();
+                    this.refreshCurrentView();
+                }
+            } catch (err) {
+                console.error('Failed to update track metadata:', err);
+                this.showToast(`Failed to update metadata: ${err}`, 'error');
+            }
+        });
+    },
+
+    async openAddToPlaylistModal(trackId) {
+        if (!trackId) return;
+
+        let playlists = [];
+        try {
+            playlists = await this.invoke('get_playlists') || [];
+        } catch (e) {
+            console.warn('Failed to load playlists:', e);
+        }
+
+        const existingModal = document.getElementById('add-playlist-modal');
+        if (existingModal) existingModal.remove();
+
+        const backdrop = document.createElement('div');
+        backdrop.id = 'add-playlist-modal';
+        backdrop.className = 'modal-backdrop';
+
+        backdrop.innerHTML = `
+            <div class="modal-dialog glass neu" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <h3 class="modal-title">Add to Playlist</h3>
+                    <button type="button" class="modal-close" id="add-playlist-close" aria-label="Close">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-2);">
+                        <input type="text" id="new-playlist-input" class="input" placeholder="Create new playlist..." style="flex: 1;">
+                        <button type="button" class="btn btn-primary neu" id="new-playlist-create-btn">
+                            <i data-lucide="plus"></i>
+                            Create
+                        </button>
+                    </div>
+                    <div class="form-label" style="margin-top: var(--space-2);">Your Playlists</div>
+                    <div class="playlist-picker-list" id="playlist-picker-list">
+                        ${playlists.length > 0 ? playlists.map(pl => `
+                            <div class="playlist-picker-item" data-playlist-id="${pl.id}">
+                                <div style="display: flex; align-items: center; gap: var(--space-2);">
+                                    <i data-lucide="${pl.is_smart ? 'sparkles' : 'list-music'}" style="width: 18px; height: 18px; color: var(--accent);"></i>
+                                    <span style="font-weight: var(--font-medium); color: var(--text-1);">${this.escapeHtml(pl.name)}</span>
+                                </div>
+                                <span style="font-size: var(--text-xs); color: var(--text-3);">${(pl.track_ids && pl.track_ids.length) || 0} tracks</span>
+                            </div>
+                        `).join('') : `
+                            <div class="empty-state glass" style="padding: var(--space-4); text-align: center; border-radius: var(--radius-md);">
+                                <p style="color: var(--text-3); font-size: var(--text-xs);">No custom playlists yet. Create one above!</p>
+                            </div>
+                        `}
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary neu" id="add-playlist-cancel">Cancel</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(backdrop);
+        if (window.lucide) window.lucide.createIcons();
+
+        const closeModal = () => {
+            backdrop.remove();
+            document.removeEventListener('keydown', escListener);
+        };
+
+        const escListener = (e) => {
+            if (e.key === 'Escape') closeModal();
+        };
+        document.addEventListener('keydown', escListener);
+
+        backdrop.addEventListener('click', closeModal);
+        backdrop.querySelector('#add-playlist-close')?.addEventListener('click', closeModal);
+        backdrop.querySelector('#add-playlist-cancel')?.addEventListener('click', closeModal);
+
+        const addTrackToPl = async (playlistId, playlistName) => {
+            try {
+                await this.invoke('add_tracks_to_playlist', {
+                    playlist_id: playlistId,
+                    playlistId: playlistId,
+                    track_ids: [trackId],
+                    trackIds: [trackId],
+                });
+                this.showToast(`Added to "${playlistName}"`, 'success');
+                closeModal();
+            } catch (err) {
+                console.error('Failed to add to playlist:', err);
+                this.showToast(`Failed to add: ${err}`, 'error');
+            }
+        };
+
+        backdrop.querySelectorAll('.playlist-picker-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const plId = item.dataset.playlistId;
+                const plName = item.querySelector('span')?.textContent || 'Playlist';
+                addTrackToPl(plId, plName);
+            });
+        });
+
+        const newPlInput = backdrop.querySelector('#new-playlist-input');
+        const createBtn = backdrop.querySelector('#new-playlist-create-btn');
+        const handleCreate = async () => {
+            const name = newPlInput?.value.trim();
+            if (!name) return;
+            try {
+                const created = await this.invoke('create_playlist', { request: { name } });
+                if (created && created.id) {
+                    await addTrackToPl(created.id, created.name);
+                }
+            } catch (err) {
+                this.showToast(`Failed to create playlist: ${err}`, 'error');
+            }
+        };
+
+        createBtn?.addEventListener('click', handleCreate);
+        newPlInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') handleCreate();
+        });
+    },
+
+    async goToArtist(artistName) {
+        if (!artistName || artistName === 'Unknown Artist') {
+            this.showToast('No artist information available', 'info');
+            return;
+        }
+        try {
+            const page = await this.invoke('get_tracks', { filter: { artist: artistName } });
+            if (page && page.tracks) {
+                this.tracks = page.tracks;
+                const content = document.getElementById('content');
+                if (content) {
+                    content.innerHTML = `
+                        <section class="page-library">
+                            <header class="section-header">
+                                <div>
+                                    <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
+                                        <i data-lucide="arrow-left"></i> All Tracks
+                                    </button>
+                                    <h2 class="section-title">Artist: ${this.escapeHtml(artistName)}</h2>
+                                </div>
+                            </header>
+                            <div class="track-list"></div>
+                        </section>
+                    `;
+                    const list = content.querySelector('.track-list');
+                    if (list) this.renderTrackRows(list, page.tracks);
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            }
+        } catch (err) {
+            console.error('Failed to filter by artist:', err);
+        }
+    },
+
+    async goToAlbum(albumName) {
+        if (!albumName || albumName === 'Unknown Album' || albumName === 'Single') {
+            this.showToast('No album information available', 'info');
+            return;
+        }
+        try {
+            const page = await this.invoke('get_tracks', { filter: { album: albumName } });
+            if (page && page.tracks) {
+                this.tracks = page.tracks;
+                const content = document.getElementById('content');
+                if (content) {
+                    content.innerHTML = `
+                        <section class="page-library">
+                            <header class="section-header">
+                                <div>
+                                    <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
+                                        <i data-lucide="arrow-left"></i> All Tracks
+                                    </button>
+                                    <h2 class="section-title">Album: ${this.escapeHtml(albumName)}</h2>
+                                </div>
+                            </header>
+                            <div class="track-list"></div>
+                        </section>
+                    `;
+                    const list = content.querySelector('.track-list');
+                    if (list) this.renderTrackRows(list, page.tracks);
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            }
+        } catch (err) {
+            console.error('Failed to filter by album:', err);
+        }
+    },
+
+    async deleteTracks(trackIds) {
+        if (!trackIds || !trackIds.length) return;
+        const confirmMsg = trackIds.length === 1
+            ? 'Are you sure you want to delete this track from your library?'
+            : `Are you sure you want to delete these ${trackIds.length} tracks from your library?`;
+        if (!confirm(confirmMsg)) return;
+
+        try {
+            await this.invoke('delete_tracks', { ids: trackIds });
+            this.showToast('Track deleted from library', 'info');
+            const idSet = new Set(trackIds.map(String));
+            this.tracks = this.tracks.filter(t => !idSet.has(String(t.id)));
+            this.refreshCurrentView();
+        } catch (err) {
+            console.error('Failed to delete tracks:', err);
+            this.showToast(`Failed to delete track: ${err}`, 'error');
+        }
     }
 };

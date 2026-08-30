@@ -267,6 +267,85 @@ impl MetadataExtractor {
             .and_then(AudioFormat::from_extension)
             .unwrap_or(AudioFormat::Mp3)
     }
+
+    /// Write modified metadata tags directly to audio file on disk using Lofty.
+    pub fn write_metadata(
+        path: &Path,
+        title: &str,
+        artist: &str,
+        album: &str,
+        genre: Option<&str>,
+        year: Option<u32>,
+        track_number: Option<u32>,
+    ) -> Result<(), String> {
+        write_metadata(path, title, artist, album, genre, year, track_number)
+    }
+}
+
+/// Write modified metadata tags directly to audio file on disk using Lofty.
+pub fn write_metadata(
+    path: &Path,
+    title: &str,
+    artist: &str,
+    album: &str,
+    genre: Option<&str>,
+    year: Option<u32>,
+    track_number: Option<u32>,
+) -> Result<(), String> {
+    let mut tagged_file =
+        lofty::read_from_path(path).map_err(|e| format!("Failed to read audio file tags: {e}"))?;
+
+    let has_tag = tagged_file.primary_tag().is_some() || tagged_file.first_tag().is_some();
+    if !has_tag {
+        let tag_type = tagged_file.primary_tag_type();
+        tagged_file.insert_tag(lofty::tag::Tag::new(tag_type));
+    }
+
+    let tag = if let Some(t) = tagged_file.primary_tag_mut() {
+        t
+    } else if let Some(t) = tagged_file.first_tag_mut() {
+        t
+    } else {
+        return Err("Failed to obtain mutable tag from audio file".to_string());
+    };
+
+    tag.set_title(title.to_string());
+    tag.set_artist(artist.to_string());
+    tag.set_album(album.to_string());
+
+    if let Some(g) = genre {
+        if !g.trim().is_empty() {
+            tag.set_genre(g.to_string());
+        } else {
+            tag.remove_genre();
+        }
+    } else {
+        tag.remove_genre();
+    }
+
+    if let Some(y) = year {
+        tag.set_date(lofty::tag::items::Timestamp {
+            year: y as u16,
+            month: None,
+            day: None,
+            hour: None,
+            minute: None,
+            second: None,
+        });
+    } else {
+        tag.remove_date();
+    }
+
+    if let Some(tn) = track_number {
+        tag.set_track(tn);
+    } else {
+        tag.remove_track();
+    }
+
+    tag.save_to_path(path, lofty::config::WriteOptions::default())
+        .map_err(|e| format!("Failed to save audio tags to {}: {e}", path.display()))?;
+
+    Ok(())
 }
 
 /// Metadata extraction errors

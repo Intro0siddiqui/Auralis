@@ -199,6 +199,8 @@ pub async fn play(
         player.set_current_index(Some(idx)).await;
     }
 
+    let initial_dur = track.duration_secs;
+
     // Play the track — log full context so the UI can show exactly why it failed
     if let Err(e) = player.play_track(track.clone()).await {
         warn!(%track_id, file_path=%track.file_path, title=%track.title, error=%e, "Playback failed — file missing or undecodable");
@@ -206,6 +208,22 @@ pub async fn play(
             "Playback error [{} — {}]: {}",
             track.title, track.file_path, e
         ));
+    }
+
+    // If duration was auto-repaired during playback, persist to DB and reflect in NowPlaying
+    let track = player.get_current_track().await.unwrap_or(track);
+    if track.duration_secs != initial_dur {
+        use crate::domain::repositories::TrackRepository;
+        let repo = Arc::new(
+            crate::infrastructure::database::repositories::SqliteTrackRepository::new(Arc::new(
+                db.inner().clone(),
+            )),
+        );
+        if let Err(e) = repo.update(&track).await {
+            warn!(id = %track.id, error = %e, "Failed to persist auto-repaired duration in DB");
+        } else {
+            info!(id = %track.id, old_dur = initial_dur, new_dur = track.duration_secs, "Persisted auto-repaired duration in DB");
+        }
     }
 
     // Build NowPlaying response
@@ -454,6 +472,29 @@ pub async fn add_to_queue(
     emit_queue_updated(&app, &queue).await;
 
     debug!(%track_id, "Track added to queue");
+    Ok(queue)
+}
+
+/// Insert a track right after the currently playing track in the queue.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn play_next(
+    track_id: Uuid,
+    app: AppHandle,
+    player: State<'_, AudioPlayer>,
+    db: State<'_, Database>,
+) -> Result<PlaybackQueue, String> {
+    info!(%track_id, "Play next command received");
+
+    let track = lookup_track(track_id, &db)
+        .await
+        .map_err(|e| format!("Failed to look up track: {e}"))?;
+
+    player.play_next(track).await;
+
+    let queue = build_queue(&player).await;
+    emit_queue_updated(&app, &queue).await;
+
+    debug!(%track_id, "Track inserted as next in queue");
     Ok(queue)
 }
 

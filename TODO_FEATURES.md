@@ -17,10 +17,9 @@ This document tracks all missing, stubbed, or partially wired features across th
 - [x] **4. Atomic File Publication & Corrupt Partial Cleanup**
   - **Location:** `src/infrastructure/media/downloader.rs`
   - **Status:** ✅ Implemented via `.tmp/<id>.part` staging, atomic rename, and automatic cleanup on error/cancel.
-- [ ] **5. Duration Mismatch Diagnostic & Auto-Repair in Player**
-  - **Location:** `src/infrastructure/media/player.rs:154-165`
-  - **Action:**
-    - When `AudioPlayer::play` detects a severe duration mismatch between DB and actual decoded stream (e.g. DB says 180s, stream only has 27s), log a clear diagnostic warning and update track record to reflect true playable length or flag track for re-download.
+- [x] **5. Duration Mismatch Diagnostic & Auto-Repair in Player**
+  - **Location:** `src/infrastructure/media/player.rs`, `src/commands/playback.rs`
+  - **Status:** ✅ Implemented mismatch detection (>5s vs decoder properties) and auto-reconciliation to database and in-memory queue.
 
 ---
 
@@ -30,30 +29,18 @@ This document tracks all missing, stubbed, or partially wired features across th
 - [x] **1. Embedded Album Artwork Extraction & Caching**
   - **Location:** `src/infrastructure/filesystem/metadata.rs`
   - **Status:** ✅ Implemented with `lofty` `CoverFront`/`Other` extraction, 128-bit hash deduplication, and cache directory storage.
-- [ ] **2. Track Context Menu ("3-Dots" Menu)**
-  - **Location:** `ui/js/modules/views.js:799` (`renderTrackRows`), `ui/partials/`
-  - **Action:** Add a dropdown/popover menu to each track row offering:
-    - [ ] *Play Next* (insert at current index + 1 in queue)
-    - [ ] *Add to Queue* (wire to `commands::playback::add_to_queue`)
-    - [ ] *Add to Playlist* (open playlist selector dialog)
-    - [ ] *Go to Artist* / *Go to Album* (navigate and filter catalog)
-    - [ ] *Edit Metadata* (open tag editor modal)
-    - [ ] *Delete Track* (wire to `commands::library::delete_tracks`)
-- [ ] **3. Now Playing Queue Manager Panel**
-  - **Location:** `ui/partials/player-full.html`, `ui/partials/queue.html`
-  - **Action:**
-    - Build a slide-out queue drawer displaying active track and upcoming list.
-    - Wire "Remove" button per track (`commands::playback::remove_from_queue`).
-    - Wire "Clear Queue" button (`commands::playback::clear_queue`).
-    - Support drag-and-drop reordering.
-- [ ] **4. In-App Track Metadata / Tag Editor**
-  - **Location:** `src/commands/library.rs:69` (`update_track_metadata`), `ui/partials/modal-tag-editor.html`
-  - **Action:**
-    - Create a modal dialog allowing users to edit Title, Artist, Album, Genre, Year, and Track Number.
-    - Save updates via `update_track_metadata` command and write tags to file with `lofty`.
-- [ ] **5. Batch / Playlist Downloader UI**
-  - **Location:** `src/commands/downloads.rs:91` (`download_playlist`), `ui/partials/download.html`
-  - **Action:** Extend the Download view to detect YouTube playlist URLs, display track list confirmation, and trigger `download_playlist` in the background.
+- [x] **2. Track Context Menu ("3-Dots" Menu)**
+  - **Location:** `ui/js/modules/views.js` (`renderTrackRows`), `ui/styles/components.css`
+  - **Status:** ✅ Implemented glassmorphic context menu with Play Next, Add to Queue, Add to Playlist picker, Go to Artist/Album catalog filtering, Edit Metadata, and Delete Track with confirmation.
+- [x] **3. Now Playing Queue Manager Panel**
+  - **Location:** `ui/partials/player-full.html`, `ui/js/player.js`
+  - **Status:** ✅ Implemented animated slide-out Queue Drawer in fullscreen player and sidebar panel with Remove track, Clear queue, active track indicator, and reactive `playback:queue`/`playback:track` updates.
+- [x] **4. In-App Track Metadata / Tag Editor**
+  - **Location:** `src/infrastructure/filesystem/metadata.rs` (`write_metadata`), `src/commands/library.rs` (`update_track_metadata`), `ui/partials/modal-tag-editor.html`, `ui/js/modules/library.js`
+  - **Status:** ✅ Implemented `write_metadata` lofty tag writer (ID3v2, MP4, FLAC, Vorbis), synchronized SQLite persistence, and glassmorphic tag editor modal dialog.
+- [x] **5. Batch / Playlist Downloader UI**
+  - **Location:** `ui/partials/download.html`, `ui/js/modules/downloads.js`, `ui/js/youtube.js`
+  - **Status:** ✅ Implemented YouTube playlist URL detection, interactive playlist preview table with select/deselect-all checkboxes, and sequential batch download pipeline with PO-token 403 auto-retry.
 
 ---
 

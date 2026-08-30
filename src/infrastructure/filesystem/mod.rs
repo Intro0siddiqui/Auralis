@@ -5,10 +5,10 @@
 
 pub mod android;
 pub mod desktop;
-mod metadata;
+pub mod metadata;
 pub mod scanner;
 
 pub use android::AndroidScanner;
 pub use desktop::DesktopScanner;
-pub use metadata::MetadataExtractor;
+pub use metadata::{write_metadata, MetadataExtractor};
 pub use scanner::{DirectoryScanner, ScanProgress, ScannerError};

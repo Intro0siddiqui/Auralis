@@ -213,6 +213,22 @@ export const downloadMethods = {
         }
 
         const opts = this.getDownloadOptions(form);
+
+        // Check if URL is a playlist
+        if (window.AuralisYouTube.isPlaylistUrl(url)) {
+            this.showToast('Fetching playlist preview…', 'info');
+            try {
+                const pl = await window.AuralisYouTube.getPlaylist(url, opts);
+                if (pl && pl.items && pl.items.length > 0) {
+                    this.renderPlaylistPreview(pl, form);
+                    this.showToast(`Found ${pl.items.length} track(s) in playlist`, 'success');
+                    return;
+                }
+            } catch (plErr) {
+                console.warn('getPlaylist failed, falling back to direct resolve:', plErr);
+            }
+        }
+
         this.showToast('Resolving source…', 'info');
         try {
             this._ensureDownloadRetryListener();
@@ -318,33 +334,142 @@ export const downloadMethods = {
         }
     },
 
-    async startPlaylistDownloads(items, format, opts, urlInput) {
+    renderPlaylistPreview(playlistData, form) {
+        const container = document.getElementById('youtube-playlist-preview');
+        if (!container) return;
+
+        this._currentPlaylistData = playlistData;
+        const items = playlistData.items || [];
+
+        container.style.display = 'block';
+        container.innerHTML = `
+            <div class="playlist-preview-header">
+                <div>
+                    <div class="playlist-preview-title">${this.escapeHtml(playlistData.title)}</div>
+                    <div class="playlist-preview-stats">${playlistData.author ? `${this.escapeHtml(playlistData.author)} · ` : ''}${items.length} track(s) found</div>
+                </div>
+                <div style="display: flex; align-items: center; gap: var(--space-3);">
+                    <label class="checkbox" style="font-size: var(--text-xs); cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-1);">
+                        <input type="checkbox" id="playlist-select-all" checked>
+                        Select All
+                    </label>
+                </div>
+            </div>
+            <div class="playlist-preview-list" id="playlist-preview-items">
+                ${items.map((item, idx) => `
+                    <div class="playlist-item-row" data-index="${idx}">
+                        <input type="checkbox" class="playlist-item-checkbox" data-index="${idx}" checked style="cursor: pointer;">
+                        <div class="playlist-item-info">
+                            <div class="playlist-item-title">${this.escapeHtml(item.title)}</div>
+                            <div class="playlist-item-author">${item.channel ? this.escapeHtml(item.channel) : 'YouTube'}${item.duration ? ' · ' + this.formatTime(item.duration) : ''}</div>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--glass-border);">
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-cancel-playlist-preview">
+                    Cancel
+                </button>
+                <button type="button" class="btn btn-primary btn-sm neu" id="btn-download-selected">
+                    <i data-lucide="download"></i>
+                    <span id="btn-download-selected-label">Download All (${items.length})</span>
+                </button>
+            </div>
+        `;
+
+        if (window.lucide) window.lucide.createIcons();
+
+        const selectAllCb = container.querySelector('#playlist-select-all');
+        const itemCbs = container.querySelectorAll('.playlist-item-checkbox');
+        const dlBtn = container.querySelector('#btn-download-selected');
+        const dlBtnLabel = container.querySelector('#btn-download-selected-label');
+        const cancelBtn = container.querySelector('#btn-cancel-playlist-preview');
+
+        const updateSelectedCount = () => {
+            const checkedCount = container.querySelectorAll('.playlist-item-checkbox:checked').length;
+            if (dlBtnLabel) {
+                dlBtnLabel.textContent = checkedCount === items.length
+                    ? `Download All (${items.length})`
+                    : `Download Selected (${checkedCount})`;
+            }
+            if (dlBtn) dlBtn.disabled = checkedCount === 0;
+            if (selectAllCb) {
+                selectAllCb.checked = checkedCount === items.length;
+                selectAllCb.indeterminate = checkedCount > 0 && checkedCount < items.length;
+            }
+        };
+
+        if (selectAllCb) {
+            selectAllCb.addEventListener('change', () => {
+                itemCbs.forEach(cb => { cb.checked = selectAllCb.checked; });
+                updateSelectedCount();
+            });
+        }
+
+        itemCbs.forEach(cb => {
+            cb.addEventListener('change', updateSelectedCount);
+        });
+
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', () => {
+                container.style.display = 'none';
+                container.innerHTML = '';
+                this._currentPlaylistData = null;
+            });
+        }
+
+        if (dlBtn) {
+            dlBtn.addEventListener('click', async () => {
+                const selected = [];
+                container.querySelectorAll('.playlist-item-checkbox:checked').forEach(cb => {
+                    const idx = parseInt(cb.dataset.index, 10);
+                    if (items[idx]) selected.push(items[idx]);
+                });
+                if (selected.length === 0) {
+                    this.showToast('No tracks selected for download', 'warning');
+                    return;
+                }
+                container.style.display = 'none';
+                container.innerHTML = '';
+                const urlInput = form ? form.querySelector('input[name="url"]') : null;
+                if (urlInput) urlInput.value = '';
+                await this.downloadPlaylist(selected);
+            });
+        }
+    },
+
+    async downloadPlaylist(items) {
         if (!items || items.length === 0) {
-            this.showToast('Playlist contained no tracks', 'error');
+            this.showToast('No tracks selected to download', 'warning');
             return;
         }
-        const capped = items.slice(0, 20);
-        this.showToast(`Resolving playlist (${capped.length} tracks)…`, 'info');
+        const form = document.getElementById('download-form');
+        const opts = this.getDownloadOptions(form);
+        const format = 'm4a';
+        this.showToast(`Starting batch download for ${items.length} track(s)...`, 'info');
 
         this._ensureDownloadRetryListener();
         let started = 0;
-        for (const item of capped) {
+        for (const item of items) {
             try {
                 const t = await window.AuralisYouTube.resolve(item.url, opts);
                 if (t.kind !== 'track') continue;
                 const result = await this.downloadResolvedTrack(t, format, opts, item.url);
                 if (result) started++;
             } catch (err) {
-                console.error('Playlist item failed:', err);
+                console.error(`Failed to start download for ${item.title}:`, err);
             }
         }
 
         if (started > 0) {
-            this.showToast(`Started ${started} downloads from playlist`, 'success');
-            if (urlInput) urlInput.value = '';
+            this.showToast(`Started ${started} download(s) from playlist!`, 'success');
         } else {
-            this.showToast('Could not start any playlist downloads', 'error');
+            this.showToast('Could not start playlist downloads', 'error');
         }
+    },
+
+    async startPlaylistDownloads(items, format, opts, urlInput) {
+        return this.downloadPlaylist(items);
     },
 
     updateDownloadProgressUI(progress) {

@@ -65,7 +65,8 @@ class PlayerController {
         });
 
         window.Auralis.bridge.on('playback:queue', () => {
-            if (this.queuePanel && this.queuePanel.classList.contains('open')) {
+            const drawer = document.getElementById('player-full-queue-drawer');
+            if ((this.queuePanel && this.queuePanel.classList.contains('open')) || (drawer && drawer.classList.contains('open'))) {
                 this.renderQueuePanel();
             }
         });
@@ -281,10 +282,32 @@ class PlayerController {
 
     wireFullScreenButtons() {
         this.wireFullScreenCloseButton();
+        this.wireFullScreenQueueButton();
         this.wireFullScreenPlayButton();
         this.wireFullScreenNavButtons();
         this.wireFullScreenModeButtons();
         this.wireFullScreenLikeButton();
+    }
+
+    wireFullScreenQueueButton() {
+        const fullQueueBtn = document.getElementById('player-full-queue-btn');
+        if (fullQueueBtn) {
+            fullQueueBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.toggleFullScreenQueue();
+            });
+        }
+    }
+
+    toggleFullScreenQueue() {
+        const drawer = document.getElementById('player-full-queue-drawer');
+        const btn = document.getElementById('player-full-queue-btn');
+        if (!drawer) return;
+        const isOpen = drawer.classList.toggle('open');
+        if (btn) btn.classList.toggle('active', isOpen);
+        if (isOpen) {
+            this.renderQueuePanel();
+        }
     }
 
     wireFullScreenCloseButton() {
@@ -948,13 +971,14 @@ class PlayerController {
 
     renderQueueTrackRow(track, index) {
         if (!track) return '';
+        const dur = this.formatTime(track.duration_secs || 0);
         return `
-            <div class="track-row neu-glass" style="margin-bottom: var(--space-2); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); display: flex; justify-content: space-between; align-items: center;">
-                <div class="track-row-info" style="flex: 1; overflow: hidden;">
-                    <div class="track-row-title">${this.escapeHtml(track.title)}</div>
-                    <div class="track-row-subtitle">${this.escapeHtml(track.artist || 'Unknown Artist')}</div>
+            <div class="track-row neu-glass" style="margin-bottom: var(--space-2); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.playTrack('${track.id}')">
+                <div class="track-row-info" style="flex: 1; overflow: hidden; min-width: 0;">
+                    <div class="track-row-title" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${this.escapeHtml(track.title)}</div>
+                    <div class="track-row-subtitle" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${this.escapeHtml(track.artist || 'Unknown Artist')}${dur ? ' · ' + dur : ''}</div>
                 </div>
-                <button class="btn btn-ghost btn-icon" onclick="window.Auralis.player.removeFromQueue(${index})" title="Remove">
+                <button type="button" class="btn btn-ghost btn-icon btn-sm" onclick="event.stopPropagation(); window.Auralis.player.removeFromQueue(${index})" title="Remove from queue" style="flex-shrink: 0; margin-left: var(--space-2);">
                     <i data-lucide="trash-2"></i>
                 </button>
             </div>
@@ -963,7 +987,8 @@ class PlayerController {
 
     async renderQueuePanel() {
         if (!this.queuePanel) this.queuePanel = document.getElementById('queue-panel');
-        if (!this.queuePanel) return;
+        const drawer = document.getElementById('player-full-queue-drawer');
+        if (!this.queuePanel && !drawer) return;
 
         let queueTracks = [];
         try {
@@ -975,11 +1000,11 @@ class PlayerController {
             console.warn('Failed to fetch queue:', e);
         }
 
-        this.queuePanel.innerHTML = `
+        const buildContent = (isDrawer) => `
             <div style="padding: var(--space-4); height: 100%; display: flex; flex-direction: column;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-4);">
-                    <h3 style="font-size: var(--text-lg); font-weight: var(--font-semibold); color: var(--text-1);">Queue</h3>
-                    <button class="btn btn-ghost btn-icon btn-sm" id="close-queue-btn" style="padding: var(--space-1);">
+                    <h3 style="font-size: var(--text-lg); font-weight: var(--font-semibold); color: var(--text-1); margin: 0;">Playback Queue</h3>
+                    <button type="button" class="btn btn-ghost btn-icon btn-sm" style="padding: var(--space-1);" onclick="${isDrawer ? 'window.Auralis.player.toggleFullScreenQueue()' : 'window.Auralis.player.toggleQueue()'}">
                         <i data-lucide="x"></i>
                     </button>
                 </div>
@@ -988,7 +1013,7 @@ class PlayerController {
                         <div style="font-size: var(--text-xs); color: var(--text-3); text-transform: uppercase; margin-bottom: var(--space-2); font-weight: var(--font-semibold);">Now Playing</div>
                         <div class="track-row neu-glass" style="margin-bottom: var(--space-4); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3);">
                             <div class="track-row-info">
-                                <div class="track-row-title" style="color: var(--accent);">${this.escapeHtml(this.currentTrack.title)}</div>
+                                <div class="track-row-title" style="color: var(--accent); font-weight: var(--font-semibold);">${this.escapeHtml(this.currentTrack.title)}</div>
                                 <div class="track-row-subtitle">${this.escapeHtml(this.currentTrack.artist || 'Unknown Artist')}</div>
                             </div>
                         </div>
@@ -1001,8 +1026,8 @@ class PlayerController {
                     `}
                 </div>
                 ${queueTracks.length > 0 ? `
-                    <div style="padding-top: var(--space-3); border-top: 1px solid var(--glass-border);">
-                        <button class="btn btn-secondary btn-sm neu" style="width: 100%; justify-content: center;" onclick="window.Auralis.player.clearQueue()">
+                    <div style="padding-top: var(--space-3); border-top: 1px solid var(--glass-border); display: flex; gap: var(--space-2);">
+                        <button type="button" class="btn btn-secondary btn-sm neu" style="width: 100%; justify-content: center;" onclick="window.Auralis.player.clearQueue()">
                             <i data-lucide="trash-2"></i>
                             Clear Queue
                         </button>
@@ -1011,10 +1036,13 @@ class PlayerController {
             </div>
         `;
 
-        const closeBtn = this.queuePanel.querySelector('#close-queue-btn');
-        if (closeBtn) {
-            closeBtn.addEventListener('click', () => this.toggleQueue());
+        if (this.queuePanel) {
+            this.queuePanel.innerHTML = buildContent(false);
         }
+        if (drawer) {
+            drawer.innerHTML = buildContent(true);
+        }
+
         if (window.lucide) window.lucide.createIcons();
     }
 

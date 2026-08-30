@@ -104,6 +104,31 @@ pub async fn update_track_metadata(
         track.disc_number = Some(disc_number);
     }
 
+    // Write updated metadata tags directly to audio file on disk via Lofty
+    let path = std::path::Path::new(&track.file_path);
+    if path.is_file() {
+        let year_u32 = track
+            .year
+            .and_then(|y| if y > 0 { Some(y as u32) } else { None });
+        if let Err(e) = crate::infrastructure::filesystem::metadata::write_metadata(
+            path,
+            &track.title,
+            track.artist.as_deref().unwrap_or(""),
+            track.album.as_deref().unwrap_or(""),
+            track.genre.as_deref(),
+            year_u32,
+            track.track_number,
+        ) {
+            tracing::warn!(
+                path = %track.file_path,
+                error = %e,
+                "Failed to write updated tag metadata to disk file (continuing DB update)"
+            );
+        } else {
+            tracing::info!(path = %track.file_path, "Updated audio file tags on disk via lofty");
+        }
+    }
+
     repo.update(&track).await.map_err(|e| {
         tracing::error!(error = %e, "Failed to update track");
         format!("Failed to update track: {e}")

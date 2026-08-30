@@ -145,6 +145,7 @@ impl AuralisApp {
                 commands::playback::get_queue,
                 commands::playback::set_queue,
                 commands::playback::add_to_queue,
+                commands::playback::play_next,
                 commands::playback::remove_from_queue,
                 commands::playback::clear_queue,
                 // Download commands

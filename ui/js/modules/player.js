@@ -56,6 +56,53 @@ export const playerMethods = {
         }
     },
 
+    async addToQueue(trackId) {
+        if (!trackId) return;
+        try {
+            await this.invoke('add_to_queue', { track_id: trackId, trackId });
+            this.showToast('Added to queue', 'success');
+        } catch (err) {
+            console.error('Failed to add to queue:', err);
+            this.showToast(`Failed to add to queue: ${err}`, 'error');
+        }
+    },
+
+    async playNextTrack(trackId) {
+        if (!trackId) return;
+        try {
+            await this.invoke('play_next', { track_id: trackId, trackId });
+            this.showToast('Playing next', 'success');
+        } catch (err) {
+            console.error('Failed to insert next in queue:', err);
+            this.showToast(`Failed to set play next: ${err}`, 'error');
+        }
+    },
+
+    async removeFromQueue(index) {
+        try {
+            await this.invoke('remove_from_queue', { index });
+            if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.renderQueuePanel === 'function') {
+                window.Auralis.player.renderQueuePanel();
+            }
+        } catch (err) {
+            console.error('Failed to remove from queue:', err);
+            this.showToast(`Failed to remove from queue: ${err}`, 'error');
+        }
+    },
+
+    async clearQueue() {
+        try {
+            await this.invoke('clear_queue');
+            this.showToast('Queue cleared', 'info');
+            if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.renderQueuePanel === 'function') {
+                window.Auralis.player.renderQueuePanel();
+            }
+        } catch (err) {
+            console.error('Failed to clear queue:', err);
+            this.showToast(`Failed to clear queue: ${err}`, 'error');
+        }
+    },
+
     async playNext() {
         try {
             if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.next === 'function') {

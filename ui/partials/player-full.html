@@ -1,4 +1,7 @@
 <div id="player-full" class="overlay modal--full glass-strong">
+    <button id="player-full-queue-btn" class="btn btn-ghost btn-icon player-full-queue-toggle" style="position: absolute; top: calc(var(--space-4) + env(safe-area-inset-top)); left: var(--space-4); width: 48px; height: 48px; border-radius: var(--radius-full); display: flex; align-items: center; justify-content: center; background: var(--glass-base); border: 1px solid var(--glass-border); color: var(--text-1); cursor: pointer; z-index: 10;" aria-label="Toggle Queue">
+        <i data-lucide="list-music"></i>
+    </button>
     <button id="player-full-close" class="btn btn-ghost btn-icon player-full-close" onclick="event.stopPropagation(); document.getElementById('overlay-root').innerHTML = ''" aria-label="Close">
         <i data-lucide="x"></i>
     </button>
@@ -54,4 +57,7 @@
             <div class="volume-fill" id="player-full-volume-fill" style="width: 70%;"></div>
         </div>
     </div>
+
+    <!-- Toggleable Queue Drawer for Full Screen Player -->
+    <div id="player-full-queue-drawer" class="player-full-queue-drawer glass-strong neu"></div>
 </div>

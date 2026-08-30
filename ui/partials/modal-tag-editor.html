@@ -1,0 +1,54 @@
+<div id="modal-tag-editor" class="overlay modal--dialog glass-strong" onclick="if(event.target === this) window.Auralis && window.Auralis.bridge && window.Auralis.bridge.closeTagEditor()">
+    <div class="modal-dialog-card neu-glass" onclick="event.stopPropagation()">
+        <div class="modal-dialog-header">
+            <div style="display: flex; align-items: center; gap: var(--space-2);">
+                <i data-lucide="tag" style="color: var(--accent); width: 22px; height: 22px;"></i>
+                <h3 style="margin: 0; font-size: var(--text-lg); font-weight: var(--font-bold); color: var(--text-1);">Edit Track Tags</h3>
+            </div>
+            <button type="button" class="btn btn-ghost btn-icon" onclick="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.closeTagEditor()" aria-label="Close">
+                <i data-lucide="x"></i>
+            </button>
+        </div>
+        <form id="tag-editor-form" onsubmit="event.preventDefault(); window.Auralis && window.Auralis.bridge && window.Auralis.bridge.saveTagEditor();">
+            <input type="hidden" id="tag-edit-id" name="id" />
+            
+            <div class="form-group" style="margin-bottom: var(--space-3);">
+                <label for="tag-edit-title" style="display: block; font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-1);">Title</label>
+                <input type="text" id="tag-edit-title" name="title" class="input" placeholder="Track Title" required />
+            </div>
+
+            <div class="form-group" style="margin-bottom: var(--space-3);">
+                <label for="tag-edit-artist" style="display: block; font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-1);">Artist</label>
+                <input type="text" id="tag-edit-artist" name="artist" class="input" placeholder="Artist Name" />
+            </div>
+
+            <div class="form-group" style="margin-bottom: var(--space-3);">
+                <label for="tag-edit-album" style="display: block; font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-1);">Album</label>
+                <input type="text" id="tag-edit-album" name="album" class="input" placeholder="Album Name" />
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-2); margin-bottom: var(--space-4);">
+                <div class="form-group">
+                    <label for="tag-edit-genre" style="display: block; font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-1);">Genre</label>
+                    <input type="text" id="tag-edit-genre" name="genre" class="input" placeholder="Genre" />
+                </div>
+                <div class="form-group">
+                    <label for="tag-edit-year" style="display: block; font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-1);">Year</label>
+                    <input type="number" id="tag-edit-year" name="year" class="input" placeholder="YYYY" min="1900" max="2100" />
+                </div>
+                <div class="form-group">
+                    <label for="tag-edit-track-number" style="display: block; font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-1);">Track #</label>
+                    <input type="number" id="tag-edit-track-number" name="track_number" class="input" placeholder="1" min="1" max="999" />
+                </div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: var(--space-2);">
+                <button type="button" class="btn btn-secondary neu" onclick="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.closeTagEditor()">Cancel</button>
+                <button type="submit" class="btn btn-primary neu" id="tag-editor-save-btn">
+                    <i data-lucide="check"></i>
+                    Save
+                </button>
+            </div>
+        </form>
+    </div>
+</div>

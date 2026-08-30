@@ -777,40 +777,59 @@ class YouTubeResolver {
         };
     }
 
-    async resolvePlaylist(rawUrl, opts = {}) {
-        const url = (rawUrl || '').trim();
+    async getPlaylist(playlistIdOrUrl, opts = {}) {
+        const str = (playlistIdOrUrl || '').trim();
+        const match = str.match(/[?&]list=([^&]+)/);
+        const playlistId = match ? match[1] : str;
         const client = await this._client(opts);
-        const match = url.match(/[?&]list=([^&]+)/);
-        if (!match) throw new Error('Not a playlist URL');
-        const playlistId = match[1];
 
         let playlist = null;
         try {
             playlist = await client.getPlaylist(playlistId);
         } catch (_) {
             if (client.music) {
-                playlist = await client.music.getPlaylist(playlistId);
+                try { playlist = await client.music.getPlaylist(playlistId); } catch (_) {}
             }
         }
         if (!playlist) throw new Error('Playlist not found');
 
+        const title = (playlist.info?.title || playlist.title || playlist.header?.title?.text) || 'YouTube Playlist';
+        const author = (playlist.info?.author?.name || playlist.author || playlist.header?.author?.name) || '';
         const source = playlist.videos || playlist.contents || [];
+
         const items = [];
         for (const v of source) {
-            let id = v.id;
+            let id = v.id || v.videoId;
             if (!id && v.url) {
                 const m = v.url.match(/[?&]v=([^&]+)/);
                 if (m) id = m[1];
             }
             if (!id) continue;
-            const videoUrl =
-                typeof id === 'string'
-                    ? `https://www.youtube.com/watch?v=${id}`
-                    : `https://www.youtube.com/watch?v=${id[1]}`;
-            items.push({ url: videoUrl, title: String(v.title || 'Unknown') });
+            const itemTitle = typeof v.title === 'string' ? v.title : (v.title?.text || String(v.title || 'Unknown Track'));
+            const itemAuthor = typeof v.author === 'string' ? v.author : (v.author?.name || (v.artists && v.artists[0]?.name) || author || '');
+            const itemDuration = v.duration?.seconds || v.duration_seconds || (typeof v.duration === 'number' ? v.duration : 0);
+            const thumb = this.pickThumb(v.thumbnails || v.thumbnail);
+            items.push({
+                id: typeof id === 'string' ? id : id[1],
+                url: `https://www.youtube.com/watch?v=${typeof id === 'string' ? id : id[1]}`,
+                title: String(itemTitle).trim() || 'Unknown Track',
+                channel: String(itemAuthor).trim(),
+                duration: itemDuration,
+                thumbnail: thumb,
+            });
         }
         if (items.length === 0) throw new Error('Playlist contained no videos');
-        return items;
+        return {
+            id: playlistId,
+            title: String(title).trim() || 'YouTube Playlist',
+            author: String(author).trim(),
+            items,
+        };
+    }
+
+    async resolvePlaylist(rawUrl, opts = {}) {
+        const pl = await this.getPlaylist(rawUrl, opts);
+        return pl.items;
     }
 
     async search(query, opts = {}) {
