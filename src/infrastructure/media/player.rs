@@ -318,9 +318,8 @@ impl AudioPlayer {
             if let Some(&idx) = unvisited.choose(&mut rng) {
                 Some(idx)
             } else {
-                let other_candidates: Vec<usize> = (0..queue_len)
-                    .filter(|&i| Some(i) != current_idx)
-                    .collect();
+                let other_candidates: Vec<usize> =
+                    (0..queue_len).filter(|&i| Some(i) != current_idx).collect();
                 Some(
                     other_candidates
                         .choose(&mut rng)
@@ -331,9 +330,8 @@ impl AudioPlayer {
         } else {
             // Shuffle + RepeatAll (or RepeatOne manual): pick random != current
             let mut rng = rand::rng();
-            let candidates: Vec<usize> = (0..queue_len)
-                .filter(|&i| Some(i) != current_idx)
-                .collect();
+            let candidates: Vec<usize> =
+                (0..queue_len).filter(|&i| Some(i) != current_idx).collect();
             Some(
                 candidates
                     .choose(&mut rng)

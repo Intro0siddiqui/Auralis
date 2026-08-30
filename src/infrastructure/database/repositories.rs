@@ -410,8 +410,7 @@ impl TrackRepository for SqliteTrackRepository {
             if chunk.is_empty() {
                 continue;
             }
-            let placeholders = std::iter::repeat("?")
-                .take(chunk.len())
+            let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!("DELETE FROM tracks WHERE id IN ({})", placeholders);
