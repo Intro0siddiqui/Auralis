@@ -388,6 +388,42 @@ describe('nativeFetch header extraction (Tauri bridge)', () => {
     });
 });
 
+describe('PlayerController queue row HTML rendering', () => {
+    const playerPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/player.js');
+    const src = fs.readFileSync(playerPath, 'utf8');
+
+    it('ui/js/player.js contains renderQueueTrackRow method', () => {
+        assert.ok(src.includes('renderQueueTrackRow(track, index)'), 'player.js missing renderQueueTrackRow method signature');
+        assert.ok(src.includes('this.renderQueueTrackRow(t, i)'), 'renderQueuePanel must delegate to renderQueueTrackRow');
+    });
+
+    it('renderQueueTrackRow formats track row HTML and escapes untrusted fields using actual PlayerController instance', async () => {
+        const vm = await import('node:vm');
+        class MockMutationObserver { observe() {} disconnect() {} }
+        const sandbox = {
+            document: { addEventListener: () => {}, getElementById: () => null, querySelector: () => null, body: { addEventListener: () => {} } },
+            window: {},
+            console,
+            navigator: {},
+            MutationObserver: MockMutationObserver
+        };
+        vm.createContext(sandbox);
+        vm.runInContext(src + '; this.PlayerController = PlayerController;', sandbox);
+        const player = new sandbox.PlayerController();
+
+        const nullResult = player.renderQueueTrackRow(null, 0);
+        assert.equal(nullResult, '');
+
+        const safeTrackRow = player.renderQueueTrackRow({ title: 'Song & Dance', artist: 'Rock <Band>' }, 2);
+        assert.ok(safeTrackRow.includes('Song &amp; Dance'), 'Title should be HTML escaped');
+        assert.ok(safeTrackRow.includes('Rock &lt;Band&gt;'), 'Artist should be HTML escaped');
+        assert.ok(safeTrackRow.includes('removeFromQueue(2)'), 'Button should invoke removeFromQueue with index 2');
+
+        const unknownArtistRow = player.renderQueueTrackRow({ title: 'Untitled' }, 0);
+        assert.ok(unknownArtistRow.includes('Unknown Artist'), 'Fallback artist when empty/null');
+    });
+});
+
 describe('pot-for-TV (YAD 7C4-TAWg7QA / Sx8z0U0lkjQ regression)', () => {
     const ytPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/youtube.js');
     const vendorPath = path.resolve(path.dirname(ytPath), '../vendor/youtubei.esm.mjs');
