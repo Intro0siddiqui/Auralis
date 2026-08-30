@@ -74,9 +74,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 base64 = "0.23"
 
 # Audio playback
-# rodio 0.22 uses high-level format features that handle both the codec 
-# and the container parser (e.g., isomp4 for m4a).
-rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "flac", "vorbis", "wav"] }
+# rodio 0.22 uses high-level format features and symphonia codec features
+# (symphonia-aac provides native AAC stream decoding for m4a/mp4 containers).
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "symphonia-aac", "flac", "vorbis", "wav"] }
 # Audio metadata
 lofty = "0.25"
 
