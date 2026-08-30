@@ -410,7 +410,10 @@ impl TrackRepository for SqliteTrackRepository {
             if chunk.is_empty() {
                 continue;
             }
-            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let placeholders = std::iter::repeat("?")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
             let sql = format!("DELETE FROM tracks WHERE id IN ({})", placeholders);
             conn.execute(&sql, rusqlite::params_from_iter(chunk))?;
             debug!(count = chunk.len(), "Deleted chunk of tracks");
@@ -1093,6 +1096,54 @@ mod tests {
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].title, "Track 02");
         assert_eq!(tracks[1].title, "Track 03");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_track_repository_delete_many() {
+        let db_path = std::env::temp_dir().join(format!(
+            "test_auralis_repo_delete_many_{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let repo = SqliteTrackRepository::new(db_arc);
+
+        // Test empty deletion
+        repo.delete_many(vec![]).await.unwrap();
+
+        // Insert test tracks
+        let mut track_ids = Vec::new();
+        for i in 1..=5 {
+            let track = Track::new(
+                format!("Track {:02}", i),
+                format!("/path/to/test_{}.mp3", i),
+                100,
+                AudioFormat::Mp3,
+            );
+            repo.insert(&track).await.unwrap();
+            track_ids.push(track.id);
+        }
+
+        assert_eq!(repo.count().await.unwrap(), 5);
+
+        // Delete subset of tracks (tracks 0, 1)
+        repo.delete_many(vec![track_ids[0], track_ids[1]])
+            .await
+            .unwrap();
+
+        assert_eq!(repo.count().await.unwrap(), 3);
+        assert!(repo.find_by_id(track_ids[0]).await.unwrap().is_none());
+        assert!(repo.find_by_id(track_ids[1]).await.unwrap().is_none());
+        assert!(repo.find_by_id(track_ids[2]).await.unwrap().is_some());
+
+        // Delete remaining tracks
+        repo.delete_many(vec![track_ids[2], track_ids[3], track_ids[4]])
+            .await
+            .unwrap();
+        assert_eq!(repo.count().await.unwrap(), 0);
 
         let _ = std::fs::remove_file(&db_path);
     }
