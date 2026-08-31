@@ -195,6 +195,50 @@
         opacity: 1 !important;
         visibility: visible !important;
     }
+
+    /* Mobile Fullscreen Player */
+    #player-full {
+        padding: calc(var(--space-4) + env(safe-area-inset-top, 0px)) var(--space-4) calc(var(--space-6) + env(safe-area-inset-bottom, 0px)) !important;
+        overflow: hidden !important;
+    }
+    
+    .player-full-art {
+        max-width: min(280px, 34vh);
+        margin-top: var(--space-4);
+        margin-bottom: var(--space-2);
+        flex-shrink: 1;
+    }
+    
+    .player-full-info {
+        margin: var(--space-2) 0;
+    }
+    
+    .player-full-title {
+        font-size: var(--text-xl);
+    }
+    
+    .player-full-progress {
+        margin-bottom: var(--space-2);
+    }
+    
+    .player-full-controls {
+        gap: var(--space-3);
+        margin-bottom: var(--space-2);
+    }
+    
+    .player-full-btn {
+        width: 48px;
+        height: 48px;
+    }
+    
+    .player-full-play {
+        width: 62px;
+        height: 62px;
+    }
+    
+    .player-full-volume {
+        margin-top: var(--space-1);
+    }
     
     /* Mobile Typography */
     h1 { font-size: var(--text-2xl); }

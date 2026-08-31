@@ -299,11 +299,21 @@ class PlayerController {
         }
     }
 
-    toggleFullScreenQueue() {
+    toggleFullScreenQueue(forceOpen) {
         const drawer = document.getElementById('player-full-queue-drawer');
+        const backdrop = document.getElementById('player-full-queue-backdrop');
         const btn = document.getElementById('player-full-queue-btn');
         if (!drawer) return;
-        const isOpen = drawer.classList.toggle('open');
+
+        let isOpen;
+        if (typeof forceOpen === 'boolean') {
+            isOpen = forceOpen;
+            drawer.classList.toggle('open', isOpen);
+        } else {
+            isOpen = drawer.classList.toggle('open');
+        }
+
+        if (backdrop) backdrop.classList.toggle('open', isOpen);
         if (btn) btn.classList.toggle('active', isOpen);
         if (isOpen) {
             this.renderQueuePanel();
@@ -510,6 +520,12 @@ class PlayerController {
                     break;
                 case 'KeyR':
                     this.cycleRepeat();
+                    break;
+                case 'Escape':
+                    const drawer = document.getElementById('player-full-queue-drawer');
+                    if (drawer && drawer.classList.contains('open')) {
+                        this.toggleFullScreenQueue(false);
+                    }
                     break;
             }
         });
