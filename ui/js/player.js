@@ -841,6 +841,14 @@ class PlayerController {
             fullPlay.innerHTML = `<i data-lucide="${iconName}"></i>`;
         }
         if (window.lucide) window.lucide.createIcons();
+        this.updateMediaSessionState();
+    }
+
+    updateMediaSessionState() {
+        if (!('mediaSession' in navigator)) return;
+        try {
+            navigator.mediaSession.playbackState = this.isPlaying ? 'playing' : (this.currentTrack ? 'paused' : 'none');
+        } catch (_) {}
     }
 
     updateProgressUI() {
@@ -965,11 +973,17 @@ class PlayerController {
         }
     }
 
-    toggleQueue() {
+    toggleQueue(forceOpen) {
         if (!this.queuePanel) this.queuePanel = document.getElementById('queue-panel');
         if (!this.queuePanel) return;
 
-        const isOpen = this.queuePanel.classList.toggle('open');
+        let isOpen;
+        if (typeof forceOpen === 'boolean') {
+            isOpen = forceOpen;
+            this.queuePanel.classList.toggle('open', isOpen);
+        } else {
+            isOpen = this.queuePanel.classList.toggle('open');
+        }
         if (this.queueBtn) {
             this.queueBtn.classList.toggle('active', isOpen);
         }
@@ -1013,7 +1027,7 @@ class PlayerController {
             <div style="padding: var(--space-4); height: 100%; display: flex; flex-direction: column;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-4);">
                     <h3 style="font-size: var(--text-lg); font-weight: var(--font-semibold); color: var(--text-1); margin: 0;">Playback Queue</h3>
-                    <button type="button" class="btn btn-ghost btn-icon btn-sm" style="padding: var(--space-1);" onclick="${isDrawer ? 'window.Auralis.player.toggleFullScreenQueue()' : 'window.Auralis.player.toggleQueue()'}">
+                    <button type="button" class="btn btn-ghost btn-icon btn-sm" style="padding: var(--space-1);" onclick="event.stopPropagation(); ${isDrawer ? 'window.Auralis.player.toggleFullScreenQueue(false)' : 'window.Auralis.player.toggleQueue(false)'}">
                         <i data-lucide="x"></i>
                     </button>
                 </div>
