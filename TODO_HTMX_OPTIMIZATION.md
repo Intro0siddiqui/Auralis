@@ -12,79 +12,31 @@ This document outlines the strategy for reducing excessive client-side JavaScrip
 
 ---
 
-## 🎯 Phase 1: High-Impact View Offloading (Catalog & Lists)
+## 🎯 Phase 1: High-Impact View Offloading (Catalog & Lists) — ✅ COMPLETED
 > **Goal:** Stop transferring massive JSON arrays to browser memory; deliver pre-rendered HTML cards and rows directly from SQLite.
 
-- [ ] **1. Albums & Artists Grid Generation (`views.js:251-377`)**
-  - **Current Issue:** Pulls all tracks into JS memory, runs nested `Map` loops, computes counts, and generates HTML strings.
-  - **Refactoring:**
-    - [ ] Add SQL aggregation queries in Rust:
-      ```sql
-      -- Albums
-      SELECT album, artist, album_art_path, COUNT(*) as track_count, MIN(id) as first_track_id 
-      FROM tracks WHERE album IS NOT NULL GROUP BY album ORDER BY album COLLATE NOCASE ASC;
-      -- Artists
-      SELECT artist, COUNT(*) as track_count, MIN(id) as first_track_id 
-      FROM tracks WHERE artist IS NOT NULL GROUP BY artist ORDER BY artist COLLATE NOCASE ASC;
-      ```
-    - [ ] Expose Rust endpoints `/partials/albums-grid` and `/partials/artists-grid`.
-    - [ ] Update `albums.html` and `artists.html` with HTMX triggers:
-      ```html
-      <div id="albums-grid" class="grid grid-auto" hx-get="/partials/albums-grid" hx-trigger="load"></div>
-      <div id="artists-grid" class="grid grid-auto" hx-get="/partials/artists-grid" hx-trigger="load"></div>
-      ```
-    - [ ] Remove `loadAlbumsView`, `loadArtistsView`, and `this._albumMap` / `this._artistMap` from `views.js` (~130 LOC removed).
+- [x] **1. Albums & Artists Grid Generation (`views.js`, `commands/library.rs`)**
+  - **Accomplished:**
+    - [x] Added SQLite aggregation queries in Rust (`get_albums_grid_html` and `get_artists_grid_html`).
+    - [x] Removed `this._albumMap` and `this._artistMap` memory caches from `views.js`.
+    - [x] Converted `loadAlbumsView` and `loadArtistsView` to declarative single-call HTML rendering.
 
-- [ ] **2. Library Track Sorting, Filtering & Row Generation (`views.js:69-162`, `799-852`)**
-  - **Current Issue:** Sorts in-memory JS arrays with `Array.prototype.sort()` and filters `is_downloaded` client-side.
-  - **Refactoring:**
-    - [ ] Use HTMX standard input attributes in `library.html`:
-      ```html
-      <div class="filter-bar">
-          <select name="sort_by" class="input" 
-                  hx-get="/partials/library/tracks" 
-                  hx-target="#library-track-list" 
-                  hx-include="[name='downloaded_only']">
-              <option value="date_added">Date added</option>
-              <option value="title">Title</option>
-              <option value="artist">Artist</option>
-              <option value="album">Album</option>
-          </select>
-          <label class="checkbox">
-              <input type="checkbox" name="downloaded_only" 
-                     hx-get="/partials/library/tracks" 
-                     hx-target="#library-track-list" 
-                     hx-include="[name='sort_by']" />
-              Downloaded only
-          </label>
-      </div>
-      <div id="library-track-list" class="track-list" 
-           hx-get="/partials/library/tracks" 
-           hx-trigger="load, library:refresh from:body">
-      </div>
-      ```
-    - [ ] Remove `renderLibraryTracks`, `renderTrackRows`, and client sorting from `views.js` (~150 LOC removed).
+- [x] **2. Library Track Sorting, Filtering & Row Generation (`views.js`, `commands/library.rs`)**
+  - **Accomplished:**
+    - [x] Added `get_library_tracks_html` backend command supporting `sort_by`, `downloaded_only`, `artist`, `album`, and `search`.
+    - [x] Removed client-side `Array.prototype.sort()` and manual DOM row generation from `views.js`.
+    - [x] Connected filter bar controls directly to backend queries.
 
-- [ ] **3. Home Shelves & Recommendations (`views.js:173-250`)**
-  - **Current Issue:** Slices tracks client-side (`tracks.slice(0, 6)`) and injects shelf cards via JS template literals.
-  - **Refactoring:**
-    - [ ] Render `home.html` directly from Rust with pre-populated shelves:
-      - "Recently Added" (`SELECT * FROM tracks ORDER BY created_at DESC LIMIT 6`)
-      - "Continue Listening" (`SELECT * FROM tracks WHERE last_played IS NOT NULL ORDER BY last_played DESC LIMIT 6`)
-    - [ ] Remove `loadHomeView` from `views.js` (~80 LOC removed).
+- [x] **3. Home Shelves & Recommendations (`views.js`, `commands/library.rs`, `home.html`)**
+  - **Accomplished:**
+    - [x] Added `get_home_shelves_html` command in Rust: pre-renders "Recently Added" shelf cards and "Continue Listening" rows directly from SQLite.
+    - [x] Removed client-side slicing and manual card/row construction from `views.js`.
 
-- [ ] **4. In-Library Search Debouncing (`views.js:539-584`)**
-  - **Current Issue:** Manual JS `setTimeout` debounce timers and client-side empty state injection.
-  - **Refactoring:**
-    - [ ] Replace with declarative HTMX debounced search in `search.html`:
-      ```html
-      <input type="search" name="q" class="input" placeholder="Search title, artist, album..."
-             hx-get="/partials/search/results"
-             hx-trigger="input changed delay:300ms, search"
-             hx-target="#search-results">
-      <div id="search-results" class="track-list"></div>
-      ```
-    - [ ] Remove `loadSearchView` from `views.js` (~45 LOC removed).
+- [x] **4. In-Library Search Debouncing (`views.js`, `commands/library.rs`, `search.html`)**
+  - **Accomplished:**
+    - [x] Added `get_search_results_html` backend command.
+    - [x] Refactored `loadSearchView` in `views.js` to render search results via backend query.
+
 
 ---
 

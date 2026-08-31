@@ -310,6 +310,71 @@ mod tests {
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(())
         }
+
+        async fn get_albums_summary(
+            &self,
+        ) -> Result<
+            Vec<crate::domain::models::AlbumSummary>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            let list = self.tracks.lock().unwrap();
+            let mut album_map = std::collections::BTreeMap::new();
+            for t in list.iter() {
+                if let Some(ref album) = t.album {
+                    if !album.is_empty() {
+                        let entry = album_map.entry(album.clone()).or_insert((
+                            t.artist.clone(),
+                            t.album_art_path.clone(),
+                            0u32,
+                            t.id.to_string(),
+                        ));
+                        entry.2 += 1;
+                    }
+                }
+            }
+            Ok(album_map
+                .into_iter()
+                .map(|(album, (artist, album_art_path, count, first_id))| {
+                    crate::domain::models::AlbumSummary {
+                        album,
+                        artist,
+                        album_art_path,
+                        track_count: count,
+                        first_track_id: Some(first_id),
+                    }
+                })
+                .collect())
+        }
+
+        async fn get_artists_summary(
+            &self,
+        ) -> Result<
+            Vec<crate::domain::models::ArtistSummary>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            let list = self.tracks.lock().unwrap();
+            let mut artist_map = std::collections::BTreeMap::new();
+            for t in list.iter() {
+                if let Some(ref artist) = t.artist {
+                    if !artist.is_empty() {
+                        let entry = artist_map
+                            .entry(artist.clone())
+                            .or_insert((0u32, t.id.to_string()));
+                        entry.0 += 1;
+                    }
+                }
+            }
+            Ok(artist_map
+                .into_iter()
+                .map(
+                    |(artist, (count, first_id))| crate::domain::models::ArtistSummary {
+                        artist,
+                        track_count: count,
+                        first_track_id: Some(first_id),
+                    },
+                )
+                .collect())
+        }
     }
 
     #[tokio::test]

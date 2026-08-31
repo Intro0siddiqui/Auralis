@@ -83,6 +83,19 @@ impl Artist {
     }
 }
 
+/// Summary representation of an artist aggregated from tracks for catalog and grid views
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtistSummary {
+    /// Artist name
+    pub artist: String,
+
+    /// Number of tracks by this artist
+    pub track_count: u32,
+
+    /// ID of the first track by this artist (for quick one-click playback)
+    pub first_track_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +129,16 @@ mod tests {
         assert_eq!(artist.name, "Test Artist");
         assert_eq!(artist.track_count, 2);
         assert_eq!(artist.total_duration_secs, 420);
+    }
+
+    #[test]
+    fn test_artist_summary() {
+        let summary = ArtistSummary {
+            artist: "Pink Floyd".to_string(),
+            track_count: 24,
+            first_track_id: Some("uuid-5678".to_string()),
+        };
+        assert_eq!(summary.artist, "Pink Floyd");
+        assert_eq!(summary.track_count, 24);
     }
 }

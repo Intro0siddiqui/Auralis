@@ -58,6 +58,80 @@ impl SqliteTrackRepository {
             mtime: row.get::<_, Option<i64>>(22)?.unwrap_or(0),
         })
     }
+
+    /// Get summary of all albums with track counts and artwork (aggregated via SQLite)
+    pub async fn get_albums_summary(
+        &self,
+    ) -> Result<Vec<AlbumSummary>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let mut stmt = conn.prepare(
+            "SELECT album, artist, album_art_path, COUNT(*) as track_count, MIN(id) as first_track_id \
+             FROM tracks \
+             WHERE album IS NOT NULL AND album != '' \
+             GROUP BY album \
+             ORDER BY album COLLATE NOCASE ASC",
+        )?;
+
+        let albums = stmt
+            .query_map([], |row| {
+                Ok(AlbumSummary {
+                    album: row.get(0)?,
+                    artist: row.get(1)?,
+                    album_art_path: row.get(2)?,
+                    track_count: row.get::<_, i64>(3)? as u32,
+                    first_track_id: row.get(4)?,
+                })
+            })?
+            .filter_map(|r| match r {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map album summary row; skipping");
+                    None
+                }
+            })
+            .collect();
+
+        Ok(albums)
+    }
+
+    /// Get summary of all artists with track counts (aggregated via SQLite)
+    pub async fn get_artists_summary(
+        &self,
+    ) -> Result<Vec<ArtistSummary>, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let mut stmt = conn.prepare(
+            "SELECT artist, COUNT(*) as track_count, MIN(id) as first_track_id \
+             FROM tracks \
+             WHERE artist IS NOT NULL AND artist != '' \
+             GROUP BY artist \
+             ORDER BY artist COLLATE NOCASE ASC",
+        )?;
+
+        let artists = stmt
+            .query_map([], |row| {
+                Ok(ArtistSummary {
+                    artist: row.get(0)?,
+                    track_count: row.get::<_, i64>(1)? as u32,
+                    first_track_id: row.get(2)?,
+                })
+            })?
+            .filter_map(|r| match r {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    warn!(error = %e, "Failed to map artist summary row; skipping");
+                    None
+                }
+            })
+            .collect();
+
+        Ok(artists)
+    }
 }
 
 /// Build the `WHERE` clause and ordered param bindings shared by `find_all`
@@ -502,6 +576,18 @@ impl TrackRepository for SqliteTrackRepository {
             params![is_favorite as i32, id],
         )?;
         Ok(())
+    }
+
+    async fn get_albums_summary(
+        &self,
+    ) -> Result<Vec<AlbumSummary>, Box<dyn std::error::Error + Send + Sync>> {
+        SqliteTrackRepository::get_albums_summary(self).await
+    }
+
+    async fn get_artists_summary(
+        &self,
+    ) -> Result<Vec<ArtistSummary>, Box<dyn std::error::Error + Send + Sync>> {
+        SqliteTrackRepository::get_artists_summary(self).await
     }
 }
 
@@ -1143,6 +1229,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repo.count().await.unwrap(), 0);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_get_albums_and_artists_summary() {
+        let db_path = std::env::temp_dir().join(format!(
+            "test_auralis_repo_aggregations_{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let repo = SqliteTrackRepository::new(db_arc);
+
+        let mut t1 = Track::new(
+            "Song 1".to_string(),
+            "/path/1.mp3".to_string(),
+            180,
+            AudioFormat::Mp3,
+        );
+        t1.album = Some("Album Alpha".to_string());
+        t1.artist = Some("Artist Beta".to_string());
+        t1.album_art_path = Some("/art/alpha.jpg".to_string());
+
+        let mut t2 = Track::new(
+            "Song 2".to_string(),
+            "/path/2.mp3".to_string(),
+            200,
+            AudioFormat::Mp3,
+        );
+        t2.album = Some("Album Alpha".to_string());
+        t2.artist = Some("Artist Beta".to_string());
+        t2.album_art_path = Some("/art/alpha.jpg".to_string());
+
+        let mut t3 = Track::new(
+            "Song 3".to_string(),
+            "/path/3.mp3".to_string(),
+            240,
+            AudioFormat::Mp3,
+        );
+        t3.album = Some("Album Gamma".to_string());
+        t3.artist = Some("Artist Delta".to_string());
+
+        repo.insert(&t1).await.unwrap();
+        repo.insert(&t2).await.unwrap();
+        repo.insert(&t3).await.unwrap();
+
+        let albums = repo.get_albums_summary().await.unwrap();
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].album, "Album Alpha");
+        assert_eq!(albums[0].track_count, 2);
+        assert_eq!(albums[0].artist.as_deref(), Some("Artist Beta"));
+        assert_eq!(albums[1].album, "Album Gamma");
+        assert_eq!(albums[1].track_count, 1);
+
+        let artists = repo.get_artists_summary().await.unwrap();
+        assert_eq!(artists.len(), 2);
+        assert_eq!(artists[0].artist, "Artist Beta");
+        assert_eq!(artists[0].track_count, 2);
+        assert_eq!(artists[1].artist, "Artist Delta");
+        assert_eq!(artists[1].track_count, 1);
 
         let _ = std::fs::remove_file(&db_path);
     }

@@ -143,6 +143,25 @@ impl AlbumArt {
     }
 }
 
+/// Summary representation of an album aggregated from tracks for catalog and grid views
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AlbumSummary {
+    /// Album title / name
+    pub album: String,
+
+    /// Primary artist (if known)
+    pub artist: Option<String>,
+
+    /// Path or URL to album artwork
+    pub album_art_path: Option<String>,
+
+    /// Number of tracks belonging to this album
+    pub track_count: u32,
+
+    /// ID of the first track in this album (for quick one-click playback)
+    pub first_track_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +181,18 @@ mod tests {
 
         album.total_duration_secs = 180;
         assert_eq!(album.formatted_duration(), "3 min");
+    }
+
+    #[test]
+    fn test_album_summary() {
+        let summary = AlbumSummary {
+            album: "Abbey Road".to_string(),
+            artist: Some("The Beatles".to_string()),
+            album_art_path: Some("/art/abbey.jpg".to_string()),
+            track_count: 17,
+            first_track_id: Some("uuid-1234".to_string()),
+        };
+        assert_eq!(summary.album, "Abbey Road");
+        assert_eq!(summary.track_count, 17);
     }
 }

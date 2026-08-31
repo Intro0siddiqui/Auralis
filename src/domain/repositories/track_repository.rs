@@ -2,7 +2,7 @@
 //!
 //! Defines the data access contract for tracks.
 
-use crate::domain::models::{Track, TrackFilter};
+use crate::domain::models::{AlbumSummary, ArtistSummary, Track, TrackFilter};
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -90,4 +90,14 @@ pub trait TrackRepository: Send + Sync {
         id: &str,
         is_favorite: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Get summary of all albums with track counts and artwork
+    async fn get_albums_summary(
+        &self,
+    ) -> Result<Vec<AlbumSummary>, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Get summary of all artists with track counts
+    async fn get_artists_summary(
+        &self,
+    ) -> Result<Vec<ArtistSummary>, Box<dyn std::error::Error + Send + Sync>>;
 }

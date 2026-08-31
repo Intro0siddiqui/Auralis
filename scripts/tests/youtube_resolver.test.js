@@ -497,3 +497,31 @@ describe('pot-for-TV (YAD 7C4-TAWg7QA / Sx8z0U0lkjQ regression)', () => {
         assert.ok(v.includes('this.po_token&&') || v.includes('this.po_token &&'), 'vendor should have unconditional this.po_token && set pot');
     });
 });
+
+describe('Phase 1 Frontend HTMX & JS Reduction', () => {
+    const viewsPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/modules/views.js');
+    const viewsSrc = fs.readFileSync(viewsPath, 'utf8');
+
+    it('views.js does not contain _albumMap or _artistMap memory caches', () => {
+        assert.ok(!viewsSrc.includes('this._albumMap'), 'views.js should not retain this._albumMap memory cache');
+        assert.ok(!viewsSrc.includes('this._artistMap'), 'views.js should not retain this._artistMap memory cache');
+    });
+
+    it('loadAlbumsView and loadArtistsView invoke get_albums_grid_html and get_artists_grid_html', () => {
+        assert.ok(viewsSrc.includes("get_albums_grid_html"), 'loadAlbumsView should invoke get_albums_grid_html');
+        assert.ok(viewsSrc.includes("get_artists_grid_html"), 'loadArtistsView should invoke get_artists_grid_html');
+    });
+
+    it('renderLibraryTracks invokes get_library_tracks_html', () => {
+        assert.ok(viewsSrc.includes("get_library_tracks_html"), 'renderLibraryTracks should invoke get_library_tracks_html');
+    });
+
+    it('loadHomeView invokes get_home_shelves_html', () => {
+        assert.ok(viewsSrc.includes("get_home_shelves_html"), 'loadHomeView should invoke get_home_shelves_html');
+    });
+
+    it('loadSearchView invokes get_search_results_html', () => {
+        assert.ok(viewsSrc.includes("get_search_results_html"), 'loadSearchView should invoke get_search_results_html');
+    });
+});
+

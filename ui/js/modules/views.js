@@ -70,24 +70,11 @@ export const viewMethods = {
         const expected = 'library';
         if (this.activeView !== expected) return;
 
-        try {
-            const page = await this.invoke('get_tracks');
-            if (this.activeView !== expected) return;
-            const content = document.getElementById('content');
-            if (!content || !content.querySelector('.page-library')) return;
+        const content = document.getElementById('content');
+        if (!content || !content.querySelector('.page-library')) return;
 
-            if (page && page.tracks && page.tracks.length > 0) {
-                this.tracks = page.tracks;
-            } else {
-                this.tracks = [];
-            }
-            this.bindLibraryFilterControls();
-            this.renderLibraryTracks();
-        } catch (err) {
-            console.error('Error loading library:', err);
-            this.bindLibraryFilterControls();
-            this.renderLibraryTracks();
-        }
+        this.bindLibraryFilterControls();
+        await this.renderLibraryTracks();
     },
 
     bindLibraryFilterControls() {
@@ -109,55 +96,30 @@ export const viewMethods = {
         }
     },
 
-    renderLibraryTracks() {
+    async renderLibraryTracks() {
         const trackList = document.querySelector('.page-library .track-list');
         if (!trackList) return;
 
         const sortSelect = document.querySelector('.page-library select[name="sort_by"]');
         const downloadedCheckbox = document.querySelector('.page-library input[name="downloaded_only"]');
 
-        let filtered = [...this.tracks];
-
-        if (downloadedCheckbox && downloadedCheckbox.checked) {
-            filtered = filtered.filter(t => t.is_downloaded || (t.file_path && !t.file_path.startsWith('http')));
-        }
-
         const sortBy = sortSelect ? sortSelect.value : 'date_added';
-        if (sortBy === 'title') {
-            filtered.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
-        } else if (sortBy === 'artist') {
-            filtered.sort((a, b) => (a.artist || '').localeCompare(b.artist || ''));
-        } else if (sortBy === 'album') {
-            filtered.sort((a, b) => (a.album || '').localeCompare(b.album || ''));
-        } else if (sortBy === 'date_added') {
-            if (filtered.some(t => t.created_at || t.date_added)) {
-                filtered.sort((a, b) => new Date(b.created_at || b.date_added || 0) - new Date(a.created_at || a.date_added || 0));
-            }
-        }
+        const downloadedOnly = downloadedCheckbox ? downloadedCheckbox.checked : false;
 
-        if (filtered.length > 0) {
-            this.renderTrackRows(trackList, filtered);
-        } else {
-            trackList.innerHTML = `
-                <div class="empty-state glass neu" style="padding: var(--space-8); border-radius: var(--radius-lg); text-align: center;">
-                    <div class="empty-state-icon" style="color: var(--accent); margin-bottom: var(--space-4);">
-                        <i data-lucide="music" style="width: 48px; height: 48px;"></i>
-                    </div>
-                    <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">No tracks found in library</h2>
-                    <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Scan your device storage or download music to start listening.</p>
-                    <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
-                        <label class="btn btn-primary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
-                            <i data-lucide="file-plus-2"></i>
-                            Import Audio
-                        </label>
-                        <button type="button" class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
-                            <i data-lucide="folder-search"></i>
-                            Scan Storage
-                        </button>
-                    </div>
-                </div>
-            `;
-            if (window.lucide) window.lucide.createIcons();
+        try {
+            const html = await this.invoke('get_library_tracks_html', {
+                sortBy,
+                downloadedOnly,
+                sort_by: sortBy,
+                downloaded_only: downloadedOnly,
+            });
+            const list = document.querySelector('.page-library .track-list');
+            if (list && html) {
+                list.innerHTML = html;
+                if (window.lucide) window.lucide.createIcons();
+            }
+        } catch (err) {
+            console.error('Error rendering library tracks:', err);
         }
     },
 
@@ -174,74 +136,16 @@ export const viewMethods = {
         const expected = 'home';
         if (this.activeView !== expected) return;
         try {
-            const page = await this.invoke('get_tracks', { filter: { limit: 12 } });
+            const html = await this.invoke('get_home_shelves_html');
             if (this.activeView !== expected) return;
             const _content = document.getElementById('content');
             if (_content && _content.firstElementChild && !_content.querySelector('.page-home')) return;
-            const shelf = document.getElementById('recently-added-shelf') || document.querySelector('.page-home .shelf') || document.querySelector('#content .shelf');
-            const trackList = document.getElementById('continue-listening-tracks') || document.querySelector('.page-home .track-list');
             const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home');
 
-            if (page && page.tracks && page.tracks.length > 0) {
-                this.tracks = page.tracks;
-                if (shelf) {
-                    shelf.innerHTML = page.tracks.slice(0, 6).map(track => `
-                        <div class="card album-card neu-glass" data-track-id="${track.id}" data-role="play-card" style="cursor: pointer; touch-action: manipulation;">
-                            <div class="card-artwork">
-                                ${track.album_art_path ? this.artImgTag(track.album_art_path, track.title) : `<i data-lucide="disc-3"></i>`}
-                            </div>
-                            <div class="card-body">
-                                <div class="card-title">${this.escapeHtml(track.title)}</div>
-                                <div class="card-subtitle">${this.escapeHtml(track.artist || 'Unknown Artist')}</div>
-                            </div>
-                        </div>
-                    `).join('');
-                    // Delegate clicks/touches robustly for mobile WebView (fixes 01:40-01:42 swallowed taps)
-                    if (shelf && !shelf.dataset.bound) {
-                        shelf.dataset.bound = 'true';
-                        const handler = (e) => {
-                            const card = e.target.closest && e.target.closest('[data-role="play-card"]');
-                            if (!card || !shelf.contains(card)) return;
-                            e.preventDefault();
-                            const tid = card.dataset.trackId;
-                            if (tid) _safePlayTrack(tid);
-                        };
-                        shelf.addEventListener('click', handler);
-                        shelf.addEventListener('touchend', handler, { passive: false });
-                    }
-                }
-                if (trackList) {
-                    this.renderTrackRows(trackList, page.tracks.slice(0, 6));
-                }
+            if (container && html) {
+                container.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
                 this._syncPlayerBar();
-            } else {
-                if (container) {
-                    container.innerHTML = `
-                        <div class="empty-state glass neu" style="padding: var(--space-8); border-radius: var(--radius-lg); text-align: center; margin-top: var(--space-4);">
-                            <div class="empty-state-icon" style="color: var(--accent); margin-bottom: var(--space-4);">
-                                <i data-lucide="music" style="width: 48px; height: 48px;"></i>
-                            </div>
-                            <h2 class="empty-state-title" style="color: var(--text-1); font-size: var(--text-xl); margin-bottom: var(--space-2);">Your library is empty</h2>
-                            <p class="empty-state-description" style="color: var(--text-2); margin-bottom: var(--space-6); max-width: 420px; margin-left: auto; margin-right: auto;">Import audio files from your device storage or download music to start playing.</p>
-                            <div style="display: flex; gap: var(--space-3); flex-wrap: wrap; justify-content: center;">
-                                <label class="btn btn-primary neu" for="global-audio-import-input" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
-                                    <i data-lucide="file-plus-2"></i>
-                                    Import Audio
-                                </label>
-                                <button type="button" class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
-                                    <i data-lucide="folder-search"></i>
-                                    Scan Storage
-                                </button>
-                                <button type="button" class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
-                                    <i data-lucide="download"></i>
-                                    Download Audio
-                                </button>
-                            </div>
-                        </div>
-                    `;
-                    if (window.lucide) window.lucide.createIcons();
-                }
             }
         } catch (err) {
             console.error('Error loading home view:', err);
@@ -253,58 +157,13 @@ export const viewMethods = {
         if (this.activeView !== expected) return;
 
         try {
-            const page = await this.invoke('get_tracks');
+            const html = await this.invoke('get_albums_grid_html');
             if (this.activeView !== expected) return;
             const _content = document.getElementById('content');
             if (!_content || !_content.querySelector('.page-albums')) return;
-            if (page && page.tracks && page.tracks.length > 0) {
-                this.tracks = page.tracks;
-                const albumMap = new Map();
-                for (const t of page.tracks) {
-                    const albumName = t.album || 'Unknown Album';
-                    if (!albumMap.has(albumName)) {
-                        albumMap.set(albumName, { name: albumName, artist: t.artist || 'Unknown Artist', art: t.album_art_path, tracks: [] });
-                    }
-                    albumMap.get(albumName).tracks.push(t);
-                }
-                this._albumMap = albumMap;
-
-                grid.innerHTML = Array.from(albumMap.values()).map(album => `
-                    <div class="card album-card neu-glass" data-album-name="${this.escapeHtml(album.name)}" data-role="play-album" style="cursor: pointer; touch-action: manipulation;">
-                        <div class="card-artwork">
-                            ${album.art ? this.artImgTag(album.art, album.name) : `<i data-lucide="disc-3"></i>`}
-                        </div>
-                        <div class="card-body">
-                            <div class="card-title">${this.escapeHtml(album.name)}</div>
-                            <div class="card-subtitle">${this.escapeHtml(album.artist)} · ${album.tracks.length} tracks</div>
-                        </div>
-                    </div>
-                `).join('');
-                if (grid && !grid.dataset.bound) {
-                    grid.dataset.bound = 'true';
-                    const handler = (e) => {
-                        const card = e.target.closest && e.target.closest('[data-role="play-album"]');
-                        if (!card || !grid.contains(card)) return;
-                        e.preventDefault();
-                        const albName = card.dataset.albumName;
-                        const alb = albName && this._albumMap && this._albumMap.get(albName);
-                        if (alb && alb.tracks && alb.tracks.length > 0) {
-                            this.tracks = alb.tracks;
-                            _safePlayTrack(alb.tracks[0].id);
-                        }
-                    };
-                    grid.addEventListener('click', handler);
-                    grid.addEventListener('touchend', handler, { passive: false });
-                }
-                if (window.lucide) window.lucide.createIcons();
-            } else {
-                grid.innerHTML = `
-                    <div class="empty-state glass neu" style="grid-column: 1 / -1; padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
-                        <i data-lucide="disc-3" style="width: 48px; height: 48px; color: var(--accent); margin-bottom: var(--space-3);"></i>
-                        <h3 style="color: var(--text-1); font-size: var(--text-lg); margin-bottom: var(--space-2);">No albums found</h3>
-                        <p style="color: var(--text-3); font-size: var(--text-sm);">Scan your music library to populate your album catalog.</p>
-                    </div>
-                `;
+            const grid = document.getElementById('albums-grid') || document.querySelector('.page-albums .grid');
+            if (grid && html) {
+                grid.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
             }
         } catch (err) {
@@ -317,58 +176,13 @@ export const viewMethods = {
         if (this.activeView !== expected) return;
 
         try {
-            const page = await this.invoke('get_tracks');
+            const html = await this.invoke('get_artists_grid_html');
             if (this.activeView !== expected) return;
             const _content = document.getElementById('content');
             if (!_content || !_content.querySelector('.page-artists')) return;
-            if (page && page.tracks && page.tracks.length > 0) {
-                this.tracks = page.tracks;
-                const artistMap = new Map();
-                for (const t of page.tracks) {
-                    const artistName = t.artist || 'Unknown Artist';
-                    if (!artistMap.has(artistName)) {
-                        artistMap.set(artistName, { name: artistName, tracks: [] });
-                    }
-                    artistMap.get(artistName).tracks.push(t);
-                }
-                this._artistMap = artistMap;
-
-                grid.innerHTML = Array.from(artistMap.values()).map(artist => `
-                    <div class="card artist-card neu-glass" data-artist-name="${this.escapeHtml(artist.name)}" data-role="play-artist" style="cursor: pointer; touch-action: manipulation;">
-                        <div class="card-artwork">
-                            <i data-lucide="user"></i>
-                        </div>
-                        <div class="card-body">
-                            <div class="card-title">${this.escapeHtml(artist.name)}</div>
-                            <div class="card-subtitle">${artist.tracks.length} tracks</div>
-                        </div>
-                    </div>
-                `).join('');
-                if (grid && !grid.dataset.bound) {
-                    grid.dataset.bound = 'true';
-                    const handler = (e) => {
-                        const card = e.target.closest && e.target.closest('[data-role="play-artist"]');
-                        if (!card || !grid.contains(card)) return;
-                        e.preventDefault();
-                        const artName = card.dataset.artistName;
-                        const art = artName && this._artistMap && this._artistMap.get(artName);
-                        if (art && art.tracks && art.tracks.length > 0) {
-                            this.tracks = art.tracks;
-                            _safePlayTrack(art.tracks[0].id);
-                        }
-                    };
-                    grid.addEventListener('click', handler);
-                    grid.addEventListener('touchend', handler, { passive: false });
-                }
-                if (window.lucide) window.lucide.createIcons();
-            } else {
-                grid.innerHTML = `
-                    <div class="empty-state glass neu" style="grid-column: 1 / -1; padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
-                        <i data-lucide="users" style="width: 48px; height: 48px; color: var(--accent); margin-bottom: var(--space-3);"></i>
-                        <h3 style="color: var(--text-1); font-size: var(--text-lg); margin-bottom: var(--space-2);">No artists found</h3>
-                        <p style="color: var(--text-3); font-size: var(--text-sm);">Scan your music library to discover artists.</p>
-                    </div>
-                `;
+            const grid = document.getElementById('artists-grid') || document.querySelector('.page-artists .grid');
+            if (grid && html) {
+                grid.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
             }
         } catch (err) {
@@ -543,22 +357,13 @@ export const viewMethods = {
 
         const performSearch = async () => {
             const input = form.querySelector('input[name="q"]');
-            if (!input || !input.value.trim()) return;
+            const query = (input ? input.value : '').trim();
 
             try {
-                const page = await this.invoke('get_tracks', { filter: { search: input.value.trim() } });
-                if (!document.getElementById('search-results')) return;
-                if (page && page.tracks && page.tracks.length > 0) {
-                    this.tracks = page.tracks;
-                    this.renderTrackRows(resultsContainer, page.tracks);
-                } else {
-                    resultsContainer.innerHTML = `
-                        <div class="empty-state glass neu" style="padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
-                            <div class="empty-state-icon"><i data-lucide="search"></i></div>
-                            <h2 class="empty-state-title">No matching tracks</h2>
-                            <p class="empty-state-description">Try searching for a different title, artist, or album.</p>
-                        </div>
-                    `;
+                const html = await this.invoke('get_search_results_html', { query, q: query });
+                const target = document.getElementById('search-results');
+                if (target && html) {
+                    target.innerHTML = html;
                     if (window.lucide) window.lucide.createIcons();
                 }
             } catch (err) {
@@ -874,7 +679,7 @@ export const viewMethods = {
         }
     },
 
-    openTrackContextMenu(event, trackId) {
+    async openTrackContextMenu(event, trackId) {
         if (event) {
             event.preventDefault();
             event.stopPropagation();
@@ -882,7 +687,14 @@ export const viewMethods = {
         this.closeTrackContextMenu();
         if (!trackId) return;
 
-        const track = (this.tracks && this.tracks.find(t => String(t.id) === String(trackId))) || { id: trackId };
+        let track = (this.tracks && this.tracks.find(t => String(t.id) === String(trackId)));
+        if (!track) {
+            try {
+                track = await this.invoke('get_track', { id: trackId });
+            } catch (_) {}
+        }
+        track = track || { id: trackId };
+
         const menu = document.createElement('div');
         menu.id = 'floating-track-context-menu';
         menu.className = 'context-menu';
@@ -1290,28 +1102,23 @@ export const viewMethods = {
             return;
         }
         try {
-            const page = await this.invoke('get_tracks', { filter: { artist: artistName } });
-            if (page && page.tracks) {
-                this.tracks = page.tracks;
-                const content = document.getElementById('content');
-                if (content) {
-                    content.innerHTML = `
-                        <section class="page-library">
-                            <header class="section-header">
-                                <div>
-                                    <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
-                                        <i data-lucide="arrow-left"></i> All Tracks
-                                    </button>
-                                    <h2 class="section-title">Artist: ${this.escapeHtml(artistName)}</h2>
-                                </div>
-                            </header>
-                            <div class="track-list"></div>
-                        </section>
-                    `;
-                    const list = content.querySelector('.track-list');
-                    if (list) this.renderTrackRows(list, page.tracks);
-                    if (window.lucide) window.lucide.createIcons();
-                }
+            const html = await this.invoke('get_library_tracks_html', { artist: artistName });
+            const content = document.getElementById('content');
+            if (content) {
+                content.innerHTML = `
+                    <section class="page-library">
+                        <header class="section-header">
+                            <div>
+                                <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
+                                    <i data-lucide="arrow-left"></i> All Tracks
+                                </button>
+                                <h2 class="section-title">Artist: ${this.escapeHtml(artistName)}</h2>
+                            </div>
+                        </header>
+                        <div class="track-list">${html || ''}</div>
+                    </section>
+                `;
+                if (window.lucide) window.lucide.createIcons();
             }
         } catch (err) {
             console.error('Failed to filter by artist:', err);
@@ -1324,28 +1131,23 @@ export const viewMethods = {
             return;
         }
         try {
-            const page = await this.invoke('get_tracks', { filter: { album: albumName } });
-            if (page && page.tracks) {
-                this.tracks = page.tracks;
-                const content = document.getElementById('content');
-                if (content) {
-                    content.innerHTML = `
-                        <section class="page-library">
-                            <header class="section-header">
-                                <div>
-                                    <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
-                                        <i data-lucide="arrow-left"></i> All Tracks
-                                    </button>
-                                    <h2 class="section-title">Album: ${this.escapeHtml(albumName)}</h2>
-                                </div>
-                            </header>
-                            <div class="track-list"></div>
-                        </section>
-                    `;
-                    const list = content.querySelector('.track-list');
-                    if (list) this.renderTrackRows(list, page.tracks);
-                    if (window.lucide) window.lucide.createIcons();
-                }
+            const html = await this.invoke('get_library_tracks_html', { album: albumName });
+            const content = document.getElementById('content');
+            if (content) {
+                content.innerHTML = `
+                    <section class="page-library">
+                        <header class="section-header">
+                            <div>
+                                <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
+                                    <i data-lucide="arrow-left"></i> All Tracks
+                                </button>
+                                <h2 class="section-title">Album: ${this.escapeHtml(albumName)}</h2>
+                            </div>
+                        </header>
+                        <div class="track-list">${html || ''}</div>
+                    </section>
+                `;
+                if (window.lucide) window.lucide.createIcons();
             }
         } catch (err) {
             console.error('Failed to filter by album:', err);

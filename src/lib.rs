@@ -11,11 +11,11 @@ pub mod domain;
 
 // Re-export domain types for convenient access
 pub use domain::models::{
-    Album, AlbumArt, AppearanceSettings, Artist, AudioFormat, AudioSettings, DownloadProgress,
-    DownloadSettings, DownloadStatus, LibrarySettings, LibraryView, NowPlaying, PairedDevice,
-    PairingInfo, Playlist, RepeatMode, ScanSummary, Settings, SmartPlaylistCriteria,
-    SmartSortField, SyncChange, SyncSettings, SyncStatus, ThemeMode, Track, TrackFilter,
-    TrackMetadataUpdate, TrackSortField,
+    Album, AlbumArt, AlbumSummary, AppearanceSettings, Artist, ArtistSummary, AudioFormat,
+    AudioSettings, DownloadProgress, DownloadSettings, DownloadStatus, LibrarySettings,
+    LibraryView, NowPlaying, PairedDevice, PairingInfo, Playlist, RepeatMode, ScanSummary,
+    Settings, SmartPlaylistCriteria, SmartSortField, SyncChange, SyncSettings, SyncStatus,
+    ThemeMode, Track, TrackFilter, TrackMetadataUpdate, TrackSortField,
 };
 pub use domain::services::SyncService;
 
@@ -130,6 +130,11 @@ impl AuralisApp {
                 commands::library::import_audio_file,
                 commands::library::set_track_favorite,
                 commands::library::media_data_url,
+                commands::library::get_albums_grid_html,
+                commands::library::get_artists_grid_html,
+                commands::library::get_library_tracks_html,
+                commands::library::get_home_shelves_html,
+                commands::library::get_search_results_html,
                 // Playback commands
                 commands::playback::play,
                 commands::playback::pause,

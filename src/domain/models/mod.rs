@@ -12,8 +12,8 @@ mod settings;
 mod sync;
 mod track;
 
-pub use album::{Album, AlbumArt};
-pub use artist::Artist;
+pub use album::{Album, AlbumArt, AlbumSummary};
+pub use artist::{Artist, ArtistSummary};
 pub use download::{DownloadProgress, DownloadStatus};
 pub use playlist::{Playlist, SmartPlaylistCriteria, SmartSortField};
 pub use settings::{
