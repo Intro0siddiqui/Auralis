@@ -161,6 +161,8 @@
 
 .control-btn.active {
     color: var(--accent);
+    background: rgba(110, 231, 255, 0.15);
+    box-shadow: 0 0 12px rgba(110, 231, 255, 0.35);
 }
 
 .control-btn svg {
@@ -1295,6 +1297,14 @@
     border: 1px solid var(--glass-border);
     color: var(--text-1);
     cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.player-full-btn.active {
+    color: var(--accent);
+    background: rgba(110, 231, 255, 0.15);
+    border-color: var(--accent);
+    box-shadow: 0 0 16px rgba(110, 231, 255, 0.4), inset var(--neu-shadow-light) var(--neu-color-light);
 }
 
 .player-full-play {
