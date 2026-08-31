@@ -258,7 +258,7 @@ impl AudioPlayer {
         Ok(())
     }
 
-    /// Seek using rodio's native `try_seek`.
+    /// Seek using rodio's native `try_seek` with fallback for unseekable MP3 bitstreams.
     pub async fn seek(&self, position: Duration) -> Result<(), PlayerError> {
         debug!(?position, "Seeking to position");
 
@@ -269,28 +269,112 @@ impl AudioPlayer {
             ));
         }
 
-        let sink_guard = self.sink.read().await;
-        if let Some(player) = sink_guard.as_ref() {
-            let was_paused = player.is_paused();
-            // Anchor presence mirrors paused state, but check sink to be authoritative.
-            player
-                .try_seek(position)
-                .map_err(|e| PlayerError::StateError(format!("Seek failed: {e}")))?;
+        let current_track = self.current_track.read().await.clone();
 
-            // Reset time tracking to the new position
-            drop(sink_guard);
-            *self.played.write().await = position;
-            if was_paused {
-                // Keep anchor None so position stays frozen while paused
-                *self.play_anchor.write().await = None;
+        let seek_res = {
+            let sink_guard = self.sink.read().await;
+            if let Some(player) = sink_guard.as_ref() {
+                let was_paused = player.is_paused();
+                let res = player.try_seek(position);
+                (res, was_paused)
             } else {
-                *self.play_anchor.write().await = Some(Instant::now());
+                return Err(PlayerError::StateError("No active playback".into()));
             }
+        };
+
+        let (res, was_paused) = seek_res;
+
+        if let Err(e) = res {
+            warn!(
+                ?position,
+                error = %e,
+                "Native player seek failed (e.g. unseekable VBR MP3); attempting fallback seek"
+            );
+            if let Some(track) = current_track {
+                if let Err(fallback_err) = self.seek_fallback(&track, position, was_paused).await {
+                    warn!(
+                        error = %fallback_err,
+                        "Fallback seek failed; preserving playback state"
+                    );
+                    return Err(PlayerError::StateError(format!(
+                        "Seek failed: {e} (fallback error: {fallback_err})"
+                    )));
+                }
+                info!(?position, "Fallback seek completed successfully");
+                return Ok(());
+            } else {
+                return Err(PlayerError::StateError(format!("Seek failed: {e}")));
+            }
+        }
+
+        *self.played.write().await = position;
+        if was_paused {
+            *self.play_anchor.write().await = None;
         } else {
-            return Err(PlayerError::StateError("No active playback".into()));
+            *self.play_anchor.write().await = Some(Instant::now());
         }
 
         info!(?position, "Seek completed");
+        Ok(())
+    }
+
+    /// Fallback seeking when Symphonia cannot perform frame-accurate timestamp seeks directly on the active decoder.
+    /// Re-opens the track, creates a fresh decoder, attempts `skip_duration` or `try_seek`, and replaces the active player.
+    async fn seek_fallback(
+        &self,
+        track: &Track,
+        position: Duration,
+        was_paused: bool,
+    ) -> Result<(), PlayerError> {
+        let file_path = &track.file_path;
+        let file = match File::open(file_path) {
+            Ok(f) => f,
+            Err(e) => {
+                #[cfg(target_os = "android")]
+                {
+                    if let Some(cached) =
+                        crate::infrastructure::media::android_downloads::cached_copy_for_path(file_path)
+                    {
+                        File::open(&cached).map_err(|ce| {
+                            PlayerError::FileError(format!("{file_path}: {e} (cached {cached:?}: {ce})"))
+                        })?
+                    } else {
+                        return Err(PlayerError::FileError(format!("{file_path}: {e}")));
+                    }
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    return Err(PlayerError::FileError(format!("{file_path}: {e}")));
+                }
+            }
+        };
+
+        let source = Decoder::new(BufReader::new(file))
+            .map_err(|e| PlayerError::DecodeError(format!("{file_path}: {e}")))?;
+
+        let skipped_source = source.skip_duration(position);
+
+        let vol = *self.volume.read().await;
+        let mixer = self.output_stream_handle().await?;
+        let player = Player::connect_new(&mixer);
+        player.set_volume(vol);
+        player.append(skipped_source);
+
+        if was_paused {
+            player.pause();
+        }
+
+        if let Some(old_sink) = self.sink.write().await.replace(player) {
+            old_sink.stop();
+        }
+
+        *self.played.write().await = position;
+        if was_paused {
+            *self.play_anchor.write().await = None;
+        } else {
+            *self.play_anchor.write().await = Some(Instant::now());
+        }
+
         Ok(())
     }
 
