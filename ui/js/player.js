@@ -820,13 +820,19 @@ class PlayerController {
             fullShuffle.classList.toggle('active', this.shuffle);
         }
 
+        const repeatIconName = this.repeatMode === 'one' ? 'repeat-1' : 'repeat';
+
         if (this.repeatBtn) {
             this.repeatBtn.classList.toggle('active', this.repeatMode !== 'off');
+            this.repeatBtn.innerHTML = `<i data-lucide="${repeatIconName}"></i>`;
         }
         const fullRepeat = document.getElementById('player-full-repeat');
         if (fullRepeat) {
             fullRepeat.classList.toggle('active', this.repeatMode !== 'off');
+            fullRepeat.innerHTML = `<i data-lucide="${repeatIconName}"></i>`;
         }
+
+        if (window.lucide) window.lucide.createIcons();
     }
 
     updatePlayButton() {
