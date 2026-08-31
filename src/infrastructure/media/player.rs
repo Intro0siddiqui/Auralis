@@ -333,10 +333,14 @@ impl AudioPlayer {
                 #[cfg(target_os = "android")]
                 {
                     if let Some(cached) =
-                        crate::infrastructure::media::android_downloads::cached_copy_for_path(file_path)
+                        crate::infrastructure::media::android_downloads::cached_copy_for_path(
+                            file_path,
+                        )
                     {
                         File::open(&cached).map_err(|ce| {
-                            PlayerError::FileError(format!("{file_path}: {e} (cached {cached:?}: {ce})"))
+                            PlayerError::FileError(format!(
+                                "{file_path}: {e} (cached {cached:?}: {ce})"
+                            ))
                         })?
                     } else {
                         return Err(PlayerError::FileError(format!("{file_path}: {e}")));

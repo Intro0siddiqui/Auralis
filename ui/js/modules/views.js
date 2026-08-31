@@ -739,14 +739,19 @@ export const viewMethods = {
             }
 
             themeOptions.forEach(btn => {
-                btn.addEventListener('click', async () => {
+                btn.addEventListener('click', async (e) => {
+                    e.preventDefault();
                     const selectedTheme = btn.dataset.theme;
-                    themeOptions.forEach(opt => opt.classList.toggle('active', opt === btn));
-                    if (this.currentSettings) {
-                        this.currentSettings.appearance = this.currentSettings.appearance || {};
-                        this.currentSettings.appearance.theme = selectedTheme;
+                    if (typeof this.setTheme === 'function') {
+                        await this.setTheme(selectedTheme);
+                    } else {
+                        themeOptions.forEach(opt => opt.classList.toggle('active', opt === btn));
                         this.applyTheme(selectedTheme);
-                        await saveSettings();
+                        if (this.currentSettings) {
+                            this.currentSettings.appearance = this.currentSettings.appearance || {};
+                            this.currentSettings.appearance.theme = selectedTheme;
+                            await saveSettings();
+                        }
                     }
                 });
             });

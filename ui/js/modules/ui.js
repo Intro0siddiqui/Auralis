@@ -52,6 +52,39 @@ export const uiMethods = {
         }
     },
 
+    async setTheme(theme) {
+        const themeStr = String(theme || 'system').toLowerCase();
+        this.applyTheme(themeStr);
+
+        // Update active UI classes immediately
+        const themeOptions = document.querySelectorAll('.theme-option[data-theme]');
+        themeOptions.forEach(opt => {
+            opt.classList.toggle('active', opt.dataset.theme === themeStr);
+        });
+
+        // Update in-memory settings
+        this.currentSettings = this.currentSettings || {};
+        this.currentSettings.appearance = this.currentSettings.appearance || {};
+        this.currentSettings.appearance.theme = themeStr;
+
+        // Persist to SQLite backend
+        try {
+            if (this.currentSettings.audio && this.currentSettings.downloads && this.currentSettings.sync && this.currentSettings.library) {
+                await this.invoke('update_settings', { settings: this.currentSettings });
+            } else {
+                const fullSettings = await this.invoke('get_settings');
+                if (fullSettings) {
+                    this.currentSettings = fullSettings;
+                    this.currentSettings.appearance = this.currentSettings.appearance || {};
+                    this.currentSettings.appearance.theme = themeStr;
+                    await this.invoke('update_settings', { settings: this.currentSettings });
+                }
+            }
+        } catch (err) {
+            console.warn('Failed to persist theme setting:', err);
+        }
+    },
+
     formatTime(secs) {
         const m = Math.floor(secs / 60);
         const s = Math.floor(secs % 60);

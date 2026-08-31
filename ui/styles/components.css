@@ -975,13 +975,25 @@
     background: transparent;
     border: none;
     cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
     transition: all var(--transition-fast);
 }
 
-.theme-option svg {
+.theme-option * {
+    pointer-events: none;
+}
+
+.theme-option svg,
+.theme-option i {
     width: 14px;
     height: 14px;
     stroke: currentColor;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .theme-option:hover {
