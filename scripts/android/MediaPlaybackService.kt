@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
@@ -137,7 +138,16 @@ class MediaPlaybackService : Service() {
         }
 
         val art = loadArtBitmap(artPath)
-        startForeground(NOTIFICATION_ID, buildNotification(title, artist, isPlaying, art))
+        val notification = buildNotification(title, artist, isPlaying, art)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         updateMediaSession(title, artist, durationSecs, positionSecs, isPlaying, art)
         return START_STICKY
     }
@@ -281,7 +291,7 @@ class MediaPlaybackService : Service() {
         if (wakeLock?.isHeld == true) return
         val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
         val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Auralis:PlaybackWakeLock")
-        wl.acquire(10 * 60 * 1000L) // 10 min timeout as safety; renewed on each play push
+        wl.acquire() // Keep wake lock held indefinitely while playing to prevent background pause
         wakeLock = wl
     }
 
@@ -347,6 +357,12 @@ class MediaPlaybackService : Service() {
         if (art != null) {
             builder.setLargeIcon(art)
         }
+        val mediaStyle = Notification.MediaStyle()
+        mediaSession?.sessionToken?.let { token ->
+            mediaStyle.setMediaSession(token)
+        }
+        mediaStyle.setShowActionsInCompactView(0, 1, 2)
+
         return builder
             .setContentTitle(title)
             .setContentText(artist.ifEmpty { "Auralis Music Player" })
@@ -354,7 +370,8 @@ class MediaPlaybackService : Service() {
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setShowWhen(false)
-            .setOngoing(true)
+            .setOngoing(isPlaying)
+            .setStyle(mediaStyle)
             .addAction(
                 android.R.drawable.ic_media_previous,
                 "Previous",
