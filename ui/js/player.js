@@ -673,8 +673,9 @@ class PlayerController {
 
     seek(secs) {
         if (!this.duration || this.duration <= 0 || !isFinite(this.duration) || !isFinite(secs)) return;
-        const pct = Math.max(0, Math.min(1, secs / this.duration));
-        this.seekToPercent(pct);
+        this.progress = Math.max(0, Math.min(this.duration, secs));
+        this.updateProgressUI();
+        this.commitSeek();
     }
 
     seekToPercent(pct) {
@@ -682,15 +683,6 @@ class PlayerController {
         this.progress = pct * (this.duration || 0);
         this.updateProgressUI();
         this.updatePositionState();
-        if (window.Auralis && window.Auralis.bridge) {
-            const pos = Math.floor(this.progress);
-            if (!isFinite(pos) || pos < 0) return;
-            window.Auralis.bridge.invoke('seek', { request: { position_secs: pos } }).catch((err)=>{
-                const msg = String(err || 'seek failed');
-                console.warn('Seek failed:', msg);
-                window.Auralis.bridge.showToast(`Seek failed: ${msg}`, 'error', 5000);
-            });
-        }
     }
 
     commitSeek() {
@@ -783,7 +775,8 @@ class PlayerController {
     seekRelative(delta) {
         if (!this.duration) return;
         this.progress = Math.max(0, Math.min(this.duration, this.progress + delta));
-        this.seekToPercent(this.progress / this.duration);
+        this.updateProgressUI();
+        this.commitSeek();
     }
 
     toggleShuffle() {
