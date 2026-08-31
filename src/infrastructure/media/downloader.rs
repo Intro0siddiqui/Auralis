@@ -136,6 +136,13 @@ fn sanitize_filename(name: &str) -> String {
     }
     // Remove any lingering path separators (already mapped to _ but be safe)
     trimmed = trimmed.replace(['/', '\\'], "_");
+    // Collapse consecutive underscores
+    while trimmed.contains("__") {
+        trimmed = trimmed.replace("__", "_");
+    }
+    trimmed = trimmed
+        .trim_matches(|c| c == '.' || c == '_' || c == ' ')
+        .to_string();
     if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
         return "audio_track".to_string();
     }
@@ -150,7 +157,7 @@ fn sanitize_filename(name: &str) -> String {
     }
     if trimmed.len() > 200 {
         trimmed.truncate(200);
-        trimmed = trimmed.trim_end_matches('.').to_string();
+        trimmed = trimmed.trim_end_matches(['.', '_', ' ']).to_string();
         if trimmed.is_empty() {
             return "audio_track".to_string();
         }
