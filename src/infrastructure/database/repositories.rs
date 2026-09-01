@@ -279,6 +279,64 @@ impl TrackRepository for SqliteTrackRepository {
         Ok(track)
     }
 
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let mut unique_ids: Vec<Uuid> = ids.to_vec();
+        unique_ids.sort_unstable();
+        unique_ids.dedup();
+
+        let mut track_map = std::collections::HashMap::with_capacity(unique_ids.len());
+        const CHUNK_SIZE: usize = 500;
+        let ids_str: Vec<String> = unique_ids.iter().map(|u| u.to_string()).collect();
+
+        for chunk in ids_str.chunks(CHUNK_SIZE) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("SELECT * FROM tracks WHERE id IN ({})", placeholders);
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_refs.as_slice(), Self::row_to_track)?;
+            for r in rows {
+                match r {
+                    Ok(t) => {
+                        track_map.insert(t.id, t);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to map track row in find_by_ids; skipping");
+                    }
+                }
+            }
+        }
+
+        let mut result = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(track) = track_map.get(id) {
+                result.push(track.clone());
+            } else {
+                warn!(id = %id, "Track in playlist no longer exists");
+            }
+        }
+
+        Ok(result)
+    }
+
     async fn find_by_path(
         &self,
         path: &str,

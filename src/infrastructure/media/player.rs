@@ -769,8 +769,7 @@ fn create_decoder(mut file: File, path: &str) -> Result<Decoder<BufReader<File>>
     }
 
     let _ = file.seek(SeekFrom::Start(0));
-    Decoder::new(BufReader::new(file))
-        .map_err(|e| PlayerError::DecodeError(format!("{path}: {e}")))
+    Decoder::new(BufReader::new(file)).map_err(|e| PlayerError::DecodeError(format!("{path}: {e}")))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -858,7 +857,8 @@ mod tests {
 
     #[test]
     fn test_create_decoder_extension_hint_and_fallback() {
-        let dir = std::env::temp_dir().join(format!("auralis_test_decoder_{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("auralis_test_decoder_{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
 
         // Generate 1s 8000Hz 8-bit mono WAV fixture
@@ -885,21 +885,30 @@ mod tests {
         // 1. Test creation with explicit extension hint (.wav)
         let file_wav = File::open(&wav_path).unwrap();
         let dec_wav = create_decoder(file_wav, wav_path.to_str().unwrap());
-        assert!(dec_wav.is_ok(), "Expected create_decoder to succeed with .wav extension hint");
+        assert!(
+            dec_wav.is_ok(),
+            "Expected create_decoder to succeed with .wav extension hint"
+        );
 
         // 2. Test fallback when extension hint is unknown/custom (.customext)
         let custom_path = dir.join("test_track.customext");
         std::fs::write(&custom_path, &data).unwrap();
         let file_custom = File::open(&custom_path).unwrap();
         let dec_custom = create_decoder(file_custom, custom_path.to_str().unwrap());
-        assert!(dec_custom.is_ok(), "Expected create_decoder to succeed via fallback Decoder::new");
+        assert!(
+            dec_custom.is_ok(),
+            "Expected create_decoder to succeed via fallback Decoder::new"
+        );
 
         // 3. Test failure on corrupt audio content
         let corrupt_path = dir.join("corrupt.m4a");
         std::fs::write(&corrupt_path, b"NOT_A_REAL_AUDIO_FILE").unwrap();
         let file_corrupt = File::open(&corrupt_path).unwrap();
         let dec_corrupt = create_decoder(file_corrupt, corrupt_path.to_str().unwrap());
-        assert!(dec_corrupt.is_err(), "Expected corrupt file to fail decoding");
+        assert!(
+            dec_corrupt.is_err(),
+            "Expected corrupt file to fail decoding"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

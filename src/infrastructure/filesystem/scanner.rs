@@ -185,6 +185,22 @@ mod tests {
                 .cloned())
         }
 
+        async fn find_by_ids(
+            &self,
+            ids: &[uuid::Uuid],
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            let list = self.tracks.lock().unwrap();
+            let track_map: std::collections::HashMap<uuid::Uuid, Track> =
+                list.iter().map(|t| (t.id, t.clone())).collect();
+            let mut result = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let Some(track) = track_map.get(id) {
+                    result.push(track.clone());
+                }
+            }
+            Ok(result)
+        }
+
         async fn find_by_path(
             &self,
             path: &str,
