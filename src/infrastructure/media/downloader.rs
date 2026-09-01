@@ -1032,7 +1032,7 @@ impl Downloader {
             terminal_records.retain(|(id, _)| !to_remove.contains(id));
             if terminal_records.len() > max_retained {
                 // Sort descending by updated_at (newest first)
-                terminal_records.sort_by(|a, b| b.1.cmp(&a.1));
+                terminal_records.sort_by_key(|a| std::cmp::Reverse(a.1));
                 for (id, _) in terminal_records.iter().skip(max_retained) {
                     to_remove.push(*id);
                 }
