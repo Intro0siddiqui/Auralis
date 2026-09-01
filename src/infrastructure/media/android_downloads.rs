@@ -22,10 +22,6 @@ use jni::{
     JNIEnv,
 };
 
-#[cfg(target_os = "android")]
-#[allow(dead_code)]
-const SERVICE_CLASS: &str = "com/auralis/v2/MediaPlaybackService";
-
 /// MIME for a download ext, for MediaStore DISPLAY.
 pub fn mime_for_ext(ext: &str) -> &'static str {
     match ext.to_ascii_lowercase().as_str() {
