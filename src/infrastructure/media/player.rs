@@ -4,7 +4,7 @@
 
 use rodio::{mixer::Mixer, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Seek, SeekFrom};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -149,8 +149,7 @@ impl AudioPlayer {
                 }
             }
         };
-        let source = Decoder::new(BufReader::new(file))
-            .map_err(|e| PlayerError::DecodeError(format!("{path}: {e}")))?;
+        let source = create_decoder(file, path)?;
         // Auto-repair duration: compare actual decoded stream duration with expected database duration
         if let Some(dec_dur) = source.total_duration() {
             let db_dur = *self.track_duration.read().await;
@@ -353,8 +352,7 @@ impl AudioPlayer {
             }
         };
 
-        let source = Decoder::new(BufReader::new(file))
-            .map_err(|e| PlayerError::DecodeError(format!("{file_path}: {e}")))?;
+        let source = create_decoder(file, file_path)?;
 
         let skipped_source = source.skip_duration(position);
 
@@ -745,6 +743,36 @@ impl AudioPlayer {
     }
 }
 
+/// Helper to construct a `rodio::Decoder` with extension hinting and fallback.
+fn create_decoder(mut file: File, path: &str) -> Result<Decoder<BufReader<File>>, PlayerError> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    if !ext.is_empty() {
+        if let Ok(cloned_file) = file.try_clone() {
+            let reader = BufReader::new(cloned_file);
+            match Decoder::builder().with_data(reader).with_hint(&ext).build() {
+                Ok(decoder) => return Ok(decoder),
+                Err(e) => {
+                    warn!(
+                        path = %path,
+                        ext = %ext,
+                        error = %e,
+                        "Extension-hinted decoder build failed; attempting default Decoder::new"
+                    );
+                }
+            }
+        }
+    }
+
+    let _ = file.seek(SeekFrom::Start(0));
+    Decoder::new(BufReader::new(file))
+        .map_err(|e| PlayerError::DecodeError(format!("{path}: {e}")))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PlayerError {
     #[error("Initialization error: {0}")]
@@ -826,5 +854,53 @@ mod tests {
             let hist = player.shuffle_history.read().await;
             assert_eq!(*hist, vec![0, 1, 2]);
         }
+    }
+
+    #[test]
+    fn test_create_decoder_extension_hint_and_fallback() {
+        let dir = std::env::temp_dir().join(format!("auralis_test_decoder_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Generate 1s 8000Hz 8-bit mono WAV fixture
+        let sample_rate: u32 = 8000;
+        let num_samples: u32 = 8000;
+        let mut data = Vec::with_capacity(44 + num_samples as usize);
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36 + num_samples).to_le_bytes());
+        data.extend_from_slice(b"WAVEfmt ");
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        data.extend_from_slice(&1u16.to_le_bytes()); // Mono
+        data.extend_from_slice(&sample_rate.to_le_bytes());
+        data.extend_from_slice(&sample_rate.to_le_bytes()); // Byte rate
+        data.extend_from_slice(&1u16.to_le_bytes()); // Block align
+        data.extend_from_slice(&8u16.to_le_bytes()); // Bits per sample
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&num_samples.to_le_bytes());
+        data.resize(44 + num_samples as usize, 0x80);
+
+        let wav_path = dir.join("test_track.wav");
+        std::fs::write(&wav_path, &data).unwrap();
+
+        // 1. Test creation with explicit extension hint (.wav)
+        let file_wav = File::open(&wav_path).unwrap();
+        let dec_wav = create_decoder(file_wav, wav_path.to_str().unwrap());
+        assert!(dec_wav.is_ok(), "Expected create_decoder to succeed with .wav extension hint");
+
+        // 2. Test fallback when extension hint is unknown/custom (.customext)
+        let custom_path = dir.join("test_track.customext");
+        std::fs::write(&custom_path, &data).unwrap();
+        let file_custom = File::open(&custom_path).unwrap();
+        let dec_custom = create_decoder(file_custom, custom_path.to_str().unwrap());
+        assert!(dec_custom.is_ok(), "Expected create_decoder to succeed via fallback Decoder::new");
+
+        // 3. Test failure on corrupt audio content
+        let corrupt_path = dir.join("corrupt.m4a");
+        std::fs::write(&corrupt_path, b"NOT_A_REAL_AUDIO_FILE").unwrap();
+        let file_corrupt = File::open(&corrupt_path).unwrap();
+        let dec_corrupt = create_decoder(file_corrupt, corrupt_path.to_str().unwrap());
+        assert!(dec_corrupt.is_err(), "Expected corrupt file to fail decoding");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
