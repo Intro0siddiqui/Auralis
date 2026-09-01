@@ -6,6 +6,9 @@ use crate::domain::models::{AudioFormat, Track};
 use lofty::file::TaggedFileExt;
 use lofty::picture::{Picture, PictureType};
 use lofty::prelude::*;
+use rodio::Decoder;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
@@ -13,6 +16,16 @@ use tracing::{debug, warn};
 pub struct MetadataExtractor;
 
 impl MetadataExtractor {
+    /// Verify audio health and playability
+    pub fn verify_audio_health(path: &Path) -> Result<Track, MetadataError> {
+        verify_audio_health(path)
+    }
+
+    /// Asynchronously verify audio health and playability
+    pub async fn verify_audio_health_async(path: &Path) -> Result<Track, MetadataError> {
+        verify_audio_health_async(path).await
+    }
+
     /// Returns the directory used for caching extracted embedded artwork.
     pub fn artwork_cache_dir() -> PathBuf {
         if let Some(mut cache) = dirs::cache_dir() {
@@ -366,6 +379,64 @@ pub fn write_metadata(
     Ok(())
 }
 
+/// Static Audio File Health & Playability Check
+///
+/// 1. Extracts metadata using Lofty.
+/// 2. Verifies that duration is strictly greater than 0 (`duration_secs > 0`).
+///    If duration is 0, returns `MetadataError::ReadError("File has 0s duration or missing audio stream header")`.
+/// 3. Performs a dry-run decoder probe using `rodio::Decoder::builder().with_data(BufReader::with_capacity(64 * 1024, file)).with_hint(&ext).build()` (or `Decoder::new`)
+///    to ensure rodio/symphonia can actually initialize and demux the audio container without returning IO or atom seek errors.
+pub fn verify_audio_health(path: &Path) -> Result<Track, MetadataError> {
+    let track = MetadataExtractor::extract_with_size(path, None)?;
+    if track.duration_secs == 0 {
+        return Err(MetadataError::ReadError(
+            "File has 0s duration or missing audio stream header".to_string(),
+        ));
+    }
+
+    let file = File::open(path)
+        .map_err(|e| MetadataError::ReadError(format!("Failed to open file for probe: {e}")))?;
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let reader = BufReader::with_capacity(64 * 1024, file);
+    let probe_res = if !ext.is_empty() {
+        Decoder::builder()
+            .with_data(reader)
+            .with_hint(&ext)
+            .build()
+            .or_else(|_| {
+                if let Ok(f) = File::open(path) {
+                    Decoder::new(BufReader::with_capacity(64 * 1024, f))
+                } else {
+                    Err(rodio::decoder::DecoderError::UnrecognizedFormat)
+                }
+            })
+    } else {
+        Decoder::new(reader)
+    };
+
+    probe_res.map_err(|e| {
+        MetadataError::ReadError(format!(
+            "Audio decoder probe failed (file is unplayable): {e}"
+        ))
+    })?;
+
+    Ok(track)
+}
+
+/// Asynchronously verify audio file health and playability using non-blocking blocking task
+pub async fn verify_audio_health_async(path: &Path) -> Result<Track, MetadataError> {
+    let path_buf = path.to_path_buf();
+    tokio::task::spawn_blocking(move || verify_audio_health(&path_buf))
+        .await
+        .map_err(|e| MetadataError::ReadError(format!("Task join error: {e}")))?
+}
+
 /// Metadata extraction errors
 #[derive(Debug, thiserror::Error)]
 pub enum MetadataError {
@@ -514,5 +585,60 @@ mod tests {
             .find(|p| p.pic_type() == PictureType::CoverFront);
         assert!(best.is_some());
         assert_eq!(best.unwrap().data(), &[4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_verify_audio_health_valid_and_invalid() {
+        let dir =
+            std::env::temp_dir().join(format!("auralis_health_test_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        // 1. Corrupt audio file (random text)
+        let corrupt_path = dir.join("corrupt.mp3");
+        std::fs::write(&corrupt_path, b"NOT_A_VALID_AUDIO_FILE").unwrap();
+        let res = verify_audio_health(&corrupt_path);
+        assert!(res.is_err(), "Corrupt audio must fail verify_audio_health");
+
+        // 2. Async check on corrupt file
+        let res_async = verify_audio_health_async(&corrupt_path).await;
+        assert!(
+            res_async.is_err(),
+            "Corrupt audio must fail verify_audio_health_async"
+        );
+
+        // 3. Valid 1s WAV file
+        let sample_rate: u32 = 8000;
+        let num_samples: u32 = 8000;
+        let mut data = Vec::with_capacity(44 + num_samples as usize);
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36 + num_samples).to_le_bytes());
+        data.extend_from_slice(b"WAVEfmt ");
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        data.extend_from_slice(&1u16.to_le_bytes()); // Mono
+        data.extend_from_slice(&sample_rate.to_le_bytes());
+        data.extend_from_slice(&sample_rate.to_le_bytes()); // Byte rate
+        data.extend_from_slice(&1u16.to_le_bytes()); // Block align
+        data.extend_from_slice(&8u16.to_le_bytes()); // Bits per sample
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&num_samples.to_le_bytes());
+        data.resize(44 + num_samples as usize, 0x80);
+
+        let valid_wav_path = dir.join("valid.wav");
+        std::fs::write(&valid_wav_path, &data).unwrap();
+
+        let track =
+            verify_audio_health(&valid_wav_path).expect("Valid WAV must pass verify_audio_health");
+        assert!(track.duration_secs > 0, "Valid WAV must have duration > 0");
+
+        let track_async = verify_audio_health_async(&valid_wav_path)
+            .await
+            .expect("Valid WAV must pass verify_audio_health_async");
+        assert!(
+            track_async.duration_secs > 0,
+            "Valid WAV must have duration > 0"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

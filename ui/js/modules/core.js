@@ -159,6 +159,27 @@ export const coreMethods = {
                     }
                 });
 
+                await tauriListen('download:failed', (event) => {
+                    // Dedicated failed event — surface full error including "unplayable" / "0s duration"
+                    this.emit('download:failed', event.payload);
+                    const p = event.payload || {};
+                    const rawErr = this.extractErrorMessage(p, 'Stream error');
+                    // Ensure UI row shows failed state with full error text
+                    try { this.updateDownloadProgressUI({ ...p, status: 'failed', error: rawErr }); } catch (_) {}
+                    const toastMsg = rawErr.length > 180 ? rawErr.slice(0, 180) + '…' : rawErr;
+                    const host = (() => { try { return new URL(p.url || '').host || 'unknown'; } catch (_) { return 'unknown'; } })();
+                    this.showToast(`Download failed [${host}]: ${toastMsg}`, 'error', 8000);
+                    console.groupCollapsed(`%c[Download Failed:failed event] ${p.title || p.url || 'unknown'}`, 'color:#ff4d4f;font-weight:bold');
+                    console.error('DIAGNOSTIC download_failed_event', { id: p.id, title: p.title, url: p.url, host, status: p.status || 'failed', error: rawErr, raw: p });
+                    console.error(`Full error: ${rawErr}`);
+                    console.groupEnd();
+                    try {
+                        window.__auralisDownloadDiagnostics = window.__auralisDownloadDiagnostics || [];
+                        window.__auralisDownloadDiagnostics.push({ at: new Date().toISOString(), payload: p, rawErr, source: 'download:failed' });
+                        if (window.__auralisDownloadDiagnostics.length > 50) window.__auralisDownloadDiagnostics.shift();
+                    } catch (_) {}
+                });
+
                 await tauriListen('download:diagnostic', (event) => {
                     const msg = typeof event.payload === 'string' ? event.payload : JSON.stringify(event.payload);
                     console.error(`[download:diagnostic] ${msg}`);

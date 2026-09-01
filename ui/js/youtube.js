@@ -94,6 +94,20 @@ async function nativeFetch(input, init = {}) {
     return window.fetch(input, init);
 }
 
+/**
+ * Format preference scoring — prefers itag 140 (m4a) which rodio can decode.
+ * rodio 0.22.2 has no opus feature: webm/opus would cause DecodeError, so
+ * we do NOT prefer webm/opus. Only m4a/mp4 audio is prioritized.
+ */
+function scoreFormat(fmt) {
+    const mime = (fmt.mimeType || fmt.mime_type || '').toLowerCase();
+    // itag 140 = standard M4A 128kbps, usually FastStart from YouTube CDN
+    if (fmt.itag === 140) return 3;
+    if (mime.includes('mp4') && !mime.includes('video')) return 2;
+    if (mime.includes('m4a')) return 2;
+    return 1;
+}
+
 class YouTubeResolver {
     constructor() {
         this._modulePromise = null;
@@ -314,20 +328,88 @@ class YouTubeResolver {
         const isDecipherable = (f) => Boolean(f && (f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
         const isAudioOnlyProgressive = (f) => Boolean(f && f.has_audio && !f.has_video);
 
+        const hasValidAudioContainer = (f) => {
+            if (!f || !f.mime_type) return false;
+            const mime = String(f.mime_type).toLowerCase();
+            return (
+                mime.startsWith('audio/mp4') ||
+                mime.startsWith('audio/webm') ||
+                mime.startsWith('audio/m4a') ||
+                mime.startsWith('audio/ogg') ||
+                mime.startsWith('audio/opus') ||
+                mime.startsWith('video/mp4') ||
+                mime.startsWith('video/webm')
+            );
+        };
+
+        const hasValidAudioCodec = (f) => {
+            if (!f) return false;
+            const mime = String(f.mime_type || '').toLowerCase();
+            return (
+                mime.includes('opus') ||
+                mime.includes('mp4a') ||
+                mime.includes('aac') ||
+                mime.includes('vorbis') ||
+                mime.includes('flac') ||
+                mime.startsWith('audio/mp4') ||
+                mime.startsWith('audio/webm') ||
+                mime.startsWith('audio/ogg')
+            );
+        };
+
+        const selectBestAudioFormat = (candidates, quality = 'best', targetContainer = null) => {
+            if (!candidates || !candidates.length) return null;
+            const valid = candidates.filter((f) => f && isDecipherable(f));
+            if (!valid.length) return candidates[0] || null;
+
+            // Use global scoreFormat (itag 140 > mp4/m4a > other) — rodio 0.22.2 lacks opus, so never prefer webm/opus by default
+            const scoreFn = (f) => {
+                let base = scoreFormat(f);
+                const mimeL = String(f.mime_type || f.mimeType || '').toLowerCase();
+                if (targetContainer === 'mp4' && (mimeL.includes('mp4') || mimeL.includes('m4a'))) {
+                    base += 0.5;
+                } else if (targetContainer === 'webm' && (mimeL.includes('webm') || mimeL.includes('opus'))) {
+                    base += 0.5;
+                }
+                return base;
+            };
+
+            const sorted = [...valid].sort((a, b) => {
+                const diffScore = scoreFn(b) - scoreFn(a);
+                if (diffScore !== 0) return diffScore;
+                // Secondary tie-breakers: audio-only, direct URL, content-length, bitrate
+                const aAudioOnly = (isAudioOnlyProgressive(a) || !a.has_video) ? 1 : 0;
+                const bAudioOnly = (isAudioOnlyProgressive(b) || !b.has_video) ? 1 : 0;
+                if (bAudioOnly !== aAudioOnly) return bAudioOnly - aAudioOnly;
+                const aHasUrl = a.url ? 1 : 0;
+                const bHasUrl = b.url ? 1 : 0;
+                if (bHasUrl !== aHasUrl) return bHasUrl - aHasUrl;
+                const aHasLen = ((a.content_length && a.content_length > 0) || (a.contentLength && parseInt(a.contentLength, 10) > 0)) ? 1 : 0;
+                const bHasLen = ((b.content_length && b.content_length > 0) || (b.contentLength && parseInt(b.contentLength, 10) > 0)) ? 1 : 0;
+                if (bHasLen !== aHasLen) return bHasLen - aHasLen;
+                return (b.bitrate || 0) - (a.bitrate || 0);
+            });
+
+            return sorted[0] || valid[0];
+        };
+
+        const pickAudioFormat = selectBestAudioFormat;
+
         // Prefer audio-only progressive (e.g., itag 140 m4a) over muxed video+audio (itag 18) — avoids 360p remux waste
         const pickLegacyProgressive = (fmts) => {
             if (!fmts || !fmts.length) return null;
-            const decipherable = fmts.filter(isDecipherable);
-            if (!decipherable.length) return null;
+            // Ensure SABR fallback only selects formats with valid audio containers (audio/mp4, audio/webm)
+            const valid = fmts.filter((f) => isDecipherable(f) && hasValidAudioContainer(f));
+            if (!valid.length) return null;
             // Keep isAudioFormat filtering but add explicit check for legacy audio-only before video+audio
-            const audioOnly = decipherable.filter((f) => isAudioFormat(f) && isAudioOnlyProgressive(f));
+            const audioOnly = valid.filter((f) => isAudioFormat(f) && isAudioOnlyProgressive(f));
             if (audioOnly.length) return [...audioOnly].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-            const audioMimeOnly = decipherable.filter((f) => isAudioFormat(f) && !f.has_video);
+            const audioMimeOnly = valid.filter((f) => isAudioFormat(f) && !f.has_video);
             if (audioMimeOnly.length) return [...audioMimeOnly].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
             // No audio-only progressive: fallback to muxed (has_audio) — caller must set ext correctly and log muxed
-            const muxed = decipherable.filter((f) => f.has_audio);
+            const muxed = valid.filter((f) => f.has_audio);
             if (muxed.length) return [...muxed].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-            return decipherable[0];
+            return valid[0];
         };
 
         const hasDirectOrDecipherableAudio = (r) => {
@@ -344,11 +426,14 @@ class YouTubeResolver {
             if (!r || !r.streaming_data) return false;
             const fmts = r.streaming_data.formats || [];
             if (!fmts.length) return false;
+            // Ensure SABR fallback only selects formats with valid audio containers (audio/mp4, audio/webm)
+            const valid = fmts.filter((f) => isDecipherable(f) && hasValidAudioContainer(f));
+            if (!valid.length) return false;
             // Explicit check: prefer audio-only progressive if available (e.g., itag 140 m4a audio) over video+audio 18
-            if (fmts.some((f) => isAudioFormat(f) && isAudioOnlyProgressive(f) && isDecipherable(f))) return true;
-            if (fmts.some((f) => isAudioFormat(f) && !f.has_video && isDecipherable(f))) return true;
+            if (valid.some((f) => isAudioFormat(f) && isAudioOnlyProgressive(f))) return true;
+            if (valid.some((f) => isAudioFormat(f) && !f.has_video)) return true;
             // Fallback: any decipherable progressive (muxed itag 18) — handles WEB mapping where has_audio may be false (video/mp4)
-            return fmts.some(isDecipherable);
+            return valid.some(isDecipherable);
         };
 
         // 1. First attempt: Direct raw player API query.
@@ -512,8 +597,8 @@ class YouTubeResolver {
         let fmt = null;
 
         if (typeof info.chooseFormat === 'function') {
-            // Prefer webm/opus (higher bitrate, more efficient) when available
-            const attempts = container ? [container, null] : ['webm', 'mp4', null];
+            // rodio 0.22.2 lacks opus — prefer m4a/mp4 (itag 140) over webm/opus to avoid DecodeError
+            const attempts = container ? [container, null] : ['mp4', null, 'webm'];
             for (const c of attempts) {
                 if (fmt) break;
                 const attempt = { type: 'audio', quality };
@@ -526,20 +611,12 @@ class YouTubeResolver {
         }
 
         if (!fmt && audioCandidates.length > 0) {
-            // Prefer webm/opus (higher bitrate, more efficient) when available — sorted by bitrate desc
-            const byBitrate = (a, b) => (b.bitrate || 0) - (a.bitrate || 0);
-            const withUrl = audioCandidates.filter((f) => f.url);
-            const webmOpusWithUrl = withUrl.filter((f) => f.mime_type?.includes('opus') || f.mime_type?.includes('webm')).sort(byBitrate);
-            const sortedWithUrl = [...withUrl].sort(byBitrate);
-            const withCipher = audioCandidates.filter((f) => f.signature_cipher || f.cipher || typeof f.decipher === 'function').sort(byBitrate);
-            const webmOpusWithCipher = withCipher.filter((f) => f.mime_type?.includes('opus') || f.mime_type?.includes('webm'));
-            const audioOnlyWithCipher = withCipher.filter((f) => !f.has_video);
-            const sortedAll = [...audioCandidates].sort(byBitrate);
-            fmt = webmOpusWithUrl[0] || sortedWithUrl[0] || webmOpusWithCipher[0] || audioOnlyWithCipher[0] || sortedAll[0];
+            fmt = selectBestAudioFormat(audioCandidates, quality, container);
         }
 
         if (!fmt) {
-            fmt = allCandidates.find((f) => f && f.has_audio) || allCandidates[0];
+            const validAll = allCandidates.filter((f) => isAudioFormat(f) || f.has_audio);
+            fmt = selectBestAudioFormat(validAll, quality, container) || allCandidates[0];
         }
 
         // SABR-only final fallback: WEB 2026 may have adaptive_formats with no URLs
@@ -602,7 +679,7 @@ class YouTubeResolver {
             const orderedLegacy = (() => {
                 const best = pickLegacyProgressive(sd.formats);
                 if (!best) return [];
-                const rest = sd.formats.filter((f) => f !== best && isDecipherable(f));
+                const rest = sd.formats.filter((f) => f !== best && isDecipherable(f) && hasValidAudioContainer(f));
                 const score = (f) => {
                     if (isAudioFormat(f) && isAudioOnlyProgressive(f)) return 0;
                     if (isAudioFormat(f) && !f.has_video) return 1;
@@ -863,6 +940,85 @@ class YouTubeResolver {
         }
         return out;
     }
+
+    hasValidAudioContainer(f) {
+        if (!f || !f.mime_type) return false;
+        const mime = String(f.mime_type).toLowerCase();
+        return (
+            mime.startsWith('audio/mp4') ||
+            mime.startsWith('audio/webm') ||
+            mime.startsWith('audio/m4a') ||
+            mime.startsWith('audio/ogg') ||
+            mime.startsWith('audio/opus') ||
+            mime.startsWith('video/mp4') ||
+            mime.startsWith('video/webm')
+        );
+    }
+
+    hasValidAudioCodec(f) {
+        if (!f) return false;
+        const mime = String(f.mime_type || '').toLowerCase();
+        return (
+            mime.includes('opus') ||
+            mime.includes('mp4a') ||
+            mime.includes('aac') ||
+            mime.includes('vorbis') ||
+            mime.includes('flac') ||
+            mime.startsWith('audio/mp4') ||
+            mime.startsWith('audio/webm') ||
+            mime.startsWith('audio/ogg')
+        );
+    }
+
+    scoreFormat(fmt) {
+        return scoreFormat(fmt);
+    }
+
+    selectBestAudioFormat(candidates, quality = 'best', targetContainer = null) {
+        if (!candidates || !candidates.length) return null;
+        const isDecipherable = (f) => Boolean(f && (f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
+        const valid = candidates.filter((f) => f && isDecipherable(f));
+        if (!valid.length) return candidates[0] || null;
+
+        const scoreFn = (f) => {
+            let base = scoreFormat(f);
+            const mimeL = String(f.mime_type || f.mimeType || '').toLowerCase();
+            if (targetContainer === 'mp4' && (mimeL.includes('mp4') || mimeL.includes('m4a'))) {
+                base += 0.5;
+            } else if (targetContainer === 'webm' && (mimeL.includes('webm') || mimeL.includes('opus'))) {
+                base += 0.5;
+            }
+            return base;
+        };
+
+        const sorted = [...valid].sort((a, b) => {
+            const diffScore = scoreFn(b) - scoreFn(a);
+            if (diffScore !== 0) return diffScore;
+            const aAudioOnly = ((a.has_audio && !a.has_video) || !a.has_video) ? 1 : 0;
+            const bAudioOnly = ((b.has_audio && !b.has_video) || !b.has_video) ? 1 : 0;
+            if (bAudioOnly !== aAudioOnly) return bAudioOnly - aAudioOnly;
+            const aHasUrl = a.url ? 1 : 0;
+            const bHasUrl = b.url ? 1 : 0;
+            if (bHasUrl !== aHasUrl) return bHasUrl - aHasUrl;
+            const aHasLen = ((a.content_length && a.content_length > 0) || (a.contentLength && parseInt(a.contentLength, 10) > 0)) ? 1 : 0;
+            const bHasLen = ((b.content_length && b.content_length > 0) || (b.contentLength && parseInt(b.contentLength, 10) > 0)) ? 1 : 0;
+            if (bHasLen !== aHasLen) return bHasLen - aHasLen;
+            return (b.bitrate || 0) - (a.bitrate || 0);
+        });
+
+        return sorted[0] || valid[0];
+    }
+
+    pickAudioFormat(candidates, quality = 'best', targetContainer = null) {
+        return this.selectBestAudioFormat(candidates, quality, targetContainer);
+    }
 }
 
 window.AuralisYouTube = new YouTubeResolver();
+// Expose scoreFormat globally for testing / debugging (rodio no opus — m4a preference)
+if (typeof window !== 'undefined') {
+    window.scoreFormat = scoreFormat;
+    try { window.AuralisYouTube.scoreFormat = scoreFormat.bind(window.AuralisYouTube); } catch (_) {}
+}
+try { if (typeof globalThis !== 'undefined') globalThis.scoreFormat = scoreFormat; } catch (_) {}
+try { if (typeof module !== 'undefined' && module.exports) module.exports.scoreFormat = scoreFormat; } catch (_) {}

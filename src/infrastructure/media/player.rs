@@ -753,7 +753,7 @@ fn create_decoder(mut file: File, path: &str) -> Result<Decoder<BufReader<File>>
 
     if !ext.is_empty() {
         if let Ok(cloned_file) = file.try_clone() {
-            let reader = BufReader::new(cloned_file);
+            let reader = BufReader::with_capacity(64 * 1024, cloned_file);
             match Decoder::builder().with_data(reader).with_hint(&ext).build() {
                 Ok(decoder) => return Ok(decoder),
                 Err(e) => {
@@ -769,7 +769,8 @@ fn create_decoder(mut file: File, path: &str) -> Result<Decoder<BufReader<File>>
     }
 
     let _ = file.seek(SeekFrom::Start(0));
-    Decoder::new(BufReader::new(file)).map_err(|e| PlayerError::DecodeError(format!("{path}: {e}")))
+    Decoder::new(BufReader::with_capacity(64 * 1024, file))
+        .map_err(|e| PlayerError::DecodeError(format!("Failed to decode audio file {path}: {e}")))
 }
 
 #[derive(Debug, thiserror::Error)]

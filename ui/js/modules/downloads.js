@@ -23,6 +23,10 @@ export const downloadMethods = {
         try {
             this.on('download:completed', (p) => {
                 if (!p) return;
+                // Ensure failed UI is surfaced even when completed carries failed status
+                if (p.status === 'failed') {
+                    try { this.updateDownloadProgressUI(p); } catch (_) {}
+                }
                 const map = this._ensurePendingMap();
                 if (p.status === 'completed' || p.status === 'cancelled') {
                     map.delete(p.id);
@@ -31,6 +35,18 @@ export const downloadMethods = {
                 }
                 // fire-and-forget; internal handler is async
                 this._handle403AutoRetry(p).catch((e) => console.warn('[Downloads] 403 auto-retry handler error', e?.message || e));
+            });
+            // Also handle dedicated download:failed events — surface full error including "unplayable" / "0s duration"
+            this.on('download:failed', (p) => {
+                if (!p) return;
+                try { this.updateDownloadProgressUI({ ...p, status: p.status || 'failed' }); } catch (_) {}
+                this._handle403AutoRetry({ ...p, status: 'failed' }).catch((e) => console.warn('[Downloads] 403 auto-retry handler (failed event) error', e?.message || e));
+            });
+            // Guard: progress may also carry failed status (backend emits progress before completed)
+            this.on('download:progress', (p) => {
+                if (p && p.status === 'failed') {
+                    try { this.updateDownloadProgressUI(p); } catch (_) {}
+                }
             });
         } catch (_) {}
     },

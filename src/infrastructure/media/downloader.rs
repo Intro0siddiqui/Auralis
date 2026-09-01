@@ -13,6 +13,7 @@ use chrono::Utc;
 use lofty::file::{AudioFile, FileType};
 use lofty::probe::Probe;
 use std::collections::HashMap;
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,6 +21,15 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Remove a staging `.part` file, logging any error at debug level.
+pub(crate) async fn cleanup_staging_file(path: &Path) {
+    if let Err(e) = tokio::fs::remove_file(path).await {
+        debug!(path = %path.display(), error = %e, "Failed to remove staging file during cleanup");
+    } else {
+        debug!(path = %path.display(), "Cleaned up staging file");
+    }
+}
 
 /// A fully-resolved download job submitted to the downloader.
 ///
@@ -206,9 +216,31 @@ pub fn validate_audio_file(
         .map_err(|e| format!("Corrupt or unreadable audio headers: {e}"))?;
 
     let duration_secs = tagged_file.properties().duration().as_secs() as u32;
+    if duration_secs == 0 {
+        if expected_duration_secs.is_some() {
+            return Err(
+                "Decoded duration is 0s — file has unreadable atom index tables or is truncated"
+                    .to_string(),
+            );
+        }
+        // No expected duration — validate file size and audio properties
+        let props = tagged_file.properties();
+        let sample_rate = props.sample_rate().unwrap_or(0);
+        let channels = props.channels().unwrap_or(0);
+        if file_size <= 10_240 || sample_rate == 0 || channels == 0 {
+            return Err(format!(
+                "Decoded duration is 0s — file has unreadable atom index tables or is truncated (size={} bytes, sample_rate={}, channels={})",
+                file_size, sample_rate, channels
+            ));
+        }
+        return Err(
+            "Decoded duration is 0s — file has unreadable atom index tables or is truncated"
+                .to_string(),
+        );
+    }
 
     if let Some(expected) = expected_duration_secs {
-        if expected > 0 && duration_secs > 0 {
+        if expected > 0 {
             let diff = (duration_secs as i64 - expected as i64).abs();
             if diff > 5 {
                 return Err(format!(
@@ -217,6 +249,39 @@ pub fn validate_audio_file(
                 ));
             }
         }
+    }
+
+    // Dry-run decoder probe using rodio::Decoder with 64 KB BufReader
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open file for decoder probe: {e}"))?;
+    let probe_res = if !ext.is_empty() {
+        if let Ok(cloned_file) = file.try_clone() {
+            let reader = BufReader::with_capacity(64 * 1024, cloned_file);
+            match rodio::Decoder::builder()
+                .with_data(reader)
+                .with_hint(ext)
+                .build()
+            {
+                Ok(decoder) => Ok(decoder),
+                Err(_) => {
+                    let mut f = file;
+                    let _ = f.seek(SeekFrom::Start(0));
+                    rodio::Decoder::new(BufReader::with_capacity(64 * 1024, f))
+                }
+            }
+        } else {
+            let mut f = file;
+            let _ = f.seek(SeekFrom::Start(0));
+            rodio::Decoder::new(BufReader::with_capacity(64 * 1024, f))
+        }
+    } else {
+        let mut f = file;
+        let _ = f.seek(SeekFrom::Start(0));
+        rodio::Decoder::new(BufReader::with_capacity(64 * 1024, f))
+    };
+
+    if let Err(e) = probe_res {
+        return Err(format!("Decoder probe failed for {}: {e}", path.display()));
     }
 
     Ok(duration_secs)
@@ -799,9 +864,13 @@ impl Downloader {
                         attempt = attempt,
                         "Audio stream validation failed on staging file"
                     );
+                    // Reject-on-zero gate: delete .part staging file immediately and do not
+                    // fall through to atomic rename. Cleanup helper is called on every
+                    // validation failure; on final attempt the outer spawn_stream error
+                    // handler also marks Failed and emits download:failed.
+                    cleanup_staging_file(&job.staging_path).await;
                     if attempt < MAX_STREAM_RETRIES {
                         current_downloaded = 0;
-                        let _ = tokio::fs::remove_file(&job.staging_path).await;
                         continue;
                     }
                     return Err(DownloaderError::DownloadFailed(format!(

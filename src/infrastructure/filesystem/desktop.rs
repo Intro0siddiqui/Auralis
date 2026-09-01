@@ -9,6 +9,8 @@ use crate::infrastructure::filesystem::metadata::MetadataExtractor;
 use crate::infrastructure::filesystem::scanner::{
     is_audio_file, ScanProgress, ScanResult, ScannerError,
 };
+use lofty::file::AudioFile;
+use lofty::probe::Probe;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -223,6 +225,7 @@ impl DesktopScanner {
             tracks_added: 0,
             tracks_updated: 0,
             tracks_removed: 0,
+            skipped_unplayable: 0,
             errors: Vec::new(),
         };
 
@@ -276,6 +279,10 @@ impl DesktopScanner {
                 Ok(ScanResult::Added) => summary.tracks_added += 1,
                 Ok(ScanResult::Updated) => summary.tracks_updated += 1,
                 Ok(ScanResult::Skipped) => {}
+                Ok(ScanResult::SkippedUnplayable) => {
+                    warn!(path = %file_path.display(), "Skipped unplayable file with 0s duration");
+                    summary.skipped_unplayable += 1;
+                }
                 Err(e) => {
                     error!(path = %file_path.display(), error = %e, "Failed to process audio file");
                     summary
@@ -341,6 +348,7 @@ impl DesktopScanner {
             added = summary.tracks_added,
             updated = summary.tracks_updated,
             removed = summary.tracks_removed,
+            skipped_unplayable = summary.skipped_unplayable,
             errors = summary.errors.len(),
             "Desktop library scan completed"
         );
@@ -389,9 +397,13 @@ impl DesktopScanner {
         let (mtime, size) = inner?;
 
         if let Some(existing_track) = existing.as_ref() {
-            if existing_track.mtime == mtime && existing_track.file_size == size {
+            let needs_rescan = existing_track.duration_secs == 0;
+            if !needs_rescan && existing_track.mtime == mtime && existing_track.file_size == size {
                 debug!(path = %path_str, "File unchanged, skipping");
                 return Ok(ScanResult::Skipped);
+            }
+            if needs_rescan {
+                debug!(path = %path_str, "Existing track has 0s duration — forcing re-scan");
             }
         }
 
@@ -407,7 +419,43 @@ impl DesktopScanner {
         })
         .await
         .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
-        let mut track = inner_track?;
+        let mut track = match inner_track {
+            Ok(t) if t.duration_secs > 0 => t,
+            Ok(t) => {
+                let path_for_probe = path.to_path_buf();
+                let secondary_duration = tokio::task::spawn_blocking(move || {
+                    let mut probe = match Probe::open(&path_for_probe) {
+                        Ok(p) => p,
+                        Err(_) => return None,
+                    };
+                    if probe.file_type().is_none() {
+                        match probe.guess_file_type() {
+                            Ok(p) => probe = p,
+                            Err(_) => return None,
+                        }
+                    }
+                    let tagged = match probe.read() {
+                        Ok(tagged) => tagged,
+                        Err(_) => return None,
+                    };
+                    Some(tagged.properties().duration().as_secs() as u32)
+                })
+                .await
+                .unwrap_or(None);
+                if secondary_duration.is_none_or(|d| d == 0) {
+                    warn!(path = %path_str, "Skipping audio file with 0s duration — secondary probe also 0, unplayable");
+                    return Ok(ScanResult::SkippedUnplayable);
+                }
+                let mut corrected = t;
+                corrected.duration_secs = secondary_duration.unwrap_or(0);
+                if corrected.duration_secs == 0 {
+                    warn!(path = %path_str, "Skipping audio file with 0s duration after secondary probe");
+                    return Ok(ScanResult::SkippedUnplayable);
+                }
+                corrected
+            }
+            Err(e) => return Err(e),
+        };
         track.mtime = mtime;
 
         if let Some(existing_track) = existing {

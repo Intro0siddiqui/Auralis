@@ -64,6 +64,7 @@ pub(crate) enum ScanResult {
     Added,
     Updated,
     Skipped,
+    SkippedUnplayable,
 }
 
 /// Scanner-related errors

@@ -38,10 +38,12 @@ pub struct NowPlaying {
 }
 
 /// Library scan summary
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct ScanSummary {
     pub tracks_added: u32,
     pub tracks_updated: u32,
     pub tracks_removed: u32,
+    #[serde(default)]
+    pub skipped_unplayable: u32,
     pub errors: Vec<String>,
 }

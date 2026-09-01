@@ -16,6 +16,8 @@ use crate::infrastructure::filesystem::metadata::MetadataExtractor;
 use crate::infrastructure::filesystem::scanner::{
     detect_format, is_audio_file, ScanProgress, ScannerError,
 };
+use lofty::file::AudioFile;
+use lofty::probe::Probe;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -96,30 +98,27 @@ impl AndroidScanner {
                 ))
             })?;
 
-        // Extract metadata using lofty (blocking file I/O + decode) — offload.
-        let path_for_extract = file_path.clone();
-        let extract_res =
-            tokio::task::spawn_blocking(move || MetadataExtractor::extract(&path_for_extract))
-                .await
-                .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
-        let mut track = match extract_res {
+        // Verify audio health and playability (metadata extraction + >0s duration + rodio/symphonia decoder probe)
+        let path_for_verify = file_path.clone();
+        let verify_res = tokio::task::spawn_blocking(move || {
+            crate::infrastructure::filesystem::metadata::verify_audio_health(&path_for_verify)
+        })
+        .await
+        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
+
+        let mut track = match verify_res {
             Ok(t) => {
-                debug!(file = %file_path.display(), title = %t.title, "Metadata extracted successfully from audio buffer");
+                debug!(file = %file_path.display(), title = %t.title, "Audio buffer verified and metadata extracted successfully");
                 t
             }
             Err(e) => {
-                warn!(
-                    file = %file_path.display(),
-                    error = %e,
-                    "Metadata extraction failed for buffer payload; using fallback"
-                );
-                let format = detect_format(&file_path).unwrap_or(AudioFormat::Mp3);
-                Track::new(
-                    clean_name.to_string(),
-                    file_path.to_string_lossy().to_string(),
-                    0,
-                    format,
-                )
+                error!(file = %file_path.display(), error = %e, "Corrupted or unplayable audio file rejected; removing from sandbox");
+                let file_to_delete = file_path.clone();
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(&file_to_delete))
+                    .await;
+                return Err(ScannerError::MetadataError(format!(
+                    "Cannot import '{clean_name}': File is corrupted or unplayable: {e}"
+                )));
             }
         };
 
@@ -214,9 +213,13 @@ impl AndroidScanner {
         let (mtime, size) = inner?;
 
         if let Some(existing_track) = existing.as_ref() {
-            if existing_track.mtime == mtime && existing_track.file_size == size {
+            let needs_rescan = existing_track.duration_secs == 0;
+            if !needs_rescan && existing_track.mtime == mtime && existing_track.file_size == size {
                 debug!(path = %path_str, "File unchanged, skipping");
                 return Ok(crate::infrastructure::filesystem::scanner::ScanResult::Skipped);
+            }
+            if needs_rescan {
+                debug!(path = %path_str, "Existing track has 0s duration — forcing re-scan");
             }
         }
 
@@ -229,15 +232,50 @@ impl AndroidScanner {
         .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
 
         let mut track = match extract_res {
-            Ok(t) => t,
+            Ok(t) if t.duration_secs > 0 => t,
+            Ok(t) => {
+                // Secondary probe: try guessing file type via Probe::open().guess_file_type().read()
+                let path_for_probe = path.to_path_buf();
+                let secondary_duration = tokio::task::spawn_blocking(move || {
+                    let mut probe = match Probe::open(&path_for_probe) {
+                        Ok(p) => p,
+                        Err(_) => return None,
+                    };
+                    if probe.file_type().is_none() {
+                        match probe.guess_file_type() {
+                            Ok(p) => probe = p,
+                            Err(_) => return None,
+                        }
+                    }
+                    let tagged = match probe.read() {
+                        Ok(tagged) => tagged,
+                        Err(_) => return None,
+                    };
+                    Some(tagged.properties().duration().as_secs() as u32)
+                })
+                .await
+                .unwrap_or(None);
+                if secondary_duration.is_none_or(|d| d == 0) {
+                    warn!(file = %path_str, "Skipping sandboxed audio file with 0s duration — secondary probe also 0, unplayable");
+                    return Ok(
+                        crate::infrastructure::filesystem::scanner::ScanResult::SkippedUnplayable,
+                    );
+                }
+                let mut corrected = t;
+                corrected.duration_secs = secondary_duration.unwrap_or(0);
+                if corrected.duration_secs == 0 {
+                    warn!(file = %path_str, "Skipping sandboxed audio file with 0s duration after secondary probe");
+                    return Ok(
+                        crate::infrastructure::filesystem::scanner::ScanResult::SkippedUnplayable,
+                    );
+                }
+                corrected
+            }
             Err(e) => {
-                warn!(file = %path_str, error = %e, "Metadata extraction failed; using fallback");
-                let format = detect_format(path).unwrap_or(AudioFormat::Mp3);
-                let file_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Unknown".to_string());
-                Track::new(file_name, path_str.clone(), 0, format)
+                warn!(file = %path_str, error = %e, "Metadata extraction failed; skipping unplayable file");
+                return Err(ScannerError::MetadataError(format!(
+                    "Failed to extract metadata from {path_str}: {e}"
+                )));
             }
         };
 
@@ -298,6 +336,7 @@ impl AndroidScanner {
             tracks_added: 0,
             tracks_updated: 0,
             tracks_removed: 0,
+            skipped_unplayable: 0,
             errors: Vec::new(),
         };
 
@@ -401,6 +440,10 @@ impl AndroidScanner {
                     summary.tracks_updated += 1
                 }
                 Ok(crate::infrastructure::filesystem::scanner::ScanResult::Skipped) => {}
+                Ok(crate::infrastructure::filesystem::scanner::ScanResult::SkippedUnplayable) => {
+                    warn!(path = %file_path.display(), "Skipped unplayable file with 0s duration");
+                    summary.skipped_unplayable += 1;
+                }
                 Err(e) => {
                     error!(path = %file_path.display(), error = %e, "Failed to process audio file");
                     summary
@@ -452,6 +495,7 @@ impl AndroidScanner {
             added = summary.tracks_added,
             updated = summary.tracks_updated,
             removed = summary.tracks_removed,
+            skipped_unplayable = summary.skipped_unplayable,
             errors = summary.errors.len(),
             "Android sandboxed scan completed"
         );
@@ -535,12 +579,47 @@ impl AndroidScanner {
                 })
                 .unwrap_or(AudioFormat::Mp3);
 
-            let track = if let Some(mut t) = extract_res {
+            let fallback_needs_secondary =
+                extract_res.as_ref().is_some_and(|t| t.duration_secs == 0);
+            let track = if let Some(mut t) = extract_res.filter(|t| t.duration_secs > 0) {
                 if t.album_art_path.is_none() && raw.art_uri.is_some() {
                     t.album_art_path = raw.art_uri;
                 }
                 t
             } else {
+                if fallback_needs_secondary {
+                    let path_for_probe = path_buf.clone();
+                    let secondary_ok = tokio::task::spawn_blocking(move || {
+                        let mut probe = match Probe::open(&path_for_probe) {
+                            Ok(p) => p,
+                            Err(_) => return false,
+                        };
+                        if probe.file_type().is_none() {
+                            match probe.guess_file_type() {
+                                Ok(p) => probe = p,
+                                Err(_) => return false,
+                            }
+                        }
+                        let tagged = match probe.read() {
+                            Ok(tagged) => tagged,
+                            Err(_) => return false,
+                        };
+                        tagged.properties().duration().as_secs() > 0
+                    })
+                    .await
+                    .unwrap_or(false);
+                    if !secondary_ok {
+                        warn!(path = %path_str, "Skipping MediaStore audio track with 0s duration — secondary probe also 0, unplayable");
+                        summary.skipped_unplayable += 1;
+                        continue;
+                    }
+                }
+                let duration_secs = (raw.duration_ms / 1000) as u32;
+                if duration_secs == 0 {
+                    warn!(path = %path_str, "Skipping MediaStore audio track with 0s duration or missing stream");
+                    summary.skipped_unplayable += 1;
+                    continue;
+                }
                 let title = if !raw.title.trim().is_empty() {
                     raw.title.clone()
                 } else {
@@ -549,12 +628,7 @@ impl AndroidScanner {
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "Unknown".to_string())
                 };
-                let mut t = Track::new(
-                    title,
-                    path_str.clone(),
-                    (raw.duration_ms / 1000) as u32,
-                    format,
-                );
+                let mut t = Track::new(title, path_str.clone(), duration_secs, format);
                 t.artist = raw
                     .artist
                     .filter(|s| !s.trim().is_empty() && s != "<unknown>");
@@ -614,6 +688,7 @@ impl AndroidScanner {
             added = summary.tracks_added,
             updated = summary.tracks_updated,
             removed = summary.tracks_removed,
+            skipped_unplayable = summary.skipped_unplayable,
             "Android system-wide and sandboxed scan completed"
         );
 
@@ -735,4 +810,327 @@ pub fn query_system_mediastore_audio() -> Vec<MediaStoreRawTrack> {
 #[cfg(not(target_os = "android"))]
 pub fn query_system_mediastore_audio() -> Vec<MediaStoreRawTrack> {
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::TrackFilter;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    struct TestTrackRepo {
+        tracks: Mutex<Vec<Track>>,
+    }
+
+    impl TestTrackRepo {
+        fn new() -> Self {
+            Self {
+                tracks: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TrackRepository for TestTrackRepo {
+        async fn find_all(
+            &self,
+            _filter: TrackFilter,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.tracks.lock().unwrap().clone())
+        }
+
+        async fn count_filtered(
+            &self,
+            _filter: TrackFilter,
+        ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.tracks.lock().unwrap().len() as u64)
+        }
+
+        async fn find_by_id(
+            &self,
+            id: uuid::Uuid,
+        ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.id == id)
+                .cloned())
+        }
+
+        async fn find_by_ids(
+            &self,
+            ids: &[uuid::Uuid],
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            let list = self.tracks.lock().unwrap();
+            let track_map: std::collections::HashMap<uuid::Uuid, Track> =
+                list.iter().map(|t| (t.id, t.clone())).collect();
+            let mut result = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let Some(track) = track_map.get(id) {
+                    result.push(track.clone());
+                }
+            }
+            Ok(result)
+        }
+
+        async fn find_by_path(
+            &self,
+            path: &str,
+        ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.file_path == path)
+                .cloned())
+        }
+
+        async fn find_by_paths(
+            &self,
+            paths: &[&str],
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            let list = self.tracks.lock().unwrap();
+            let track_map: std::collections::HashMap<String, Track> = list
+                .iter()
+                .map(|t| (t.file_path.clone(), t.clone()))
+                .collect();
+            let mut result = Vec::with_capacity(paths.len());
+            for path in paths {
+                if let Some(track) = track_map.get(*path) {
+                    result.push(track.clone());
+                }
+            }
+            Ok(result)
+        }
+
+        async fn find_by_artist(
+            &self,
+            artist: &str,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| t.artist.as_deref() == Some(artist))
+                .cloned()
+                .collect())
+        }
+
+        async fn find_by_album(
+            &self,
+            album: &str,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| t.album.as_deref() == Some(album))
+                .cloned()
+                .collect())
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.tracks.lock().unwrap().clone())
+        }
+
+        async fn insert(
+            &self,
+            track: &Track,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.tracks.lock().unwrap().push(track.clone());
+            Ok(())
+        }
+
+        async fn update(
+            &self,
+            track: &Track,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let mut list = self.tracks.lock().unwrap();
+            if let Some(pos) = list.iter().position(|t| t.id == track.id) {
+                list[pos] = track.clone();
+            }
+            Ok(())
+        }
+
+        async fn delete(
+            &self,
+            id: uuid::Uuid,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.tracks.lock().unwrap().retain(|t| t.id != id);
+            Ok(())
+        }
+
+        async fn delete_many(
+            &self,
+            ids: Vec<uuid::Uuid>,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let id_set: HashSet<uuid::Uuid> = ids.into_iter().collect();
+            self.tracks
+                .lock()
+                .unwrap()
+                .retain(|t| !id_set.contains(&t.id));
+            Ok(())
+        }
+
+        async fn count(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.tracks.lock().unwrap().len() as u64)
+        }
+
+        async fn total_duration(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+            let total = self
+                .tracks
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|t| t.duration_secs as u64)
+                .sum();
+            Ok(total)
+        }
+
+        async fn recent(
+            &self,
+            limit: u32,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            let list = self.tracks.lock().unwrap();
+            Ok(list.iter().take(limit as usize).cloned().collect())
+        }
+
+        async fn most_played(
+            &self,
+            limit: u32,
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            let list = self.tracks.lock().unwrap();
+            Ok(list.iter().take(limit as usize).cloned().collect())
+        }
+
+        async fn set_favorite(
+            &self,
+            _id: &str,
+            _is_favorite: bool,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn get_albums_summary(
+            &self,
+        ) -> Result<
+            Vec<crate::domain::models::AlbumSummary>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Vec::new())
+        }
+
+        async fn get_artists_summary(
+            &self,
+        ) -> Result<
+            Vec<crate::domain::models::ArtistSummary>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    fn generate_valid_wav() -> Vec<u8> {
+        let sample_rate: u32 = 8000;
+        let num_samples: u32 = 8000;
+        let mut data = Vec::with_capacity(44 + num_samples as usize);
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36 + num_samples).to_le_bytes());
+        data.extend_from_slice(b"WAVEfmt ");
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        data.extend_from_slice(&1u16.to_le_bytes()); // Mono
+        data.extend_from_slice(&sample_rate.to_le_bytes());
+        data.extend_from_slice(&sample_rate.to_le_bytes()); // Byte rate
+        data.extend_from_slice(&1u16.to_le_bytes()); // Block align
+        data.extend_from_slice(&8u16.to_le_bytes()); // Bits per sample
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&num_samples.to_le_bytes());
+        data.resize(44 + num_samples as usize, 0x80);
+        data
+    }
+
+    #[tokio::test]
+    async fn test_ingest_buffer_corrupt_rejection_and_cleanup() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("auralis_android_test_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let scanner = AndroidScanner::new();
+        let repo: Arc<dyn TrackRepository> = Arc::new(TestTrackRepo::new());
+
+        let corrupt_name = "damaged_track.mp3";
+        let corrupt_bytes = b"CORRUPTED_BINARY_HEADER_NOT_AUDIO";
+
+        let res = scanner
+            .ingest_buffer(corrupt_name, corrupt_bytes, &temp_dir, &repo)
+            .await;
+        assert!(res.is_err(), "Corrupt audio buffer must be rejected");
+
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Cannot import 'damaged_track.mp3'"),
+            "Error message should mention clean filename: {err_msg}"
+        );
+
+        // Assert that the file was deleted from disk and not left in sandbox
+        let expected_file_path = temp_dir.join(corrupt_name);
+        assert!(
+            !expected_file_path.exists(),
+            "Corrupted sandbox file must be automatically deleted"
+        );
+
+        // Assert that repository has 0 tracks
+        let count = repo.count().await.unwrap();
+        assert_eq!(
+            count, 0,
+            "No dummy track should be inserted into repo on failure"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_ingest_buffer_valid_wav_success() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("auralis_android_valid_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let scanner = AndroidScanner::new();
+        let repo: Arc<dyn TrackRepository> = Arc::new(TestTrackRepo::new());
+
+        let valid_name = "test_song.wav";
+        let valid_bytes = generate_valid_wav();
+
+        let track = scanner
+            .ingest_buffer(valid_name, &valid_bytes, &temp_dir, &repo)
+            .await
+            .expect("Valid audio buffer must be ingested successfully");
+
+        assert!(
+            track.duration_secs > 0,
+            "Ingested track duration must be > 0"
+        );
+        assert_eq!(track.title, "test_song.wav");
+
+        let expected_file_path = temp_dir.join(valid_name);
+        assert!(
+            expected_file_path.exists(),
+            "Valid file must be retained on disk"
+        );
+
+        let count = repo.count().await.unwrap();
+        assert_eq!(count, 1, "Track must be inserted in repo");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

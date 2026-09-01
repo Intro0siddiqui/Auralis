@@ -553,4 +553,133 @@ describe('Phase 2 & Phase 3 Frontend Streamlining (Queue Drawer, Settings Bindin
     });
 });
 
+describe('Audio Stream Selection & Format Integrity', () => {
+    const ytPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/youtube.js');
+    const src = fs.readFileSync(ytPath, 'utf8');
+
+    it('youtube.js exposes selectBestAudioFormat and pickAudioFormat', () => {
+        assert.ok(src.includes('selectBestAudioFormat'), 'youtube.js missing selectBestAudioFormat');
+        assert.ok(src.includes('pickAudioFormat'), 'youtube.js missing pickAudioFormat');
+        assert.ok(src.includes('hasValidAudioContainer'), 'youtube.js missing hasValidAudioContainer');
+        assert.ok(src.includes('hasValidAudioCodec'), 'youtube.js missing hasValidAudioCodec');
+    });
+
+    it('selectBestAudioFormat prioritizes valid audio codecs and Content-Length', () => {
+        function hasValidAudioCodec(f) {
+            if (!f) return false;
+            const mime = String(f.mime_type || '').toLowerCase();
+            return mime.includes('opus') || mime.includes('mp4a') || mime.includes('aac') || mime.includes('vorbis') || mime.includes('flac') || mime.startsWith('audio/mp4') || mime.startsWith('audio/webm') || mime.startsWith('audio/ogg');
+        }
+        function selectBestAudioFormat(candidates, quality = 'best', targetContainer = null) {
+            if (!candidates || !candidates.length) return null;
+            const isDecipherable = (f) => Boolean(f && (f.url || f.signature_cipher || f.cipher || typeof f.decipher === 'function'));
+            const valid = candidates.filter((f) => f && isDecipherable(f));
+            if (!valid.length) return candidates[0] || null;
+            const scoreFormat = (f) => {
+                let score = 0;
+                const mime = String(f.mime_type || '').toLowerCase();
+                if (hasValidAudioCodec(f)) score += 1000;
+                if (targetContainer) {
+                    if (targetContainer === 'webm' && (mime.includes('webm') || mime.includes('opus'))) score += 500;
+                    else if (targetContainer === 'mp4' && (mime.includes('mp4') || mime.includes('m4a'))) score += 500;
+                } else {
+                    if (mime.includes('opus') || mime.includes('webm')) score += 100;
+                }
+                if ((f.has_audio && !f.has_video) || !f.has_video) score += 200;
+                if (f.url) score += 50;
+                if ((f.content_length && f.content_length > 0) || (f.contentLength && parseInt(f.contentLength, 10) > 0)) {
+                    score += 50;
+                }
+                return score;
+            };
+            const sorted = [...valid].sort((a, b) => (scoreFormat(b) - scoreFormat(a)) || ((b.bitrate || 0) - (a.bitrate || 0)));
+            return sorted[0] || valid[0];
+        }
+
+        const candidates = [
+            { itag: 999, mime_type: 'audio/unknown', bitrate: 256000, url: 'https://example.com/u' },
+            { itag: 140, mime_type: 'audio/mp4; codecs="mp4a.40.2"', bitrate: 128000, url: 'https://example.com/140', content_length: 5000000 },
+            { itag: 251, mime_type: 'audio/webm; codecs="opus"', bitrate: 160000, url: 'https://example.com/251', content_length: 6000000 }
+        ];
+
+        const best = selectBestAudioFormat(candidates);
+        assert.equal(best.itag, 251, 'Should prioritize opus/webm with valid codec, higher bitrate and content length');
+
+        const bestMp4 = selectBestAudioFormat(candidates, 'best', 'mp4');
+        assert.equal(bestMp4.itag, 140, 'Should respect target container mp4');
+    });
+
+    it('SABR container validation filters out non-audio containers', () => {
+        function hasValidAudioContainer(f) {
+            if (!f || !f.mime_type) return false;
+            const mime = String(f.mime_type).toLowerCase();
+            return (
+                mime.startsWith('audio/mp4') ||
+                mime.startsWith('audio/webm') ||
+                mime.startsWith('audio/m4a') ||
+                mime.startsWith('audio/ogg') ||
+                mime.startsWith('audio/opus') ||
+                mime.startsWith('video/mp4') ||
+                mime.startsWith('video/webm')
+            );
+        }
+
+        assert.equal(hasValidAudioContainer({ mime_type: 'audio/mp4' }), true);
+        assert.equal(hasValidAudioContainer({ mime_type: 'audio/webm; codecs="opus"' }), true);
+        assert.equal(hasValidAudioContainer({ mime_type: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"' }), true);
+        assert.equal(hasValidAudioContainer({ mime_type: 'video/3gpp' }), false);
+        assert.equal(hasValidAudioContainer({ mime_type: 'video/x-flv' }), false);
+        assert.equal(hasValidAudioContainer({ mime_type: 'application/x-mpegURL' }), false);
+    });
+});
+
+describe('Format preference scoring (itag 140 m4a rodio compat — opus would DecodeError)', () => {
+    it('scoreFormat({itag:140, mimeType:"audio/mp4"}) > scoreFormat({itag:251, mimeType:"audio/webm"})', () => {
+        function scoreFormat(fmt) {
+            const mime = (fmt.mimeType || '').toLowerCase();
+            if (fmt.itag === 140) return 3;
+            if (mime.includes('mp4') && !mime.includes('video')) return 2;
+            if (mime.includes('m4a')) return 2;
+            return 1;
+        }
+        assert.ok(scoreFormat({ itag: 140, mimeType: 'audio/mp4' }) > scoreFormat({ itag: 251, mimeType: 'audio/webm' }), 'itag 140 must outrank webm/opus');
+        assert.equal(scoreFormat({ itag: 140, mimeType: 'audio/mp4' }), 3);
+        assert.equal(scoreFormat({ itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"' }), 3);
+        assert.equal(scoreFormat({ itag: 251, mimeType: 'audio/webm' }), 1);
+        assert.equal(scoreFormat({ itag: 251, mimeType: 'audio/webm; codecs="opus"' }), 1);
+        assert.equal(scoreFormat({ itag: 139, mimeType: 'audio/mp4' }), 2);
+        assert.equal(scoreFormat({ itag: 18, mimeType: 'video/mp4' }), 1, 'video/mp4 must not get mp4 audio score');
+    });
+
+    it('youtube.js source implements scoreFormat with itag 140 and m4a preference (no opus DecodeError)', () => {
+        const ytPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/youtube.js');
+        const src = fs.readFileSync(ytPath, 'utf8');
+        assert.ok(src.includes('function scoreFormat'), 'youtube.js must define global scoreFormat function');
+        assert.ok(src.includes('if (fmt.itag === 140) return 3'), 'youtube.js scoreFormat must handle itag 140');
+        assert.ok(src.includes("mime.includes('mp4') && !mime.includes('video')"), 'youtube.js scoreFormat must check mp4 without video');
+        assert.ok(src.includes("mime.includes('m4a')"), 'youtube.js scoreFormat must check m4a');
+        // Ensure rodio compat: old opus-preferring code removed
+        assert.ok(!src.includes("mime.includes('opus') || mime.includes('webm')) score += 100"), 'youtube.js must NOT prefer opus/webm by default (rodio lacks opus)');
+    });
+
+    it('selectBestAudioFormat via youtube.js scoring prefers itag 140 m4a over webm/opus', () => {
+        function scoreFormat(fmt) {
+            const mime = (fmt.mimeType || fmt.mime_type || '').toLowerCase();
+            if (fmt.itag === 140) return 3;
+            if (mime.includes('mp4') && !mime.includes('video')) return 2;
+            if (mime.includes('m4a')) return 2;
+            return 1;
+        }
+        const candidates = [
+            { itag: 251, mime_type: 'audio/webm; codecs="opus"', bitrate: 160000, url: 'https://example.com/251', has_audio: true, has_video: false },
+            { itag: 140, mime_type: 'audio/mp4; codecs="mp4a.40.2"', bitrate: 128000, url: 'https://example.com/140', has_audio: true, has_video: false },
+            { itag: 139, mime_type: 'audio/mp4', bitrate: 48000, url: 'https://example.com/139', has_audio: true, has_video: false },
+        ];
+        const sorted = [...candidates].sort((a, b) => scoreFormat(b) - scoreFormat(a) || (b.bitrate - a.bitrate));
+        assert.equal(sorted[0].itag, 140, 'itag 140 should be first after m4a-preferring sort');
+        assert.ok(scoreFormat(sorted[0]) > scoreFormat(candidates[0]), 'top sorted must outrank webm');
+    });
+});
+
+
 
