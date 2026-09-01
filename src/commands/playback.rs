@@ -551,13 +551,15 @@ pub async fn set_queue(
         ?current_id,
         "Set queue command received"
     );
-    let mut tracks = Vec::with_capacity(track_ids.len());
-    for tid in &track_ids {
-        match lookup_track(*tid, &db).await {
-            Ok(t) => tracks.push(t),
-            Err(e) => warn!(%tid, error=%e, "set_queue: skip missing track"),
-        }
-    }
+    use crate::domain::repositories::TrackRepository;
+    let repo = crate::infrastructure::database::repositories::SqliteTrackRepository::new(Arc::new(
+        db.inner().clone(),
+    ));
+    let tracks = repo
+        .find_by_ids(&track_ids)
+        .await
+        .map_err(|e| format!("set_queue: failed to query tracks: {e}"))?;
+
     if tracks.is_empty() {
         return Err("set_queue: no valid tracks".into());
     }
@@ -578,10 +580,7 @@ pub async fn set_queue(
 // Helper functions
 // ============================================================================
 
-async fn lookup_track(
-    track_id: Uuid,
-    db: &State<'_, Database>,
-) -> Result<Track, Box<dyn std::error::Error>> {
+async fn lookup_track(track_id: Uuid, db: &Database) -> Result<Track, Box<dyn std::error::Error>> {
     let conn = db
         .connection()
         .map_err(|e| format!("Database connection error: {e}"))?;
@@ -676,4 +675,107 @@ pub(crate) async fn emit_track_changed(app: &AppHandle, player: &AudioPlayer) {
 /// Notify the frontend that the playback queue changed.
 async fn emit_queue_updated(app: &AppHandle, queue: &PlaybackQueue) {
     let _ = app.emit("playback:queue_updated", queue);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::AudioFormat;
+    use crate::domain::repositories::TrackRepository;
+    use crate::infrastructure::database::repositories::SqliteTrackRepository;
+
+    #[tokio::test]
+    async fn test_set_queue_performance_baseline() {
+        let db_path = std::env::temp_dir().join(format!(
+            "test_playback_set_queue_baseline_{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let tr_repo: Arc<dyn TrackRepository> =
+            Arc::new(SqliteTrackRepository::new(db_arc.clone()));
+
+        let mut track_ids = Vec::with_capacity(500);
+        for i in 0..500 {
+            let track = Track::new(
+                format!("Song {}", i),
+                format!("/music/song_{}.mp3", i),
+                180,
+                AudioFormat::Mp3,
+            );
+            tr_repo.insert(&track).await.unwrap();
+            track_ids.push(track.id);
+        }
+
+        // Measure sequential lookup (N+1 queries - baseline)
+        let start_seq = std::time::Instant::now();
+        let mut seq_tracks = Vec::with_capacity(track_ids.len());
+        for tid in &track_ids {
+            match lookup_track(*tid, &db_arc).await {
+                Ok(t) => seq_tracks.push(t),
+                Err(e) => warn!(%tid, error=%e, "set_queue: skip missing track"),
+            }
+        }
+        let elapsed_seq = start_seq.elapsed();
+
+        // Measure batch lookup (IN clause - optimized)
+        let start_batch = std::time::Instant::now();
+        let batch_tracks = tr_repo.find_by_ids(&track_ids).await.unwrap();
+        let elapsed_batch = start_batch.elapsed();
+
+        assert_eq!(seq_tracks.len(), 500);
+        assert_eq!(batch_tracks.len(), 500);
+        for (i, t) in batch_tracks.iter().enumerate() {
+            assert_eq!(t.id, track_ids[i]);
+        }
+
+        eprintln!("[BENCHMARK set_queue (500 tracks)]");
+        eprintln!("  Baseline (N+1 queries)    : {:?}", elapsed_seq);
+        eprintln!("  Optimized (batch IN query): {:?}", elapsed_batch);
+        let speedup = elapsed_seq.as_secs_f64() / elapsed_batch.as_secs_f64();
+        eprintln!("  Speedup: {:.2}x", speedup);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_set_queue_correctness_and_duplicates() {
+        let db_path = std::env::temp_dir().join(format!(
+            "test_playback_set_queue_correctness_{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let tr_repo: Arc<dyn TrackRepository> =
+            Arc::new(SqliteTrackRepository::new(db_arc.clone()));
+
+        let t1 = Track::new(
+            "Song A".to_string(),
+            "/music/a.mp3".to_string(),
+            120,
+            AudioFormat::Mp3,
+        );
+        let t2 = Track::new(
+            "Song B".to_string(),
+            "/music/b.mp3".to_string(),
+            180,
+            AudioFormat::Mp3,
+        );
+        tr_repo.insert(&t1).await.unwrap();
+        tr_repo.insert(&t2).await.unwrap();
+
+        let missing_id = Uuid::new_v4();
+        let input_ids = vec![t2.id, t1.id, t2.id, missing_id, t1.id];
+
+        let loaded = tr_repo.find_by_ids(&input_ids).await.unwrap();
+        assert_eq!(loaded.len(), 4);
+        assert_eq!(loaded[0].id, t2.id);
+        assert_eq!(loaded[1].id, t1.id);
+        assert_eq!(loaded[2].id, t2.id);
+        assert_eq!(loaded[3].id, t1.id);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 }
