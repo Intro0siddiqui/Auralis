@@ -21,6 +21,12 @@ pub trait TrackRepository: Send + Sync {
         id: Uuid,
     ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>>;
 
+    /// Find multiple tracks by ID list, preserving input order
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
+
     /// Find tracks by file path
     async fn find_by_path(
         &self,

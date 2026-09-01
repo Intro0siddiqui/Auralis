@@ -113,17 +113,16 @@ async fn build_smart_playlists(tracks_repo: &Arc<dyn TrackRepository>) -> Vec<Pl
 
 /// Load tracks for the given playlist, preserving playlist order.
 async fn tracks_for_playlist(repo: &Arc<dyn TrackRepository>, track_ids: &[Uuid]) -> Vec<Track> {
-    let mut tracks = Vec::with_capacity(track_ids.len());
-    for id in track_ids {
-        match repo.find_by_id(*id).await {
-            Ok(Some(track)) => tracks.push(track),
-            Ok(None) => tracing::warn!(id = %id, "Track in playlist no longer exists"),
-            Err(e) => {
-                tracing::error!(id = %id, error = %e, "Failed to fetch track for playlist")
-            }
+    if track_ids.is_empty() {
+        return Vec::new();
+    }
+    match repo.find_by_ids(track_ids).await {
+        Ok(tracks) => tracks,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to fetch tracks for playlist");
+            Vec::new()
         }
     }
-    tracks
 }
 
 /// Get all playlists (including built-in Smart Playlists).
@@ -531,6 +530,96 @@ mod tests {
         assert_eq!(most_played.track_ids.len(), 2);
         assert_eq!(most_played.track_ids[0], track2.id);
         assert_eq!(most_played.track_ids[1], track1.id);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_tracks_for_playlist_performance() {
+        let db_path =
+            std::env::temp_dir().join(format!("test_playlist_perf_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let tr_repo: Arc<dyn TrackRepository> =
+            Arc::new(SqliteTrackRepository::new(db_arc.clone()));
+
+        let mut track_ids = Vec::with_capacity(500);
+        for i in 0..500 {
+            let track = Track::new(
+                format!("Perf Song {}", i),
+                format!("/music/perf_{}.mp3", i),
+                120,
+                AudioFormat::Mp3,
+            );
+            tr_repo.insert(&track).await.unwrap();
+            track_ids.push(track.id);
+        }
+
+        // Measure sequential N+1 query (baseline)
+        let start_seq = std::time::Instant::now();
+        let mut seq_tracks = Vec::with_capacity(track_ids.len());
+        for id in &track_ids {
+            if let Ok(Some(track)) = tr_repo.find_by_id(*id).await {
+                seq_tracks.push(track);
+            }
+        }
+        let elapsed_seq = start_seq.elapsed();
+
+        // Measure batch query via tracks_for_playlist (optimized)
+        let start_batch = std::time::Instant::now();
+        let loaded_tracks = tracks_for_playlist(&tr_repo, &track_ids).await;
+        let elapsed_batch = start_batch.elapsed();
+
+        assert_eq!(seq_tracks.len(), 500);
+        assert_eq!(loaded_tracks.len(), 500);
+        for (i, t) in loaded_tracks.iter().enumerate() {
+            assert_eq!(t.id, track_ids[i]);
+        }
+
+        eprintln!("[BENCHMARK 500 tracks]");
+        eprintln!("  Baseline (N+1 queries) : {:?}", elapsed_seq);
+        eprintln!("  Optimized (batch IN query): {:?}", elapsed_batch);
+        let speedup = elapsed_seq.as_secs_f64() / elapsed_batch.as_secs_f64();
+        eprintln!("  Speedup: {:.2}x", speedup);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_find_by_ids_duplicates_and_missing() {
+        let db_path =
+            std::env::temp_dir().join(format!("test_playlist_dups_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let tr_repo: Arc<dyn TrackRepository> =
+            Arc::new(SqliteTrackRepository::new(db_arc.clone()));
+
+        let track1 = Track::new(
+            "Song A".to_string(),
+            "/music/a.mp3".to_string(),
+            120,
+            AudioFormat::Mp3,
+        );
+        let track2 = Track::new(
+            "Song B".to_string(),
+            "/music/b.mp3".to_string(),
+            180,
+            AudioFormat::Mp3,
+        );
+        tr_repo.insert(&track1).await.unwrap();
+        tr_repo.insert(&track2).await.unwrap();
+
+        let missing_id = Uuid::new_v4();
+        let req_ids = vec![track2.id, track1.id, track2.id, missing_id, track1.id];
+        let loaded = tr_repo.find_by_ids(&req_ids).await.unwrap();
+
+        assert_eq!(loaded.len(), 4);
+        assert_eq!(loaded[0].id, track2.id);
+        assert_eq!(loaded[1].id, track1.id);
+        assert_eq!(loaded[2].id, track2.id);
+        assert_eq!(loaded[3].id, track1.id);
 
         let _ = std::fs::remove_file(&db_path);
     }
