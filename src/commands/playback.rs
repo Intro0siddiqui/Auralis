@@ -2,6 +2,7 @@
 //!
 //! Tauri command handlers for the audio playback domain.
 
+use crate::commands::library::{format_time, html_escape, render_art_tag};
 use crate::domain::models::{NowPlaying, RepeatMode, Track};
 use crate::infrastructure::database::repositories::{parse_datetime, parse_format};
 use crate::infrastructure::database::Database;
@@ -576,6 +577,120 @@ pub async fn set_queue(
     Ok(queue)
 }
 
+/// Pre-rendered queue HTML for the queue panel drawer.
+#[tauri::command]
+pub async fn get_queue_html(
+    player: State<'_, AudioPlayer>,
+    db: State<'_, Database>,
+) -> Result<String, String> {
+    let current_track = player.get_current_track().await;
+    let queue_tracks = player.get_queue().await;
+
+    use crate::domain::repositories::TrackRepository;
+    let repo = crate::infrastructure::database::repositories::SqliteTrackRepository::new(Arc::new(
+        db.inner().clone(),
+    ));
+
+    let mut ids_to_fetch = Vec::new();
+    if let Some(ref cur) = current_track {
+        ids_to_fetch.push(cur.id);
+    }
+    for t in &queue_tracks {
+        ids_to_fetch.push(t.id);
+    }
+
+    let fetched = if !ids_to_fetch.is_empty() {
+        repo.find_by_ids(&ids_to_fetch).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let track_map: std::collections::HashMap<Uuid, Track> =
+        fetched.into_iter().map(|t| (t.id, t)).collect();
+
+    let resolved_current = current_track.map(|cur| track_map.get(&cur.id).cloned().unwrap_or(cur));
+
+    let resolved_queue: Vec<Track> = queue_tracks
+        .into_iter()
+        .map(|t| track_map.get(&t.id).cloned().unwrap_or(t))
+        .collect();
+
+    Ok(render_queue_html(
+        resolved_current.as_ref(),
+        &resolved_queue,
+    ))
+}
+
+/// Render pre-rendered queue HTML from current track and queue tracks slice.
+pub(crate) fn render_queue_html(current_track: Option<&Track>, queue_tracks: &[Track]) -> String {
+    let queue_count = queue_tracks.len();
+
+    let mut html = String::with_capacity(2048);
+    html.push_str(
+        r#"<div style="padding: var(--space-4); height: 100%; display: flex; flex-direction: column;">"#,
+    );
+
+    // Header
+    html.push_str(
+        r#"<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-4);"><div style="display: flex; align-items: center; gap: var(--space-2);"><h3 style="font-size: var(--text-lg); font-weight: var(--font-semibold); color: var(--text-1); margin: 0;">Playback Queue ("#,
+    );
+    html.push_str(&queue_count.to_string());
+    html.push_str(
+        r#")</h3></div><div style="display: flex; align-items: center; gap: var(--space-2);"><button type="button" class="btn btn-ghost btn-icon btn-sm" style="padding: var(--space-1);" onclick="event.stopPropagation(); window.Auralis &amp;&amp; window.Auralis.player &amp;&amp; (window.Auralis.player.toggleFullScreenQueue &amp;&amp; window.Auralis.player.toggleFullScreenQueue(false), window.Auralis.player.toggleQueue &amp;&amp; window.Auralis.player.toggleQueue(false))" title="Close"><i data-lucide="x"></i></button></div></div>"#,
+    );
+
+    html.push_str(r#"<div class="queue-content queue-body" style="flex: 1; overflow-y: auto;">"#);
+
+    // Now Playing card
+    if let Some(track) = current_track {
+        let safe_title = html_escape(&track.title);
+        let artist_str = track.artist.as_deref().unwrap_or("Unknown Artist");
+        let safe_artist = html_escape(artist_str);
+        let dur_str = format_time(track.duration_secs);
+        let art_html = render_art_tag(track.album_art_path.as_deref(), &track.title, "disc-3");
+
+        html.push_str(&format!(
+            r#"<div style="font-size: var(--text-xs); color: var(--text-3); text-transform: uppercase; margin-bottom: var(--space-2); font-weight: var(--font-semibold);">Now Playing</div><div class="track-row neu-glass" style="margin-bottom: var(--space-4); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); display: flex; align-items: center; gap: var(--space-3);"><div class="track-row-artwork" style="width: 40px; height: 40px; border-radius: var(--radius-sm); overflow: hidden; display: flex; align-items: center; justify-content: center; background: var(--glass-base); flex-shrink: 0;">{art_html}</div><div class="track-row-info" style="flex: 1; min-width: 0;"><div class="track-row-title" style="color: var(--accent); font-weight: var(--font-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{safe_title}</div><div class="track-row-subtitle" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{safe_artist}</div></div><span class="track-row-duration" style="font-size: var(--text-xs); color: var(--text-3); flex-shrink: 0;">{dur_str}</span></div>"#
+        ));
+    }
+
+    // Upcoming list header
+    html.push_str(&format!(
+        r#"<div style="font-size: var(--text-xs); color: var(--text-3); text-transform: uppercase; margin-bottom: var(--space-2); font-weight: var(--font-semibold);">Next Up ({queue_count})</div>"#
+    ));
+
+    if queue_tracks.is_empty() {
+        html.push_str(
+            r#"<div class="empty-state glass neu" style="padding: var(--space-4); text-align: center; border-radius: var(--radius-md);"><p style="color: var(--text-3); font-size: var(--text-xs); margin: 0;">No tracks in queue</p></div>"#,
+        );
+    } else {
+        for track in queue_tracks {
+            let safe_id = html_escape(&track.id.to_string());
+            let safe_title = html_escape(&track.title);
+            let artist_str = track.artist.as_deref().unwrap_or("Unknown Artist");
+            let safe_artist = html_escape(artist_str);
+            let dur_str = format_time(track.duration_secs);
+            let art_html = render_art_tag(track.album_art_path.as_deref(), &track.title, "music");
+
+            html.push_str(&format!(
+                r#"<div class="queue-track-row glass-weak neu-glass" data-track-id="{safe_id}" style="margin-bottom: var(--space-2); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); display: flex; justify-content: space-between; align-items: center; cursor: pointer; touch-action: manipulation;" onclick="window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.playTrack('{safe_id}')"><div class="track-row-artwork" style="width: 36px; height: 36px; border-radius: var(--radius-sm); overflow: hidden; display: flex; align-items: center; justify-content: center; background: var(--glass-base); flex-shrink: 0; margin-right: var(--space-3);">{art_html}</div><div class="track-row-info" style="flex: 1; min-width: 0; overflow: hidden;"><div class="track-row-title" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-sm);">{safe_title}</div><div class="track-row-subtitle" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-xs); color: var(--text-3);">{safe_artist}</div></div><span class="track-row-duration" style="font-size: var(--text-xs); color: var(--text-3); margin-left: var(--space-2); margin-right: var(--space-2); flex-shrink: 0;">{dur_str}</span><button type="button" class="btn btn-ghost btn-icon btn-sm" onclick="event.stopPropagation(); window.Auralis.bridge.removeFromQueue('{safe_id}')" ontouchend="event.stopPropagation(); window.Auralis.bridge.removeFromQueue('{safe_id}')" title="Remove from queue" style="flex-shrink: 0;"><i data-lucide="trash-2"></i></button></div>"#
+            ));
+        }
+    }
+
+    html.push_str("</div>");
+
+    if queue_count > 0 {
+        html.push_str(
+            r#"<div style="padding-top: var(--space-3); border-top: 1px solid var(--glass-border); display: flex; gap: var(--space-2);"><button type="button" class="btn btn-secondary btn-sm neu" style="width: 100%; justify-content: center;" onclick="window.Auralis.bridge.clearQueue()"><i data-lucide="trash-2"></i> Clear Queue</button></div>"#,
+        );
+    }
+
+    html.push_str("</div>");
+
+    html
+}
+
 // ============================================================================
 // Helper functions
 // ============================================================================
@@ -777,5 +892,49 @@ mod tests {
         assert_eq!(loaded[3].id, t1.id);
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_render_queue_html_empty() {
+        let html = render_queue_html(None, &[]);
+        assert!(html.contains("Playback Queue (0)"));
+        assert!(html.contains("No tracks in queue"));
+        assert!(!html.contains("Now Playing"));
+        assert!(!html.contains("Clear Queue"));
+    }
+
+    #[test]
+    fn test_render_queue_html_with_tracks_and_escape() {
+        let mut t_cur = Track::new(
+            "Rock <&> Roll \"Live\" '26".to_string(),
+            "/music/live.mp3".to_string(),
+            205, // 3:25
+            AudioFormat::Mp3,
+        );
+        t_cur.artist = Some("AC/<DC> & Friends".to_string());
+
+        let mut t_next = Track::new(
+            "Thunderstruck <script>alert(1)</script>".to_string(),
+            "/music/thunder.mp3".to_string(),
+            65, // 1:05
+            AudioFormat::Mp3,
+        );
+        t_next.artist = Some("Artist & Co".to_string());
+
+        let html = render_queue_html(Some(&t_cur), &[t_next.clone()]);
+        assert!(html.contains("Playback Queue (1)"));
+        assert!(html.contains("Next Up (1)"));
+        assert!(html.contains("Now Playing"));
+        assert!(html.contains("Rock &lt;&amp;&gt; Roll &quot;Live&quot; &#39;26"));
+        assert!(html.contains("AC/&lt;DC&gt; &amp; Friends"));
+        assert!(html.contains("3:25"));
+        assert!(html.contains("1:05"));
+        assert!(html.contains("Thunderstruck &lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("Artist &amp; Co"));
+        assert!(html.contains(&format!(
+            "window.Auralis.bridge.removeFromQueue('{}')",
+            t_next.id
+        )));
+        assert!(html.contains("window.Auralis.bridge.clearQueue()"));
     }
 }

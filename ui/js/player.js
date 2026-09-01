@@ -205,46 +205,27 @@ class PlayerController {
     }
 
     bindFullScreenPlayerListeners() {
-        let isHandlingMutation = false;
-        const observer = new MutationObserver(() => {
-            if (isHandlingMutation) return;
-            isHandlingMutation = true;
-            try {
-                const fp = document.getElementById('player-full');
-                if (fp && fp.dataset.wired !== 'true') {
-                    this.wireFullScreenElements();
-                    this.hydrateState().catch(() => {});
-                }
-            } finally {
-                isHandlingMutation = false;
-            }
-        });
-
-        const overlayRoot = document.getElementById('overlay-root');
-        if (overlayRoot) {
-            observer.observe(overlayRoot, { childList: true, subtree: false });
-        }
         document.body.addEventListener('htmx:afterSwap', (e) => {
-            // HTMX swap for player-full may fire before observer; handle both
             const target = e && e.detail && e.detail.target;
-            const isPlayerSwap = target && (target.id === 'overlay-root' || target.querySelector && target.querySelector('#player-full') || target.id === 'player-full');
-            // Also re-sync bar when any view swaps (covers Home/Library desync 01:39-01:44)
+            const isPlayerSwap = target && (target.id === 'overlay-root' || (target.querySelector && target.querySelector('#player-full')) || target.id === 'player-full');
+            // Also re-sync bar when any view swaps
             if (window.Auralis && window.Auralis.player) {
-                window.Auralis.player.hydrateState().catch(()=>{});
+                window.Auralis.player.hydrateState().catch(() => {});
             }
             if (isPlayerSwap || document.getElementById('player-full')) {
                 const fp = document.getElementById('player-full');
                 if (fp) fp.dataset.wired = '';
                 this.wireFullScreenElements();
-                this.hydrateState().catch(()=>{});
+                this.hydrateState().catch(() => {});
             }
         });
+
         // Also wire on explicit overlay click (player-bar hx-get target)
         const playerBar = document.querySelector('.player-track[hx-get]');
         if (playerBar) {
             playerBar.addEventListener('click', () => {
-                // Hydrate *before* HTMX fetches partial so metadata is ready when it swaps
-                this.hydrateState().catch(()=>{});
+                // Hydrate before HTMX fetches partial so metadata is ready when it swaps
+                this.hydrateState().catch(() => {});
             });
         }
         this.wireFullScreenElements();
@@ -998,81 +979,27 @@ class PlayerController {
         }
     }
 
-    renderQueueTrackRow(track, index) {
-        if (!track) return '';
-        const dur = this.formatTime(track.duration_secs || 0);
-        return `
-            <div class="track-row neu-glass" style="margin-bottom: var(--space-2); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.playTrack('${track.id}')">
-                <div class="track-row-info" style="flex: 1; overflow: hidden; min-width: 0;">
-                    <div class="track-row-title" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${this.escapeHtml(track.title)}</div>
-                    <div class="track-row-subtitle" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${this.escapeHtml(track.artist || 'Unknown Artist')}${dur ? ' · ' + dur : ''}</div>
-                </div>
-                <button type="button" class="btn btn-ghost btn-icon btn-sm" onclick="event.stopPropagation(); window.Auralis.player.removeFromQueue(${index})" title="Remove from queue" style="flex-shrink: 0; margin-left: var(--space-2);">
-                    <i data-lucide="trash-2"></i>
-                </button>
-            </div>
-        `;
-    }
-
     async renderQueuePanel() {
         if (!this.queuePanel) this.queuePanel = document.getElementById('queue-panel');
         const drawer = document.getElementById('player-full-queue-drawer');
-        if (!this.queuePanel && !drawer) return;
+        const containers = document.querySelectorAll('#queue-container, .queue-body');
+        if (!this.queuePanel && !drawer && containers.length === 0) return;
 
-        let queueTracks = [];
         try {
             if (window.Auralis && window.Auralis.bridge) {
-                const q = await window.Auralis.bridge.invoke('get_queue');
-                if (q && q.tracks) queueTracks = q.tracks;
+                const html = await window.Auralis.bridge.invoke('get_queue_html');
+                if (html) {
+                    if (this.queuePanel) this.queuePanel.innerHTML = html;
+                    if (drawer) drawer.innerHTML = html;
+                    containers.forEach((c) => {
+                        if (c !== this.queuePanel && c !== drawer) c.innerHTML = html;
+                    });
+                    if (window.lucide) window.lucide.createIcons();
+                }
             }
         } catch (e) {
-            console.warn('Failed to fetch queue:', e);
+            console.warn('Failed to render queue HTML:', e);
         }
-
-        const buildContent = (isDrawer) => `
-            <div style="padding: var(--space-4); height: 100%; display: flex; flex-direction: column;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-4);">
-                    <h3 style="font-size: var(--text-lg); font-weight: var(--font-semibold); color: var(--text-1); margin: 0;">Playback Queue</h3>
-                    <button type="button" class="btn btn-ghost btn-icon btn-sm" style="padding: var(--space-1);" onclick="event.stopPropagation(); ${isDrawer ? 'window.Auralis.player.toggleFullScreenQueue(false)' : 'window.Auralis.player.toggleQueue(false)'}">
-                        <i data-lucide="x"></i>
-                    </button>
-                </div>
-                <div class="queue-content" style="flex: 1; overflow-y: auto;">
-                    ${this.currentTrack ? `
-                        <div style="font-size: var(--text-xs); color: var(--text-3); text-transform: uppercase; margin-bottom: var(--space-2); font-weight: var(--font-semibold);">Now Playing</div>
-                        <div class="track-row neu-glass" style="margin-bottom: var(--space-4); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3);">
-                            <div class="track-row-info">
-                                <div class="track-row-title" style="color: var(--accent); font-weight: var(--font-semibold);">${this.escapeHtml(this.currentTrack.title)}</div>
-                                <div class="track-row-subtitle">${this.escapeHtml(this.currentTrack.artist || 'Unknown Artist')}</div>
-                            </div>
-                        </div>
-                    ` : ''}
-                    <div style="font-size: var(--text-xs); color: var(--text-3); text-transform: uppercase; margin-bottom: var(--space-2); font-weight: var(--font-semibold);">Next Up (${queueTracks.length})</div>
-                    ${queueTracks.length > 0 ? queueTracks.map((t, i) => this.renderQueueTrackRow(t, i)).join('') : `
-                        <div class="empty-state glass neu" style="padding: var(--space-4); text-align: center; border-radius: var(--radius-md);">
-                            <p style="color: var(--text-3); font-size: var(--text-xs);">No tracks in queue</p>
-                        </div>
-                    `}
-                </div>
-                ${queueTracks.length > 0 ? `
-                    <div style="padding-top: var(--space-3); border-top: 1px solid var(--glass-border); display: flex; gap: var(--space-2);">
-                        <button type="button" class="btn btn-secondary btn-sm neu" style="width: 100%; justify-content: center;" onclick="window.Auralis.player.clearQueue()">
-                            <i data-lucide="trash-2"></i>
-                            Clear Queue
-                        </button>
-                    </div>
-                ` : ''}
-            </div>
-        `;
-
-        if (this.queuePanel) {
-            this.queuePanel.innerHTML = buildContent(false);
-        }
-        if (drawer) {
-            drawer.innerHTML = buildContent(true);
-        }
-
-        if (window.lucide) window.lucide.createIcons();
     }
 
     async clearQueue() {
@@ -1088,10 +1015,23 @@ class PlayerController {
         }
     }
 
-    async removeFromQueue(index) {
+    async removeFromQueue(indexOrId) {
         if (window.Auralis && window.Auralis.bridge) {
             try {
-                await window.Auralis.bridge.invoke('remove_from_queue', { index });
+                if (typeof indexOrId === 'number') {
+                    await window.Auralis.bridge.invoke('remove_from_queue', { index: indexOrId });
+                } else if (typeof indexOrId === 'string' && /^\d+$/.test(indexOrId)) {
+                    await window.Auralis.bridge.invoke('remove_from_queue', { index: parseInt(indexOrId, 10) });
+                } else {
+                    const q = await window.Auralis.bridge.invoke('get_queue');
+                    let idx = -1;
+                    if (q && q.tracks) {
+                        idx = q.tracks.findIndex(t => String(t.id) === String(indexOrId));
+                    }
+                    if (idx >= 0) {
+                        await window.Auralis.bridge.invoke('remove_from_queue', { index: idx });
+                    }
+                }
                 this.renderQueuePanel();
             } catch (e) {
                 const msg = String(e || 'remove failed');
@@ -1100,6 +1040,7 @@ class PlayerController {
             }
         }
     }
+
 
     updateVolumeUI() {
         const pct = `${this.volume * 100}%`;

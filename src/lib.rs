@@ -148,6 +148,7 @@ impl AuralisApp {
                 commands::playback::set_shuffle,
                 commands::playback::get_now_playing,
                 commands::playback::get_queue,
+                commands::playback::get_queue_html,
                 commands::playback::set_queue,
                 commands::playback::add_to_queue,
                 commands::playback::play_next,

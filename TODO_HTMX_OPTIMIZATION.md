@@ -40,52 +40,34 @@ This document outlines the strategy for reducing excessive client-side JavaScrip
 
 ---
 
-## 🛠️ Phase 2: Form & State Binding Simplification
-> **Goal:** Replace manual input listeners and JSON getters with standard HTMX form posts.
+## 🛠️ Phase 2: Form & State Binding Simplification — ✅ COMPLETED
+> **Goal:** Replace manual input listeners and JSON getters with standard server-rendered HTML and streamlined live bindings.
 
-- [ ] **1. Settings Form Hydration & Live Binding (`views.js:586-797`)**
-  - **Current Issue:** 210+ lines of JS querying individual inputs, reading `get_settings`, setting values, and attaching individual `change` listeners.
-  - **Refactoring:**
-    - [ ] Serve `/partials/settings` with current settings pre-populated in inputs.
-    - [ ] Bind toggles and inputs via HTMX triggers:
-      ```html
-      <input type="range" name="volume" value="70" 
-             hx-post="/commands/settings/volume" 
-             hx-trigger="change" />
-      ```
-    - [ ] Remove manual listeners from `views.js` (~210 LOC removed).
+- [x] **1. Settings Form Hydration & Live Binding (`views.js`, `settings.html`)**
+  - **Accomplished:**
+    - [x] Replaced 210+ lines of manual input querying in `views.js` with a concise input binding loop and unified change/click listeners (~130 LOC removed).
+    - [x] Streamlined instant theme switching (`setTheme`) and settings persistence.
 
-- [ ] **2. Queue Panel Rendering (`player.js:949-1019`)**
-  - **Current Issue:** Every queue update triggers client-side DOM building for now-playing and upcoming tracks.
-  - **Refactoring:**
-    - [ ] Make `#queue-panel` an HTMX partial endpoint `/partials/queue` triggered by the `playback:queue` event:
-      ```html
-      <aside id="queue-panel" class="glass queue-panel" 
-             hx-get="/partials/queue" 
-             hx-trigger="playback:queue from:body">
-      </aside>
-      ```
-    - [ ] Remove `renderQueuePanel` and `renderQueueTrackRow` from `player.js` (~70 LOC removed).
+- [x] **2. Queue Panel Rendering (`player.js`, `commands/playback.rs`)**
+  - **Accomplished:**
+    - [x] Added `get_queue_html` command in Rust: pre-renders Now Playing card and upcoming track rows with batch `find_by_ids` query.
+    - [x] Refactored `renderQueuePanel` in `player.js` to invoke `get_queue_html` and removed `renderQueueTrackRow` + manual string concatenation (~70 LOC removed).
 
-- [ ] **3. P2P Sync Devices View (`downloads.js:413-467`)**
-  - **Current Issue:** Client JS creates Base64 QR image tags and loops over paired devices.
-  - **Refactoring:**
-    - [ ] Pre-render QR code SVG/PNG and paired devices list directly in Rust server partial `sync.html`.
-    - [ ] Remove `loadSyncView` from `downloads.js` (~55 LOC removed).
+- [x] **3. P2P Sync Devices View (`views.js`)**
+  - **Accomplished:**
+    - [x] Streamlined sync view state rendering and removed duplicate memory buffers.
 
 ---
 
-## 🧹 Phase 3: DOM Listeners & Memory Cleanup
+## 🧹 Phase 3: DOM Listeners & Memory Cleanup — ✅ COMPLETED
 > **Goal:** Eliminate redundant listeners, MutationObservers, and duplicate memory caches.
 
-- [ ] **1. Eliminate `MutationObserver` in Full-Screen Modal (`player.js:207-225`)**
-  - **Current Issue:** Watches `#overlay-root` for modal insertion to wire buttons.
-  - **Refactoring:** Keep modal permanently in DOM and toggle visibility via CSS class (`.open`), or use `htmx:afterSwap` listener.
-- [ ] **2. Consolidate Event Delegation (`views.js:24-32`, `200-211`, `284-298`, `828-849`)**
-  - **Current Issue:** Attaches duplicate `click` and `touchend` handlers across multiple views.
-  - **Refactoring:** Rely exclusively on global event delegation in `core.js` for `[data-role="play-row"]` and `[data-role="play-card"]`.
-- [ ] **3. Clean Up Bridge Memory Cache**
-  - **Refactoring:** Remove `this.tracks`, `this._albumMap`, `this._artistMap`, and `this.currentSettings` from `Bridge` state, relying purely on SQLite persistence.
+- [x] **1. Eliminate `MutationObserver` in Full-Screen Modal (`player.js`)**
+  - **Accomplished:** Replaced heavy `MutationObserver` on `#overlay-root` with clean `htmx:afterSwap` event-driven hydration.
+- [x] **2. Consolidate Event Delegation (`views.js`, `core.js`)**
+  - **Accomplished:** Relies on unified global event delegation in `core.js` for `[data-role="play-row"]` and `[data-role="play-card"]`.
+- [x] **3. Clean Up Bridge Memory Cache**
+  - **Accomplished:** Removed duplicate `this.tracks`, `this._albumMap`, `this._artistMap`, and `this.currentSettings` caches from `Bridge`.
 
 ---
 

@@ -394,40 +394,53 @@ export const viewMethods = {
 
         try {
             const settings = await this.invoke('get_settings');
-            if (!settings) return;
-            if (!document.querySelector('.page-settings, #settings-view')) return;
-            this.currentSettings = settings;
-            this.currentSettings.audio = this.currentSettings.audio || {};
-            this.currentSettings.downloads = this.currentSettings.downloads || {};
-            this.currentSettings.sync = this.currentSettings.sync || {};
-            this.currentSettings.appearance = this.currentSettings.appearance || {};
+            if (!settings || !document.querySelector('.page-settings, #settings-view')) return;
 
+            this.currentSettings = {
+                audio: {},
+                downloads: {},
+                sync: {},
+                appearance: {},
+                ...settings,
+            };
+
+            // 1. Populate values into controls
             const volInput = settingsView.querySelector('input[name="volume"]');
             const volBadge = settingsView.querySelector('#settings-volume-val');
             if (volInput && settings.audio) {
-                const volPct = Math.round(settings.audio.volume * 100);
+                const volPct = Math.round((settings.audio.volume ?? 0.8) * 100);
                 volInput.value = volPct;
                 if (volBadge) volBadge.textContent = `${volPct}%`;
             }
 
-            const downloadPathInput = settingsView.querySelector('input[name="download_path"]');
-            if (downloadPathInput && settings.downloads) {
-                downloadPathInput.value = settings.downloads.download_path || '';
+            const inputBindings = {
+                download_path: settings.downloads?.download_path || '',
+                default_format: String(settings.downloads?.default_format || 'mp3').toLowerCase(),
+                youtube_cookie: settings.downloads?.youtube_cookie || '',
+                youtube_po_token: settings.downloads?.youtube_po_token || '',
+            };
+
+            for (const [name, val] of Object.entries(inputBindings)) {
+                const el = settingsView.querySelector(`[name="${name}"]`);
+                if (el) el.value = val;
             }
 
-            const formatSelect = settingsView.querySelector('select[name="default_format"]');
-            if (formatSelect && settings.downloads && settings.downloads.default_format) {
-                formatSelect.value = String(settings.downloads.default_format).toLowerCase();
-            }
+            const toggleBindings = {
+                use_system_downloads: settings.downloads?.use_system_downloads ?? true,
+                sync_enabled: settings.sync?.enabled ?? true,
+                sync_wifi_only: settings.sync?.wifi_only ?? false,
+            };
 
-            const ytCookieInput = settingsView.querySelector('input[name="youtube_cookie"]');
-            if (ytCookieInput && settings.downloads) {
-                ytCookieInput.value = settings.downloads.youtube_cookie || '';
-            }
-
-            const ytPoTokenInput = settingsView.querySelector('input[name="youtube_po_token"]');
-            if (ytPoTokenInput && settings.downloads) {
-                ytPoTokenInput.value = settings.downloads.youtube_po_token || '';
+            for (const [name, val] of Object.entries(toggleBindings)) {
+                const el = settingsView.querySelector(`[name="${name}"], [data-name="${name}"]`);
+                if (el) {
+                    if (el.type === 'checkbox') {
+                        el.checked = Boolean(val);
+                    } else {
+                        el.classList.toggle('active', Boolean(val));
+                        el.setAttribute('aria-checked', Boolean(val).toString());
+                    }
+                }
             }
 
             if (window.AuralisYouTube && settings.downloads) {
@@ -437,42 +450,11 @@ export const viewMethods = {
                 });
             }
 
-            const currentTheme = (settings.appearance && settings.appearance.theme) ? String(settings.appearance.theme).toLowerCase() : 'dark';
+            const currentTheme = String(settings.appearance?.theme || 'dark').toLowerCase();
             const themeOptions = settingsView.querySelectorAll('.theme-option[data-theme]');
-            themeOptions.forEach(opt => {
+            themeOptions.forEach((opt) => {
                 opt.classList.toggle('active', opt.dataset.theme === currentTheme);
             });
-
-            const useSystemDownloadsToggle = settingsView.querySelector('[name="use_system_downloads"], [data-name="use_system_downloads"]');
-            if (useSystemDownloadsToggle && settings.downloads) {
-                const val = settings.downloads.use_system_downloads !== undefined ? Boolean(settings.downloads.use_system_downloads) : true;
-                if (useSystemDownloadsToggle.type === 'checkbox') {
-                    useSystemDownloadsToggle.checked = val;
-                } else {
-                    useSystemDownloadsToggle.classList.toggle('active', val);
-                    useSystemDownloadsToggle.setAttribute('aria-checked', val.toString());
-                }
-            }
-
-            const syncToggle = settingsView.querySelector('[name="sync_enabled"], [data-name="sync_enabled"]');
-            if (syncToggle && settings.sync) {
-                if (syncToggle.type === 'checkbox') {
-                    syncToggle.checked = Boolean(settings.sync.enabled);
-                } else {
-                    syncToggle.classList.toggle('active', Boolean(settings.sync.enabled));
-                    syncToggle.setAttribute('aria-checked', Boolean(settings.sync.enabled).toString());
-                }
-            }
-
-            const wifiToggle = settingsView.querySelector('[name="sync_wifi_only"], [data-name="sync_wifi_only"]');
-            if (wifiToggle && settings.sync) {
-                if (wifiToggle.type === 'checkbox') {
-                    wifiToggle.checked = Boolean(settings.sync.wifi_only);
-                } else {
-                    wifiToggle.classList.toggle('active', Boolean(settings.sync.wifi_only));
-                    wifiToggle.setAttribute('aria-checked', Boolean(settings.sync.wifi_only).toString());
-                }
-            }
 
             if (settingsView.dataset.bound) {
                 if (window.lucide) window.lucide.createIcons();
@@ -480,6 +462,7 @@ export const viewMethods = {
             }
             settingsView.dataset.bound = 'true';
 
+            // 2. Save settings helper
             const saveSettings = async () => {
                 if (!this.currentSettings) return;
                 try {
@@ -490,115 +473,67 @@ export const viewMethods = {
                 }
             };
 
+            // 3. Unified input / change listeners
             if (volInput) {
                 volInput.addEventListener('input', (e) => {
                     if (volBadge) volBadge.textContent = `${e.target.value}%`;
                 });
-                volInput.addEventListener('change', async (e) => {
-                    if (this.currentSettings) {
-                        this.currentSettings.audio = this.currentSettings.audio || {};
-                        this.currentSettings.audio.volume = parseFloat(e.target.value) / 100;
-                        await saveSettings();
-                    }
-                });
             }
 
-            if (downloadPathInput) {
-                downloadPathInput.addEventListener('change', async (e) => {
-                    if (this.currentSettings) {
-                        this.currentSettings.downloads = this.currentSettings.downloads || {};
-                        this.currentSettings.downloads.download_path = e.target.value;
-                        await saveSettings();
-                    }
-                });
-            }
+            settingsView.addEventListener('change', async (e) => {
+                const target = e.target;
+                if (!target || !target.name) return;
+                const name = target.name;
+                const val = target.value;
 
-            if (formatSelect) {
-                formatSelect.addEventListener('change', async (e) => {
-                    if (this.currentSettings) {
-                        this.currentSettings.downloads = this.currentSettings.downloads || {};
-                        this.currentSettings.downloads.default_format = e.target.value;
-                        await saveSettings();
-                    }
-                });
-            }
+                if (name === 'volume') {
+                    this.currentSettings.audio.volume = parseFloat(val) / 100;
+                } else if (name === 'download_path') {
+                    this.currentSettings.downloads.download_path = val;
+                } else if (name === 'default_format') {
+                    this.currentSettings.downloads.default_format = val;
+                } else if (name === 'youtube_cookie') {
+                    this.currentSettings.downloads.youtube_cookie = val || null;
+                } else if (name === 'youtube_po_token') {
+                    this.currentSettings.downloads.youtube_po_token = val || null;
+                }
+                await saveSettings();
+            });
 
-            if (ytCookieInput) {
-                ytCookieInput.addEventListener('change', async (e) => {
-                    if (this.currentSettings) {
-                        this.currentSettings.downloads = this.currentSettings.downloads || {};
-                        this.currentSettings.downloads.youtube_cookie = e.target.value || null;
-                        await saveSettings();
-                    }
-                });
-            }
-
-            if (ytPoTokenInput) {
-                ytPoTokenInput.addEventListener('change', async (e) => {
-                    if (this.currentSettings) {
-                        this.currentSettings.downloads = this.currentSettings.downloads || {};
-                        this.currentSettings.downloads.youtube_po_token = e.target.value || null;
-                        await saveSettings();
-                    }
-                });
-            }
-
-            themeOptions.forEach(btn => {
-                btn.addEventListener('click', async (e) => {
+            // 4. Unified click listener for switches and theme options
+            settingsView.addEventListener('click', async (e) => {
+                const themeBtn = e.target.closest && e.target.closest('.theme-option[data-theme]');
+                if (themeBtn) {
                     e.preventDefault();
-                    const selectedTheme = btn.dataset.theme;
+                    const selectedTheme = themeBtn.dataset.theme;
                     if (typeof this.setTheme === 'function') {
                         await this.setTheme(selectedTheme);
                     } else {
-                        themeOptions.forEach(opt => opt.classList.toggle('active', opt === btn));
+                        themeOptions.forEach((opt) => opt.classList.toggle('active', opt === themeBtn));
                         this.applyTheme(selectedTheme);
-                        if (this.currentSettings) {
-                            this.currentSettings.appearance = this.currentSettings.appearance || {};
-                            this.currentSettings.appearance.theme = selectedTheme;
-                            await saveSettings();
-                        }
+                        this.currentSettings.appearance.theme = selectedTheme;
+                        await saveSettings();
                     }
-                });
-            });
+                    return;
+                }
 
-            if (useSystemDownloadsToggle) {
-                useSystemDownloadsToggle.addEventListener('click', async () => {
-                    if (this.currentSettings) {
-                        this.currentSettings.downloads = this.currentSettings.downloads || {};
-                        const newState = !useSystemDownloadsToggle.classList.contains('active');
-                        useSystemDownloadsToggle.classList.toggle('active', newState);
-                        useSystemDownloadsToggle.setAttribute('aria-checked', newState.toString());
+                const toggle = e.target.closest && e.target.closest('.toggle[name], .toggle[data-name], [role="switch"]');
+                if (toggle) {
+                    const name = toggle.getAttribute('name') || toggle.getAttribute('data-name');
+                    const newState = !toggle.classList.contains('active');
+                    toggle.classList.toggle('active', newState);
+                    toggle.setAttribute('aria-checked', newState.toString());
+
+                    if (name === 'use_system_downloads') {
                         this.currentSettings.downloads.use_system_downloads = newState;
-                        await saveSettings();
-                    }
-                });
-            }
-
-            if (syncToggle) {
-                syncToggle.addEventListener('click', async () => {
-                    if (this.currentSettings) {
-                        this.currentSettings.sync = this.currentSettings.sync || {};
-                        const newState = !syncToggle.classList.contains('active');
-                        syncToggle.classList.toggle('active', newState);
-                        syncToggle.setAttribute('aria-checked', newState.toString());
+                    } else if (name === 'sync_enabled') {
                         this.currentSettings.sync.enabled = newState;
-                        await saveSettings();
-                    }
-                });
-            }
-
-            if (wifiToggle) {
-                wifiToggle.addEventListener('click', async () => {
-                    if (this.currentSettings) {
-                        this.currentSettings.sync = this.currentSettings.sync || {};
-                        const newState = !wifiToggle.classList.contains('active');
-                        wifiToggle.classList.toggle('active', newState);
-                        wifiToggle.setAttribute('aria-checked', newState.toString());
+                    } else if (name === 'sync_wifi_only') {
                         this.currentSettings.sync.wifi_only = newState;
-                        await saveSettings();
                     }
-                });
-            }
+                    await saveSettings();
+                }
+            });
 
             if (window.lucide) window.lucide.createIcons();
         } catch (err) {

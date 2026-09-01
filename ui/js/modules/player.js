@@ -78,8 +78,25 @@ export const playerMethods = {
         }
     },
 
-    async removeFromQueue(index) {
+    async removeFromQueue(target) {
         try {
+            let index = target;
+            if (typeof target === 'string') {
+                const parsed = parseInt(target, 10);
+                if (!isNaN(parsed) && String(parsed) === target) {
+                    index = parsed;
+                } else {
+                    const q = await this.invoke('get_queue');
+                    if (q && q.tracks) {
+                        const found = q.tracks.findIndex(t => String(t.id) === String(target));
+                        if (found !== -1) {
+                            index = found;
+                        } else {
+                            return;
+                        }
+                    }
+                }
+            }
             await this.invoke('remove_from_queue', { index });
             if (window.Auralis && window.Auralis.player && typeof window.Auralis.player.renderQueuePanel === 'function') {
                 window.Auralis.player.renderQueuePanel();

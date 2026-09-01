@@ -648,7 +648,7 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
 }
 
 /// Escape HTML special characters for safe insertion into HTML strings.
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -657,14 +657,14 @@ fn html_escape(s: &str) -> String {
 }
 
 /// Format duration in seconds as M:SS.
-fn format_time(secs: u32) -> String {
+pub(crate) fn format_time(secs: u32) -> String {
     let m = secs / 60;
     let s = secs % 60;
     format!("{m}:{s:02}")
 }
 
 /// Render cover artwork image tag with fallback to Lucide icon.
-fn render_art_tag(art_path: Option<&str>, alt_text: &str, icon_name: &str) -> String {
+pub(crate) fn render_art_tag(art_path: Option<&str>, alt_text: &str, icon_name: &str) -> String {
     match art_path {
         Some(path) if !path.trim().is_empty() => {
             let safe_alt = html_escape(alt_text);

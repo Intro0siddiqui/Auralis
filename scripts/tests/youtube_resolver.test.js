@@ -388,39 +388,17 @@ describe('nativeFetch header extraction (Tauri bridge)', () => {
     });
 });
 
-describe('PlayerController queue row HTML rendering', () => {
+describe('PlayerController queue pre-rendered HTML & observer cleanup', () => {
     const playerPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/player.js');
     const src = fs.readFileSync(playerPath, 'utf8');
 
-    it('ui/js/player.js contains renderQueueTrackRow method', () => {
-        assert.ok(src.includes('renderQueueTrackRow(track, index)'), 'player.js missing renderQueueTrackRow method signature');
-        assert.ok(src.includes('this.renderQueueTrackRow(t, i)'), 'renderQueuePanel must delegate to renderQueueTrackRow');
+    it('ui/js/player.js renders queue via get_queue_html and has no renderQueueTrackRow', () => {
+        assert.ok(src.includes("get_queue_html"), 'renderQueuePanel must invoke get_queue_html');
+        assert.ok(!src.includes('renderQueueTrackRow'), 'redundant renderQueueTrackRow should be removed');
     });
 
-    it('renderQueueTrackRow formats track row HTML and escapes untrusted fields using actual PlayerController instance', async () => {
-        const vm = await import('node:vm');
-        class MockMutationObserver { observe() {} disconnect() {} }
-        const sandbox = {
-            document: { addEventListener: () => {}, getElementById: () => null, querySelector: () => null, body: { addEventListener: () => {} } },
-            window: {},
-            console,
-            navigator: {},
-            MutationObserver: MockMutationObserver
-        };
-        vm.createContext(sandbox);
-        vm.runInContext(src + '; this.PlayerController = PlayerController;', sandbox);
-        const player = new sandbox.PlayerController();
-
-        const nullResult = player.renderQueueTrackRow(null, 0);
-        assert.equal(nullResult, '');
-
-        const safeTrackRow = player.renderQueueTrackRow({ title: 'Song & Dance', artist: 'Rock <Band>' }, 2);
-        assert.ok(safeTrackRow.includes('Song &amp; Dance'), 'Title should be HTML escaped');
-        assert.ok(safeTrackRow.includes('Rock &lt;Band&gt;'), 'Artist should be HTML escaped');
-        assert.ok(safeTrackRow.includes('removeFromQueue(2)'), 'Button should invoke removeFromQueue with index 2');
-
-        const unknownArtistRow = player.renderQueueTrackRow({ title: 'Untitled' }, 0);
-        assert.ok(unknownArtistRow.includes('Unknown Artist'), 'Fallback artist when empty/null');
+    it('ui/js/player.js removes MutationObserver overhead', () => {
+        assert.ok(!src.includes('new MutationObserver'), 'MutationObserver overhead should be removed from player.js');
     });
 });
 
@@ -524,4 +502,33 @@ describe('Phase 1 Frontend HTMX & JS Reduction', () => {
         assert.ok(viewsSrc.includes("get_search_results_html"), 'loadSearchView should invoke get_search_results_html');
     });
 });
+
+describe('Phase 2 & Phase 3 Frontend Streamlining (Queue Drawer, Settings Binding, DOM Delegation)', () => {
+    const viewsPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/modules/views.js');
+    const viewsSrc = fs.readFileSync(viewsPath, 'utf8');
+    const corePath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/modules/core.js');
+    const coreSrc = fs.readFileSync(corePath, 'utf8');
+    const playerPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/player.js');
+    const playerSrc = fs.readFileSync(playerPath, 'utf8');
+
+    it('loadSettingsView uses concise unified listener and invokes get_settings & update_settings', () => {
+        assert.ok(viewsSrc.includes("get_settings"), 'loadSettingsView should invoke get_settings');
+        assert.ok(viewsSrc.includes("update_settings"), 'loadSettingsView should invoke update_settings');
+        assert.ok(viewsSrc.includes("settingsView.addEventListener('change'"), 'loadSettingsView should have unified change listener');
+        assert.ok(viewsSrc.includes("settingsView.addEventListener('click'"), 'loadSettingsView should have unified click listener');
+    });
+
+    it('core.js handles global event delegation for play-row and play-card', () => {
+        assert.ok(coreSrc.includes('data-role="play-row"'), 'core.js must delegate data-role="play-row"');
+        assert.ok(coreSrc.includes('data-role="play-card"'), 'core.js must delegate data-role="play-card"');
+        assert.ok(coreSrc.includes('playDelegationBound'), 'core.js should mark play delegation bound');
+    });
+
+    it('player.js renders queue via get_queue_html and removes MutationObserver', () => {
+        assert.ok(playerSrc.includes('get_queue_html'), 'player.js must invoke get_queue_html');
+        assert.ok(!playerSrc.includes('renderQueueTrackRow'), 'player.js should not have renderQueueTrackRow');
+        assert.ok(!playerSrc.includes('new MutationObserver'), 'player.js should not have MutationObserver');
+    });
+});
+
 
