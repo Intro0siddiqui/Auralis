@@ -279,6 +279,61 @@ impl TrackRepository for SqliteTrackRepository {
         Ok(track)
     }
 
+    async fn find_by_paths(
+        &self,
+        paths: &[&str],
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .db
+            .connection()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let mut unique_paths: Vec<&str> = paths.to_vec();
+        unique_paths.sort_unstable();
+        unique_paths.dedup();
+
+        let mut track_map = std::collections::HashMap::with_capacity(unique_paths.len());
+        const CHUNK_SIZE: usize = 500;
+
+        for chunk in unique_paths.chunks(CHUNK_SIZE) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("SELECT * FROM tracks WHERE file_path IN ({})", placeholders);
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_refs.as_slice(), Self::row_to_track)?;
+            for r in rows {
+                match r {
+                    Ok(t) => {
+                        track_map.insert(t.file_path.clone(), t);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to map track row in find_by_paths; skipping");
+                    }
+                }
+            }
+        }
+
+        let mut result = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some(track) = track_map.get(*path) {
+                result.push(track.clone());
+            }
+        }
+
+        Ok(result)
+    }
+
     async fn find_by_ids(
         &self,
         ids: &[Uuid],
@@ -1202,6 +1257,48 @@ mod tests {
         assert_eq!(found.title, "Test Favorite Track");
 
         repo.set_favorite(&track_id_str, false).await.unwrap();
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_track_repository_find_by_paths() {
+        let db_path = std::env::temp_dir().join(format!(
+            "test_auralis_repo_find_by_paths_{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+        let repo = SqliteTrackRepository::new(db_arc);
+
+        let empty = repo.find_by_paths(&[]).await.unwrap();
+        assert!(empty.is_empty());
+
+        let track1 = Track::new(
+            "Track 1".to_string(),
+            "/path/to/test_1.mp3".to_string(),
+            120,
+            AudioFormat::Mp3,
+        );
+        let track2 = Track::new(
+            "Track 2".to_string(),
+            "/path/to/test_2.mp3".to_string(),
+            180,
+            AudioFormat::Mp3,
+        );
+        repo.insert(&track1).await.unwrap();
+        repo.insert(&track2).await.unwrap();
+
+        let paths = vec![
+            "/path/to/test_2.mp3",
+            "/path/to/nonexistent.mp3",
+            "/path/to/test_1.mp3",
+        ];
+        let found = repo.find_by_paths(&paths).await.unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].file_path, "/path/to/test_2.mp3");
+        assert_eq!(found[1].file_path, "/path/to/test_1.mp3");
 
         let _ = std::fs::remove_file(&db_path);
     }
