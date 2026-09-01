@@ -104,9 +104,16 @@ pub async fn download_audio(
     // download task runs. On failure the `error` field already contains
     // a verbose diagnostic (HTTP status + body snippet + host) built in
     // run_stream — it is emitted verbatim so the JS toast/logcat can show it.
-    let app_handle = app.clone();
-    let dl = (*downloader).clone();
-    let emit_id = id;
+    spawn_download_progress_emitter(app.clone(), (*downloader).clone(), id);
+
+    Ok(state)
+}
+
+pub(crate) fn spawn_download_progress_emitter(
+    app_handle: AppHandle,
+    dl: Downloader,
+    emit_id: Uuid,
+) {
     tauri::async_runtime::spawn(async move {
         loop {
             match dl.get_progress(emit_id).await {
@@ -151,14 +158,13 @@ pub async fn download_audio(
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     });
-
-    Ok(state)
 }
 
 /// Start downloading a playlist (one download per pre-resolved item).
 #[tauri::command]
 pub async fn download_playlist(
     request: PlaylistDownloadRequest,
+    app: AppHandle,
     downloader: State<'_, Downloader>,
 ) -> Result<Vec<DownloadProgress>, String> {
     info!(count = request.items.len(), "Playlist download requested");
@@ -193,6 +199,7 @@ pub async fn download_playlist(
 
         match downloader.download(stream).await {
             Ok(id) => {
+                spawn_download_progress_emitter(app.clone(), (*downloader).clone(), id);
                 if let Some(progress) = downloader.get_progress(id).await {
                     results.push(progress);
                 }

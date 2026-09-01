@@ -227,9 +227,11 @@ fn dispatch(command: &str) {
             }
             "next" => {
                 let _ = player.next().await;
+                crate::commands::playback::emit_track_changed(&app, &player).await;
             }
             "previous" => {
                 let _ = player.previous().await;
+                crate::commands::playback::emit_track_changed(&app, &player).await;
             }
             c if c.starts_with("seek:") => {
                 if let Ok(secs) = c[5..].parse::<u64>() {

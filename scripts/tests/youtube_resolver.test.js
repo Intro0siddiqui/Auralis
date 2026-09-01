@@ -531,6 +531,26 @@ describe('Phase 2 & Phase 3 Frontend Streamlining (Queue Drawer, Settings Bindin
         assert.ok(!playerSrc.includes('renderQueueTrackRow'), 'player.js should not have renderQueueTrackRow');
         assert.ok(!playerSrc.includes('new MutationObserver'), 'player.js should not have MutationObserver');
     });
+
+    it('views.js and core.js resolve play event delegation without duplicate listeners', () => {
+        // views.js should not have redundant document play click listener or inline onclick on play-track-btn
+        assert.ok(!viewsSrc.includes("closest('.play-shelf-btn, .play-track-btn')"), 'views.js should not have redundant play click listener');
+        assert.ok(!viewsSrc.includes("onclick=\"event.stopPropagation(); window._safePlayTrack"), 'views.js renderTrackRows should not have inline onclick play handler');
+        // core.js should have unified delegation
+        assert.ok(coreSrc.includes('handlePlayDelegate'), 'core.js must have handlePlayDelegate');
+    });
+
+    it('player.js Escape key closes overlay-root in addition to queue drawer', () => {
+        assert.ok(playerSrc.includes("overlay-root"), 'player.js should reference overlay-root on Escape');
+        assert.ok(playerSrc.includes("toggleFullScreenQueue"), 'player.js should handle queue drawer toggle');
+    });
+
+    it('core.js provides global back dismissal handler for popstate and modals', () => {
+        assert.ok(coreSrc.includes('dismissOpenOverlays'), 'core.js must implement dismissOpenOverlays');
+        assert.ok(coreSrc.includes('initBackDismissalHandler'), 'core.js must implement initBackDismissalHandler');
+        assert.ok(coreSrc.includes('popstate'), 'core.js should handle popstate');
+        assert.ok(coreSrc.includes('.modal-backdrop'), 'core.js should dismiss modal-backdrop');
+    });
 });
 
 

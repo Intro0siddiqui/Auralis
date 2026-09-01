@@ -267,6 +267,9 @@ impl Downloader {
             return Err(DownloaderError::InvalidUrl(req.stream_url));
         }
 
+        // Clean up completed/failed/cancelled records to prevent memory growth
+        self.cleanup().await;
+
         let id = Uuid::new_v4();
         let fallback_ext = req.format.extension().to_string();
         let ext = if req.ext.is_empty() {
@@ -988,6 +991,68 @@ impl Downloader {
         Ok(())
     }
 
+    /// Prune finished, failed, and cancelled download records from `jobs` and `active_downloads`.
+    /// Removes records updated more than `max_age` ago (default 10 minutes) and ensures
+    /// at most `max_retained` (default 50) finished/terminal records are kept.
+    pub async fn cleanup(&self) {
+        self.prune_finished(Duration::from_secs(10 * 60), 50).await;
+    }
+
+    /// Prune finished download records with custom age and retention limits.
+    pub async fn prune_finished(&self, max_age: Duration, max_retained: usize) {
+        let now = Utc::now();
+        let max_age_chrono =
+            chrono::Duration::from_std(max_age).unwrap_or_else(|_| chrono::Duration::minutes(10));
+
+        let mut to_remove = Vec::new();
+
+        {
+            let downloads = self.active_downloads.read().await;
+            let mut terminal_records: Vec<(Uuid, chrono::DateTime<Utc>)> = downloads
+                .iter()
+                .filter(|(_, p)| {
+                    matches!(
+                        p.status,
+                        DownloadStatus::Completed
+                            | DownloadStatus::Failed
+                            | DownloadStatus::Cancelled
+                    )
+                })
+                .map(|(&id, p)| (id, p.updated_at))
+                .collect();
+
+            // 1. Records older than max_age
+            for (id, updated_at) in &terminal_records {
+                if now.signed_duration_since(*updated_at) > max_age_chrono {
+                    to_remove.push(*id);
+                }
+            }
+
+            // 2. If retained terminal records exceed max_retained, remove oldest
+            terminal_records.retain(|(id, _)| !to_remove.contains(id));
+            if terminal_records.len() > max_retained {
+                // Sort descending by updated_at (newest first)
+                terminal_records.sort_by(|a, b| b.1.cmp(&a.1));
+                for (id, _) in terminal_records.iter().skip(max_retained) {
+                    to_remove.push(*id);
+                }
+            }
+        }
+
+        if !to_remove.is_empty() {
+            debug!(count = to_remove.len(), "Pruning finished download records");
+            let mut downloads = self.active_downloads.write().await;
+            let mut jobs = self.jobs.write().await;
+            let mut tasks = self.tasks.write().await;
+
+            for id in to_remove {
+                downloads.remove(&id);
+                jobs.remove(&id);
+                tasks.remove(&id);
+            }
+        }
+    }
+
     /// Get current progress for a download.
     pub async fn get_progress(&self, id: Uuid) -> Option<DownloadProgress> {
         let downloads = self.active_downloads.read().await;
@@ -1004,6 +1069,97 @@ impl Downloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_downloader_cleanup_and_prune() {
+        let dir = std::env::temp_dir().join(format!("auralis_dl_test_{}", Uuid::new_v4()));
+        let downloader = Downloader::new(dir.clone());
+
+        let id1 = Uuid::new_v4();
+        let mut p1 = DownloadProgress::new(
+            "https://example.com/1".into(),
+            "Track 1".into(),
+            AudioFormat::Mp3,
+        );
+        p1.status = DownloadStatus::Completed;
+        p1.updated_at = Utc::now() - chrono::Duration::minutes(15); // > 10 min old
+
+        let id2 = Uuid::new_v4();
+        let mut p2 = DownloadProgress::new(
+            "https://example.com/2".into(),
+            "Track 2".into(),
+            AudioFormat::Mp3,
+        );
+        p2.status = DownloadStatus::Failed;
+        p2.updated_at = Utc::now() - chrono::Duration::seconds(30); // recent
+
+        let id3 = Uuid::new_v4();
+        let mut p3 = DownloadProgress::new(
+            "https://example.com/3".into(),
+            "Track 3".into(),
+            AudioFormat::Mp3,
+        );
+        p3.status = DownloadStatus::Downloading; // in progress
+        p3.updated_at = Utc::now() - chrono::Duration::minutes(20);
+
+        {
+            let mut active = downloader.active_downloads.write().await;
+            active.insert(id1, p1);
+            active.insert(id2, p2);
+            active.insert(id3, p3);
+        }
+
+        // Run default cleanup (10 min threshold, 50 cap)
+        downloader.cleanup().await;
+
+        {
+            let active = downloader.active_downloads.read().await;
+            assert!(
+                !active.contains_key(&id1),
+                "Old completed download should be pruned"
+            );
+            assert!(
+                active.contains_key(&id2),
+                "Recent failed download should be retained"
+            );
+            assert!(
+                active.contains_key(&id3),
+                "Active downloading track should not be pruned"
+            );
+        }
+
+        // Test max_retained limit
+        for i in 0..10 {
+            let id = Uuid::new_v4();
+            let mut p = DownloadProgress::new(
+                format!("https://example.com/{i}"),
+                format!("Track {i}"),
+                AudioFormat::Mp3,
+            );
+            p.status = DownloadStatus::Completed;
+            p.updated_at = Utc::now() - chrono::Duration::seconds(i as i64);
+            downloader.active_downloads.write().await.insert(id, p);
+        }
+
+        // Prune with max_retained = 3
+        downloader
+            .prune_finished(Duration::from_secs(3600), 3)
+            .await;
+
+        {
+            let active = downloader.active_downloads.read().await;
+            let completed_count = active
+                .values()
+                .filter(|p| p.status == DownloadStatus::Completed)
+                .count();
+            assert_eq!(
+                completed_count, 3,
+                "Should retain exactly 3 completed records"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn test_sanitize_filename() {

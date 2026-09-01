@@ -200,6 +200,7 @@ export const coreMethods = {
 
         this.initGlobalErrorHandlers();
         this.initKeyboardHandler();
+        this.initBackDismissalHandler();
         this.bindHTMXEvents();
         this.ensureFileInput();
         this.refreshCurrentView();
@@ -373,10 +374,10 @@ export const coreMethods = {
             let _lastDelegatedTrackId = null;
             const handlePlayDelegate = (e) => {
                 if (e.target.closest && e.target.closest('.track-row-actions')) {
-                    const playBtn = e.target.closest('[data-role="play-btn"]');
+                    const playBtn = e.target.closest('[data-role="play-btn"], .play-track-btn');
                     if (playBtn) {
                         e.preventDefault(); e.stopPropagation();
-                        const tid = playBtn.dataset.trackId;
+                        const tid = playBtn.dataset.trackId || playBtn.dataset.firstTrackId;
                         const now = Date.now();
                         if (tid && (_lastDelegatedTrackId !== tid || (now - _lastDelegatedPlayTime >= 350))) {
                             _lastDelegatedPlayTime = now;
@@ -386,9 +387,9 @@ export const coreMethods = {
                     }
                     return;
                 }
-                const playEl = e.target.closest && e.target.closest('[data-role="play-row"], [data-role="play-card"]');
+                const playEl = e.target.closest && e.target.closest('[data-role="play-row"], [data-role="play-card"], .play-shelf-btn, .play-track-btn');
                 if (!playEl) return;
-                const tid = playEl.dataset.trackId;
+                const tid = playEl.dataset.trackId || playEl.dataset.firstTrackId;
                 const now = Date.now();
                 if (tid && (_lastDelegatedTrackId !== tid || (now - _lastDelegatedPlayTime >= 350))) {
                     e.preventDefault();
@@ -400,6 +401,81 @@ export const coreMethods = {
             document.addEventListener('click', handlePlayDelegate);
             document.addEventListener('touchend', handlePlayDelegate, { passive: false });
         }
+    },
+
+    dismissOpenOverlays() {
+        let dismissed = false;
+
+        // 1. Floating context menus
+        const contextMenu = document.getElementById('floating-track-context-menu') || document.querySelector('.context-menu');
+        if (contextMenu) {
+            if (typeof this.closeTrackContextMenu === 'function') {
+                this.closeTrackContextMenu();
+            } else {
+                contextMenu.remove();
+            }
+            dismissed = true;
+        }
+
+        // 2. Queue drawer inside full-screen player
+        const drawer = document.getElementById('player-full-queue-drawer');
+        if (drawer && drawer.classList.contains('open')) {
+            if (window.AuralisPlayer && typeof window.AuralisPlayer.toggleFullScreenQueue === 'function') {
+                window.AuralisPlayer.toggleFullScreenQueue(false);
+            } else {
+                drawer.classList.remove('open');
+            }
+            dismissed = true;
+        }
+
+        // 3. Open modal backdrops and dialogs
+        const modals = document.querySelectorAll('.modal-backdrop, .modal--dialog');
+        if (modals && modals.length > 0) {
+            modals.forEach(m => m.remove());
+            dismissed = true;
+        }
+
+        // 4. Full-screen player / overlay in #overlay-root
+        const overlayRoot = document.getElementById('overlay-root');
+        if (overlayRoot && overlayRoot.innerHTML.trim() !== '') {
+            overlayRoot.innerHTML = '';
+            dismissed = true;
+        }
+
+        return dismissed;
+    },
+
+    initBackDismissalHandler() {
+        if (window._backDismissalHandlerBound) return;
+        window._backDismissalHandlerBound = true;
+
+        // Intercept browser / Android WebView popstate events
+        window.addEventListener('popstate', (e) => {
+            if (this.dismissOpenOverlays()) {
+                e.preventDefault();
+                try {
+                    window.history.pushState({ modalOpen: false }, '', window.location.href);
+                } catch (_) {}
+            }
+        });
+
+        // Intercept Android hardware / WebView backbutton event
+        document.addEventListener('backbutton', (e) => {
+            if (this.dismissOpenOverlays()) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        }, false);
+
+        // Intercept Escape / GoBack / Android back keycode (4)
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' || e.key === 'GoBack' || e.keyCode === 4 || e.which === 4) {
+                if (this.dismissOpenOverlays()) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            }
+        }, true);
     },
 
     on(event, callback) {

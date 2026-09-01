@@ -92,6 +92,7 @@ class MediaPlaybackService : Service() {
 
     private var mediaSession: MediaSession? = null
     private var audioManager: AudioManager? = null
+    private var notificationManager: NotificationManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var pausedByFocusLoss: Boolean = false
     private var wakeLock: PowerManager.WakeLock? = null
@@ -99,6 +100,7 @@ class MediaPlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
         createNotificationChannel()
         setupMediaSession()
     }
@@ -138,6 +140,7 @@ class MediaPlaybackService : Service() {
         }
 
         val art = loadArtBitmap(artPath)
+        updateMediaSession(title, artist, durationSecs, positionSecs, isPlaying, art)
         val notification = buildNotification(title, artist, isPlaying, art)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -148,7 +151,7 @@ class MediaPlaybackService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-        updateMediaSession(title, artist, durationSecs, positionSecs, isPlaying, art)
+        notificationManager?.notify(NOTIFICATION_ID, notification)
         return START_STICKY
     }
 
@@ -239,9 +242,11 @@ class MediaPlaybackService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Audio Playback",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "Keeps audio playback active in background"
+                setSound(null, null)
+                enableVibration(false)
             }
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }

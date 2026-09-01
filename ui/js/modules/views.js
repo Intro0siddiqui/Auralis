@@ -21,16 +21,6 @@ try {
     window._safePlayTrack = _safePlayTrack;
 } catch (_) {}
 
-document.addEventListener('click', (evt) => {
-    const playBtn = evt.target.closest && evt.target.closest('.play-shelf-btn, .play-track-btn');
-    if (!playBtn) return;
-
-    const trackId = playBtn.dataset.firstTrackId || playBtn.dataset.trackId;
-    if (trackId) {
-        _safePlayTrack(trackId);
-    }
-});
-
 export const viewMethods = {
     refreshCurrentView() {
         const content = document.getElementById('content');
@@ -556,9 +546,7 @@ export const viewMethods = {
                 <span class="track-row-duration">${this.formatTime(track.duration_secs || 0)}</span>
                 <div class="track-row-actions">
                     <button type="button" class="btn btn-ghost btn-icon play-track-btn" 
-                            title="Play" data-role="play-btn" data-track-id="${track.id}" 
-                            onclick="event.stopPropagation(); window._safePlayTrack ? window._safePlayTrack('${track.id}') : (window.Auralis && window.Auralis.bridge && window.Auralis.bridge.playTrack('${track.id}'))" 
-                            ontouchend="event.stopPropagation(); window._safePlayTrack ? window._safePlayTrack('${track.id}') : (window.Auralis && window.Auralis.bridge && window.Auralis.bridge.playTrack('${track.id}'))">
+                            title="Play" data-role="play-btn" data-track-id="${track.id}">
                         <i data-lucide="play"></i>
                     </button>
                     <button type="button" class="btn btn-ghost btn-icon ${isFav ? 'liked' : ''}" style="${isFav ? 'color: var(--like);' : ''}" title="Like" onclick="event.stopPropagation(); window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)" ontouchend="event.stopPropagation(); window.Auralis.bridge.toggleTrackFavorite('${track.id}', this)">
@@ -574,30 +562,6 @@ export const viewMethods = {
             </div>
         `;
         }).join('');
-
-        // Delegate row taps for mobile WebView reliability (fixes 01:40-01:44 swallowed taps)
-        if (container && !container.dataset.bound) {
-            container.dataset.bound = 'true';
-            const rowHandler = (e) => {
-                // Ignore clicks on action buttons handled separately
-                if (e.target.closest && e.target.closest('.track-row-actions')) {
-                    const playBtn = e.target.closest('[data-role="play-btn"]');
-                    if (playBtn) {
-                        e.preventDefault(); e.stopPropagation();
-                        const tid = playBtn.dataset.trackId;
-                        if (tid) _safePlayTrack(tid);
-                    }
-                    return;
-                }
-                const row = e.target.closest && e.target.closest('[data-role="play-row"]');
-                if (!row || !container.contains(row)) return;
-                e.preventDefault();
-                const tid = row.dataset.trackId;
-                if (tid) _safePlayTrack(tid);
-            };
-            container.addEventListener('click', rowHandler);
-            container.addEventListener('touchend', rowHandler, { passive: false });
-        }
 
         if (window.lucide) window.lucide.createIcons();
     },

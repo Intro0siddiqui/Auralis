@@ -506,6 +506,11 @@ class PlayerController {
                     const drawer = document.getElementById('player-full-queue-drawer');
                     if (drawer && drawer.classList.contains('open')) {
                         this.toggleFullScreenQueue(false);
+                    } else {
+                        const overlay = document.getElementById('overlay-root');
+                        if (overlay && overlay.innerHTML.trim() !== '') {
+                            overlay.innerHTML = '';
+                        }
                     }
                     break;
             }

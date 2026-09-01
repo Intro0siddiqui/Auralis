@@ -118,7 +118,6 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                     elapsed_opt.is_some_and(|e| e > TRACK_END_MIN_GUARD)
                 }
             };
-            was_playing = is_playing;
 
             // Truncated / buffer-underrun detection: sink went empty mid-track far from duration
             let truncated_stop = was_playing && !is_playing && is_empty && !track_just_ended && {
@@ -166,6 +165,8 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                     }
                 }
             }
+
+            was_playing = is_playing;
 
             // Adaptive cadence: poll fast only while audio is actually
             // playing; slow to a heartbeat otherwise to save battery.

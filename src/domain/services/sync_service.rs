@@ -407,7 +407,7 @@ impl SyncService {
                 None
             }
         };
-        {
+        let updated_device = {
             let mut devices = self.paired_devices.write().await;
             if let Some(d) = devices.get_mut(&device_id) {
                 if d.peer_id.is_none() {
@@ -416,11 +416,17 @@ impl SyncService {
                     }
                 }
                 d.mark_synced();
-                self.sync_repository
-                    .save_paired_device(d)
-                    .await
-                    .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+                Some(d.clone())
+            } else {
+                None
             }
+        };
+
+        if let Some(d) = updated_device {
+            self.sync_repository
+                .save_paired_device(&d)
+                .await
+                .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
         }
 
         // Update status
