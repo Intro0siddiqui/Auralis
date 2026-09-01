@@ -586,8 +586,8 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
 
     // Canonicalize to defeat traversal (`..`) tricks; symlinks are resolved to
     // their target so escapes out of the roots cannot pass the check below.
-    let canonical = PathBuf::from(&path)
-        .canonicalize()
+    let canonical = tokio::fs::canonicalize(&path)
+        .await
         .map_err(|e| format!("Invalid image path: {e}"))?;
 
     // Allowlist roots mirror the default scan paths of `scan_library_paths`.
@@ -604,7 +604,7 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
 
     let mut canonical_roots = Vec::with_capacity(roots.len());
     for root in &roots {
-        if let Ok(canonical_root) = root.canonicalize() {
+        if let Ok(canonical_root) = tokio::fs::canonicalize(root).await {
             canonical_roots.push(canonical_root);
         }
     }
