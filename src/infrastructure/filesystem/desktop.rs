@@ -399,7 +399,7 @@ impl DesktopScanner {
         let path_for_extract = path.to_path_buf();
         let path_str_for_extract = path_str.clone();
         let inner_track = tokio::task::spawn_blocking(move || {
-            MetadataExtractor::extract(&path_for_extract).map_err(|e| {
+            MetadataExtractor::extract_with_size(&path_for_extract, Some(size)).map_err(|e| {
                 ScannerError::MetadataError(format!(
                     "Failed to extract metadata from {path_str_for_extract}: {e}"
                 ))
@@ -476,8 +476,9 @@ impl DesktopScanner {
     }
 
     /// Get file size in bytes
-    pub fn get_file_size(path: &Path) -> Result<u64, ScannerError> {
-        std::fs::metadata(path)
+    pub async fn get_file_size(path: &Path) -> Result<u64, ScannerError> {
+        tokio::fs::metadata(path)
+            .await
             .map(|m| m.len())
             .map_err(|e| ScannerError::IoError(e.to_string()))
     }

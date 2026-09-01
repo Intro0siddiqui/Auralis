@@ -129,27 +129,14 @@ impl AndroidScanner {
 
         // Record the file's modification time so an incremental re-scan of
         // the sandbox dir can skip this file without re-parsing metadata.
-        // `metadata` is blocking — offload. Shared logic with desktop.rs.
-        let path_for_meta = file_path.clone();
-        track.mtime = tokio::task::spawn_blocking(move || {
-            std::fs::metadata(&path_for_meta)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        })
-        .await
-        .unwrap_or(0);
-        // Also capture file_size for incremental check consistency.
-        let path_for_size = file_path.clone();
-        track.file_size = tokio::task::spawn_blocking(move || {
-            std::fs::metadata(&path_for_size)
-                .map(|m| m.len())
-                .unwrap_or(0)
-        })
-        .await
-        .unwrap_or(0);
+        let meta = tokio::fs::metadata(&file_path).await.ok();
+        track.mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        track.file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
 
         let path_str = file_path.to_string_lossy().to_string();
         let existing = track_repo.find_by_path(&path_str).await.map_err(|e| {
@@ -235,10 +222,11 @@ impl AndroidScanner {
 
         // Blocking lofty extraction — offload.
         let path_for_extract = path.to_path_buf();
-        let extract_res =
-            tokio::task::spawn_blocking(move || MetadataExtractor::extract(&path_for_extract))
-                .await
-                .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
+        let extract_res = tokio::task::spawn_blocking(move || {
+            MetadataExtractor::extract_with_size(&path_for_extract, Some(size))
+        })
+        .await
+        .map_err(|e| ScannerError::MetadataError(format!("Join error: {e}")))?;
 
         let mut track = match extract_res {
             Ok(t) => t,

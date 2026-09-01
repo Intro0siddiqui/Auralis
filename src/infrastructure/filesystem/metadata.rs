@@ -30,6 +30,11 @@ impl MetadataExtractor {
 
     /// Extract metadata from an audio file
     pub fn extract(path: &Path) -> Result<Track, MetadataError> {
+        Self::extract_with_size(path, None)
+    }
+
+    /// Extract metadata from an audio file with optional known file size (avoids redundant filesystem stat)
+    pub fn extract_with_size(path: &Path, file_size: Option<u64>) -> Result<Track, MetadataError> {
         debug!(path = %path.display(), "Extracting metadata");
 
         let tagged_file =
@@ -41,7 +46,8 @@ impl MetadataExtractor {
             .or_else(|| tagged_file.first_tag());
 
         let duration_secs = properties.duration().as_secs() as u32;
-        let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let file_size =
+            file_size.unwrap_or_else(|| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
 
         let format = Self::detect_format(path);
 
@@ -79,6 +85,18 @@ impl MetadataExtractor {
 
         debug!(path = %path.display(), title = %track.title, "Metadata extracted");
         Ok(track)
+    }
+
+    /// Asynchronously extract metadata from an audio file using non-blocking async metadata lookup
+    pub async fn extract_async(path: &Path) -> Result<Track, MetadataError> {
+        let file_size = tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let path_buf = path.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::extract_with_size(&path_buf, Some(file_size)))
+            .await
+            .map_err(|e| MetadataError::ReadError(format!("Task join error: {e}")))?
     }
 
     /// Extract embedded artwork from tagged file pictures and save it to the artwork cache directory.

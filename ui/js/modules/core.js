@@ -21,7 +21,23 @@ export const coreMethods = {
     extractErrorMessage(p, fallback = 'Stream error') {
         if (!p) return fallback;
         if (typeof p === 'string') return p;
-        return p.error || p.error_message || p.message || fallback;
+        if (typeof p !== 'object') return String(p);
+
+        const candidates = [p.error, p.error_message, p.message];
+        for (const c of candidates) {
+            if (typeof c === 'string' && c.trim().length > 0) {
+                return c;
+            }
+            if (c && typeof c === 'object') {
+                if (typeof c.message === 'string' && c.message.trim().length > 0) return c.message;
+                if (typeof c.error === 'string' && c.error.trim().length > 0) return c.error;
+                try {
+                    const str = JSON.stringify(c);
+                    if (str && str !== '{}') return str;
+                } catch (_) {}
+            }
+        }
+        return fallback;
     },
 
     async init() {

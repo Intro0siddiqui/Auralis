@@ -51,7 +51,9 @@ export const downloadMethods = {
     async _handle403AutoRetry(p) {
         if (!p || p.status !== 'failed') return;
         const map = this._ensurePendingMap();
-        const errRaw = p.error || p.error_message || '';
+        const errRaw = typeof this.extractErrorMessage === 'function'
+            ? this.extractErrorMessage(p, '')
+            : (p.error || p.error_message || '');
         if (!errRaw.includes('403') && !errRaw.includes('Forbidden') && !errRaw.includes('HTTP 403')) {
             map.delete(p.id);
             return;
@@ -499,7 +501,9 @@ export const downloadMethods = {
         }
 
         const pct = Math.round((progress.progress || 0) * 100);
-        const errRaw = progress.error || progress.error_message || '';
+        const errRaw = typeof this.extractErrorMessage === 'function'
+            ? this.extractErrorMessage(progress, '')
+            : (progress.error || progress.error_message || '');
         const isFailed = progress.status === 'failed';
         const isCompleted = progress.status === 'completed';
         if (isFailed) {

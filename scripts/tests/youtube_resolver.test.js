@@ -358,6 +358,8 @@ describe('Download error payload handling (error vs error_message)', () => {
 
     it('coreMethods.extractErrorMessage handles error, error_message, message, and fallbacks', () => {
         assert.equal(coreMethods.extractErrorMessage({ error: 'Direct error' }), 'Direct error');
+        assert.equal(coreMethods.extractErrorMessage({ error: { message: 'Nested object error message' } }), 'Nested object error message');
+        assert.equal(coreMethods.extractErrorMessage({ error: { error: 'Nested object error string' } }), 'Nested object error string');
         assert.equal(coreMethods.extractErrorMessage({ error_message: 'Error message field' }), 'Error message field');
         assert.equal(coreMethods.extractErrorMessage({ error: 'Primary error', error_message: 'Secondary error_message' }), 'Primary error');
         assert.equal(coreMethods.extractErrorMessage({ message: 'Message field' }), 'Message field');

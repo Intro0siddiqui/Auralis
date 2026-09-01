@@ -376,113 +376,112 @@ class YouTubeResolver {
         if (Array.isArray(opts.orderedClients) && opts.orderedClients.length) {
             effectiveOrderedClients = [...opts.orderedClients];
         }
-        if (client.actions?.execute) {
-            for (const cl of effectiveOrderedClients) {
-                try {
-                    const raw = await client.actions.execute('/player', { videoId, client: cl });
-                    const st = raw?.data?.playabilityStatus?.status;
-                    const sd = raw?.data?.streamingData;
-                    const totalFormats = (sd?.adaptiveFormats?.length || 0) + (sd?.formats?.length || 0);
-                    console.log(`[YouTubeResolver] actions.execute('${cl}') -> status: ${st}, formats: ${totalFormats}`);
-                    if (sd && (sd.adaptiveFormats?.length || sd.formats?.length)) {
-                        const adapt = (sd.adaptiveFormats || []).map((f) => ({
-                            ...f,
-                            itag: f.itag,
-                            mime_type: f.mimeType,
-                            bitrate: f.bitrate,
-                            url: f.url,
-                            signature_cipher: f.signatureCipher || f.cipher,
-                            has_audio: Boolean(f.mimeType?.startsWith('audio/') || f.audioQuality),
-                            has_video: Boolean(f.mimeType?.startsWith('video/')),
-                            content_length: f.contentLength ? parseInt(f.contentLength, 10) : undefined,
-                        }));
-                        const fmts = (sd.formats || []).map((f) => ({
-                            ...f,
-                            itag: f.itag,
-                            mime_type: f.mimeType,
-                            bitrate: f.bitrate,
-                            url: f.url,
-                            signature_cipher: f.signatureCipher || f.cipher,
-                            has_audio: Boolean(f.mimeType?.startsWith('audio/') || f.audioQuality),
-                            has_video: Boolean(f.mimeType?.startsWith('video/')),
-                            content_length: f.contentLength ? parseInt(f.contentLength, 10) : undefined,
-                        }));
-                        const vd = raw?.data?.videoDetails || {};
-                        const parsed = {
-                            basic_info: {
-                                id: videoId,
-                                title: vd.title || 'YouTube Track',
-                                author: vd.author,
-                                channel_id: vd.channelId,
-                                duration: vd.lengthSeconds ? parseInt(vd.lengthSeconds, 10) : undefined,
-                                thumbnail: vd.thumbnail?.thumbnails || [],
-                            },
-                            streaming_data: {
-                                adaptive_formats: adapt,
-                                formats: fmts,
-                            },
-                        };
-                        if (hasDirectOrDecipherableAudio(parsed)) {
-                            info = parsed;
-                            winningClient = cl;
-                            break;
+        if (client.actions?.execute && effectiveOrderedClients.length > 0) {
+            try {
+                const executeClient = async (cl) => {
+                    try {
+                        const raw = await client.actions.execute('/player', { videoId, client: cl });
+                        const st = raw?.data?.playabilityStatus?.status;
+                        const sd = raw?.data?.streamingData;
+                        const totalFormats = (sd?.adaptiveFormats?.length || 0) + (sd?.formats?.length || 0);
+                        console.log(`[YouTubeResolver] actions.execute('${cl}') -> status: ${st}, formats: ${totalFormats}`);
+                        if (sd && (sd.adaptiveFormats?.length || sd.formats?.length)) {
+                            const adapt = (sd.adaptiveFormats || []).map((f) => ({
+                                ...f,
+                                itag: f.itag,
+                                mime_type: f.mimeType,
+                                bitrate: f.bitrate,
+                                url: f.url,
+                                signature_cipher: f.signatureCipher || f.cipher,
+                                has_audio: Boolean(f.mimeType?.startsWith('audio/') || f.audioQuality),
+                                has_video: Boolean(f.mimeType?.startsWith('video/')),
+                                content_length: f.contentLength ? parseInt(f.contentLength, 10) : undefined,
+                            }));
+                            const fmts = (sd.formats || []).map((f) => ({
+                                ...f,
+                                itag: f.itag,
+                                mime_type: f.mimeType,
+                                bitrate: f.bitrate,
+                                url: f.url,
+                                signature_cipher: f.signatureCipher || f.cipher,
+                                has_audio: Boolean(f.mimeType?.startsWith('audio/') || f.audioQuality),
+                                has_video: Boolean(f.mimeType?.startsWith('video/')),
+                                content_length: f.contentLength ? parseInt(f.contentLength, 10) : undefined,
+                            }));
+                            const vd = raw?.data?.videoDetails || {};
+                            const parsed = {
+                                basic_info: {
+                                    id: videoId,
+                                    title: vd.title || 'YouTube Track',
+                                    author: vd.author,
+                                    channel_id: vd.channelId,
+                                    duration: vd.lengthSeconds ? parseInt(vd.lengthSeconds, 10) : undefined,
+                                    thumbnail: vd.thumbnail?.thumbnails || [],
+                                },
+                                streaming_data: {
+                                    adaptive_formats: adapt,
+                                    formats: fmts,
+                                },
+                            };
+                            if (hasDirectOrDecipherableAudio(parsed)) {
+                                return { info: parsed, winningClient: cl };
+                            }
+                            // SABR-only fallback: allow legacy progressive formats[18] even
+                            // when adaptive_formats URLs are missing (FreeTube#6977).
+                            // WEB 2026 often returns only serverAbrStreamingUrl for DASH,
+                            // but formats still contains 360p progressive with url/cipher.
+                            if (hasLegacyProgressiveFallback(parsed)) {
+                                console.log(`[YouTubeResolver] actions.execute('${cl}') SABR-only fallback: using legacy progressive formats`);
+                                return { info: parsed, winningClient: cl };
+                            }
                         }
-                        // SABR-only fallback: allow legacy progressive formats[18] even
-                        // when adaptive_formats URLs are missing (FreeTube#6977).
-                        // WEB 2026 often returns only serverAbrStreamingUrl for DASH,
-                        // but formats still contains 360p progressive with url/cipher.
-                        if (hasLegacyProgressiveFallback(parsed)) {
-                            console.log(`[YouTubeResolver] actions.execute('${cl}') SABR-only fallback: using legacy progressive formats`);
-                            info = parsed;
-                            winningClient = cl;
-                            break;
-                        }
+                    } catch (e) {
+                        console.error(`[YouTubeResolver] actions.execute('${cl}') error:`, e.message);
+                        lastErr = e;
                     }
-                } catch (e) {
-                    console.error(`[YouTubeResolver] actions.execute('${cl}') error:`, e.message);
-                    lastErr = e;
-                }
+                    throw new Error(`Client '${cl}' produced no usable stream`);
+                };
+
+                const res = await Promise.any(effectiveOrderedClients.map((cl) => executeClient(cl)));
+                info = res.info;
+                winningClient = res.winningClient;
+            } catch (e) {
+                lastErr = e;
             }
         }
 
         // 2. Second attempt: High-level Innertube getInfo fallback (same PO-token-aware order)
-        if (!info) {
+        if (!info && effectiveOrderedClients.length > 0) {
             const clientNames = effectiveOrderedClients;
-            const clientAttempts = clientNames.map((cl) => async () => client.getInfo(videoId, { client: cl }));
-
-            let fallbackInfo = null;
-            let fallbackClient = null;
-            for (let i = 0; i < clientAttempts.length; i++) {
-                const attempt = clientAttempts[i];
-                try {
-                    const res = await attempt();
-                    if (res && res.streaming_data) {
-                        const sd = res.streaming_data;
-                        const candidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
-                        if (candidates.length > 0) {
-                            if (!fallbackInfo) { fallbackInfo = res; fallbackClient = clientNames[i]; }
-                            if (hasDirectOrDecipherableAudio(res)) {
-                                info = res;
-                                winningClient = clientNames[i];
-                                break;
-                            }
-                            // SABR-only fallback for getInfo path too (FreeTube#6977)
-                            if (hasLegacyProgressiveFallback(res)) {
-                                console.log(`[YouTubeResolver] getInfo('${clientNames[i]}') SABR-only fallback: using legacy progressive formats`);
-                                info = res;
-                                winningClient = clientNames[i];
-                                break;
+            try {
+                const getInfoClient = async (cl) => {
+                    try {
+                        const res = await client.getInfo(videoId, { client: cl });
+                        if (res && res.streaming_data) {
+                            const sd = res.streaming_data;
+                            const candidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
+                            if (candidates.length > 0) {
+                                if (hasDirectOrDecipherableAudio(res)) {
+                                    return { info: res, winningClient: cl };
+                                }
+                                // SABR-only fallback for getInfo path too (FreeTube#6977)
+                                if (hasLegacyProgressiveFallback(res)) {
+                                    console.log(`[YouTubeResolver] getInfo('${cl}') SABR-only fallback: using legacy progressive formats`);
+                                    return { info: res, winningClient: cl };
+                                }
                             }
                         }
+                    } catch (e) {
+                        lastErr = e;
                     }
-                } catch (e) {
-                    lastErr = e;
-                }
-            }
+                    throw new Error(`getInfo('${cl}') produced no usable stream`);
+                };
 
-            if (!info) {
-                info = fallbackInfo;
-                if (!winningClient) winningClient = fallbackClient;
+                const res = await Promise.any(clientNames.map((cl) => getInfoClient(cl)));
+                info = res.info;
+                winningClient = res.winningClient;
+            } catch (e) {
+                lastErr = e;
             }
         }
 

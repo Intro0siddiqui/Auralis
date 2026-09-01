@@ -134,25 +134,7 @@ impl SyncService {
         }
 
         // Hydrate in-memory alias map from persisted peer_id column (survives restarts)
-        // Keeps RwLock for runtime speed but DB is source of truth.
-        for device in &devices {
-            if let Some(peer_str) = &device.peer_id {
-                if let Ok(pid) = peer_str.parse::<libp2p::PeerId>() {
-                    self.sync_engine
-                        .runtime()
-                        .register_device_alias(device.id.to_string(), pid)
-                        .await;
-                    // also cache lowercased variant (register does both, but explicit)
-                } else {
-                    warn!(device_id = %device.id, peer_id = %peer_str, "Invalid persisted peer_id; skipping hydrate");
-                }
-            }
-        }
-        // Also attempt full DB hydration via NetworkRuntime's alias_db if attached
-        // (covers devices that may have been updated directly via SQL)
-        if let Err(e) = self.sync_engine.runtime().hydrate_aliases().await {
-            debug!(error = %e, "Network alias hydration from DB failed (non-fatal)");
-        }
+        self.warm_peer_aliases().await?;
 
         // Load pending changes
         let changes = self
@@ -177,6 +159,40 @@ impl SyncService {
         }
 
         info!("Sync service initialized");
+        Ok(())
+    }
+
+    /// Warm the peer alias map by querying all persisted paired devices from the repository
+    /// and registering their `peer_id` -> alias/device mappings into the in-memory map.
+    pub async fn warm_peer_aliases(&self) -> Result<(), SyncError> {
+        let devices = self
+            .sync_repository
+            .get_paired_devices()
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to load paired devices for warming peer aliases");
+                SyncError::DatabaseError(e.to_string())
+            })?;
+
+        for device in &devices {
+            if let Some(peer_str) = &device.peer_id {
+                if let Ok(pid) = peer_str.parse::<libp2p::PeerId>() {
+                    self.sync_engine
+                        .runtime()
+                        .register_device_alias(device.id.to_string(), pid)
+                        .await;
+                } else {
+                    warn!(device_id = %device.id, peer_id = %peer_str, "Invalid persisted peer_id; skipping hydrate");
+                }
+            }
+        }
+
+        // Also attempt full DB hydration via NetworkRuntime's alias_db if attached
+        // (covers devices that may have been updated directly via SQL)
+        if let Err(e) = self.sync_engine.runtime().hydrate_aliases().await {
+            debug!(error = %e, "Network alias hydration from DB failed (non-fatal)");
+        }
+
         Ok(())
     }
 
@@ -557,6 +573,44 @@ mod tests {
 
         let service = SyncService::new(settings_repo, sync_repo, sync_engine.clone());
         service.init().await.unwrap();
+
+        let resolved = sync_engine
+            .runtime()
+            .resolve_peer_id(&device.id.to_string())
+            .await;
+        assert_eq!(resolved, Some(peer_id));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_sync_service_warm_peer_aliases() {
+        let db_path =
+            std::env::temp_dir().join(format!("test_auralis_sync_svc_warm_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let db_arc = Arc::new(db);
+
+        let settings_repo = Arc::new(SqliteSettingsRepository::new(db_arc.clone()));
+        let sync_repo = Arc::new(SqliteSyncRepository::new(db_arc.clone()));
+
+        let sync_engine = Arc::new(SyncEngine::new());
+        sync_engine
+            .runtime()
+            .set_persistent_store(db_arc.clone())
+            .await;
+
+        let peer_id = Keypair::generate_ed25519().public().to_peer_id();
+        let device = PairedDevice::with_peer_id(
+            "Paired Laptop".to_string(),
+            DeviceType::Desktop,
+            peer_id.to_string(),
+        );
+
+        sync_repo.save_paired_device(&device).await.unwrap();
+
+        let service = SyncService::new(settings_repo, sync_repo, sync_engine.clone());
+        service.warm_peer_aliases().await.unwrap();
 
         let resolved = sync_engine
             .runtime()

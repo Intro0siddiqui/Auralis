@@ -1071,6 +1071,71 @@ pub async fn get_home_shelves_html(db: State<'_, Database>) -> Result<String, St
     Ok(html)
 }
 
+/// Representation of a lightweight track item for search result rendering.
+pub(crate) struct SearchTrackItem {
+    pub id: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_secs: u32,
+    pub album_art_path: Option<String>,
+    pub is_favorite: bool,
+}
+
+/// Query matching tracks across title, artist, and album from the database.
+pub(crate) fn query_search_tracks(
+    conn: &rusqlite::Connection,
+    query: &str,
+) -> Result<Vec<SearchTrackItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, artist, album, duration_secs, album_art_path, is_favorite 
+            FROM tracks 
+            WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1 
+            ORDER BY title COLLATE NOCASE ASC 
+            LIMIT 100",
+        )
+        .map_err(|e| format!("Failed to prepare search query: {e}"))?;
+
+    let pattern = format!("%{query}%");
+    let rows = stmt
+        .query_map([&pattern], |row| {
+            Ok(SearchTrackItem {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+                duration_secs: row.get(4)?,
+                album_art_path: row.get(5)?,
+                is_favorite: row.get::<_, i64>(6)? != 0,
+            })
+        })
+        .map_err(|e| format!("Failed to query search results: {e}"))?;
+
+    let mut results = Vec::new();
+    for row_res in rows {
+        results.push(row_res.map_err(|e| format!("Row error: {e}"))?);
+    }
+    Ok(results)
+}
+
+/// Render pre-formatted HTML track rows for a list of search result tracks.
+pub(crate) fn render_search_results_html(tracks: &[SearchTrackItem]) -> String {
+    let mut html = String::new();
+    for track in tracks {
+        html.push_str(&render_track_row_html(
+            &track.id,
+            &track.title,
+            track.artist.as_deref(),
+            track.album.as_deref(),
+            track.duration_secs,
+            track.album_art_path.as_deref(),
+            track.is_favorite,
+        ));
+    }
+    html
+}
+
 /// Render HTML track rows for search view.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_search_results_html(
@@ -1090,51 +1155,9 @@ pub async fn get_search_results_html(
     }
 
     let conn = db.connection().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, title, artist, album, duration_secs, album_art_path, is_favorite 
-            FROM tracks 
-            WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1 
-            ORDER BY title COLLATE NOCASE ASC 
-            LIMIT 100",
-        )
-        .map_err(|e| format!("Failed to prepare search query: {e}"))?;
+    let tracks = query_search_tracks(&conn, trimmed)?;
 
-    let pattern = format!("%{trimmed}%");
-    let rows = stmt
-        .query_map([&pattern], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, u32>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, i64>(6)? != 0,
-            ))
-        })
-        .map_err(|e| format!("Failed to query search results: {e}"))?;
-
-    let mut html = String::new();
-    let mut count = 0;
-
-    for row_res in rows {
-        let (id, title, artist, album, duration_secs, art_path, is_fav) =
-            row_res.map_err(|e| format!("Row error: {e}"))?;
-        count += 1;
-
-        html.push_str(&render_track_row_html(
-            &id,
-            &title,
-            artist.as_deref(),
-            album.as_deref(),
-            duration_secs,
-            art_path.as_deref(),
-            is_fav,
-        ));
-    }
-
-    if count == 0 {
+    if tracks.is_empty() {
         return Ok(r#"<div class="empty-state glass neu" style="padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
     <div class="empty-state-icon"><i data-lucide="search"></i></div>
     <h2 class="empty-state-title">No matching tracks</h2>
@@ -1142,7 +1165,7 @@ pub async fn get_search_results_html(
 </div>"#.to_string());
     }
 
-    Ok(html)
+    Ok(render_search_results_html(&tracks))
 }
 
 #[cfg(test)]
@@ -1212,5 +1235,37 @@ mod tests {
         assert!(html.contains("Back in Black &gt; White"));
         assert!(html.contains("3:05"));
         assert!(!html.contains("liked"));
+    }
+
+    #[test]
+    fn test_render_search_results_html() {
+        let items = vec![
+            SearchTrackItem {
+                id: "s-1".to_string(),
+                title: "Search Song".to_string(),
+                artist: Some("Search Artist".to_string()),
+                album: Some("Search Album".to_string()),
+                duration_secs: 200,
+                album_art_path: None,
+                is_favorite: true,
+            },
+            SearchTrackItem {
+                id: "s-2".to_string(),
+                title: "Another Song".to_string(),
+                artist: None,
+                album: None,
+                duration_secs: 150,
+                album_art_path: None,
+                is_favorite: false,
+            },
+        ];
+
+        let html = render_search_results_html(&items);
+        assert!(html.contains(r#"data-track-id="s-1""#));
+        assert!(html.contains("Search Song"));
+        assert!(html.contains("Search Artist"));
+        assert!(html.contains(r#"data-track-id="s-2""#));
+        assert!(html.contains("Another Song"));
+        assert!(html.contains("Unknown Artist"));
     }
 }

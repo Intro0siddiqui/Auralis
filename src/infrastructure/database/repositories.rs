@@ -584,7 +584,7 @@ impl TrackRepository for SqliteTrackRepository {
         if ids.is_empty() {
             return Ok(());
         }
-        let conn = self
+        let mut conn = self
             .db
             .connection()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
@@ -593,6 +593,7 @@ impl TrackRepository for SqliteTrackRepository {
         // small for the query planner.
         const CHUNK_SIZE: usize = 500;
         let ids_str: Vec<String> = ids.iter().map(|u| u.to_string()).collect();
+        let tx = conn.transaction()?;
         for chunk in ids_str.chunks(CHUNK_SIZE) {
             if chunk.is_empty() {
                 continue;
@@ -601,9 +602,10 @@ impl TrackRepository for SqliteTrackRepository {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!("DELETE FROM tracks WHERE id IN ({})", placeholders);
-            conn.execute(&sql, rusqlite::params_from_iter(chunk))?;
+            tx.execute(&sql, rusqlite::params_from_iter(chunk))?;
             debug!(count = chunk.len(), "Deleted chunk of tracks");
         }
+        tx.commit()?;
         Ok(())
     }
 

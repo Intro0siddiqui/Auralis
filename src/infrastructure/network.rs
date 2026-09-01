@@ -58,7 +58,6 @@ pub struct SwarmBehaviour {
 }
 
 /// Commands sent from the public API to the background swarm task.
-#[allow(dead_code)]
 enum NetworkCommand {
     Dial {
         peer_id: Option<PeerId>,
@@ -73,7 +72,6 @@ enum NetworkCommand {
         topic: String,
         data: Vec<u8>,
     },
-    Shutdown,
 }
 
 /// Shared, thread-safe state for a libp2p node.
@@ -902,8 +900,7 @@ pub fn build_swarm(
     Ok(swarm)
 }
 
-/// Background event loop that owns the swarm until a `Shutdown` command or
-/// the command channel closes.
+/// Background event loop that owns the swarm until the command channel closes.
 async fn run_swarm(
     runtime: Arc<NetworkRuntime>,
     mut swarm: Swarm<SwarmBehaviour>,
@@ -965,7 +962,7 @@ async fn run_swarm(
                             Err(e) => warn!(error = ?e, "Gossipsub publish failed"),
                         }
                     }
-                    Some(NetworkCommand::Shutdown) | None => break,
+                    None => break,
                 }
             }
             event = swarm.next() => {

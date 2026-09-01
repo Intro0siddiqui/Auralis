@@ -60,7 +60,6 @@ pub struct ScanProgress {
 
 /// Result of scanning a single file
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) enum ScanResult {
     Added,
     Updated,
