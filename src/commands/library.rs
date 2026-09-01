@@ -487,7 +487,7 @@ pub async fn pick_audio_files_and_import(
                         format!("📥 Ingesting ({}/{}): {}", idx + 1, total, file_name),
                     );
 
-                    match std::fs::read(&path_buf) {
+                    match tokio::fs::read(&path_buf).await {
                         Ok(bytes) => {
                             match android_scanner
                                 .ingest_buffer(&file_name, &bytes, &music_dir, &repo)
@@ -618,8 +618,9 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
         return Err("Image path is outside the app's managed library folders".to_string());
     }
 
-    let metadata =
-        std::fs::metadata(&canonical).map_err(|e| format!("Failed to stat image: {e}"))?;
+    let metadata = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|e| format!("Failed to stat image: {e}"))?;
     if !metadata.is_file() {
         return Err("Requested image path is not a regular file".to_string());
     }
@@ -630,7 +631,9 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
         ));
     }
 
-    let bytes = std::fs::read(&canonical).map_err(|e| format!("Failed to read image: {e}"))?;
+    let bytes = tokio::fs::read(&canonical)
+        .await
+        .map_err(|e| format!("Failed to read image: {e}"))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{mime};base64,{b64}"))
 }
