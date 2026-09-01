@@ -469,14 +469,26 @@ pub async fn pick_audio_files_and_import(
                 };
 
                 let total = paths.len();
-                for (idx, file_path) in paths.into_iter().enumerate() {
-                    let Ok(path_buf) = file_path.into_path() else {
+                let mut valid_paths = Vec::with_capacity(total);
+                for file_path in paths {
+                    if let Ok(path_buf) = file_path.into_path() {
+                        let path_str = path_buf.to_string_lossy().to_string();
+                        valid_paths.push((path_buf, path_str));
+                    } else {
                         summary
                             .errors
                             .push("Failed to resolve file path".to_string());
-                        continue;
-                    };
+                    }
+                }
 
+                let path_strs: Vec<&str> = valid_paths.iter().map(|(_, s)| s.as_str()).collect();
+                let existing_tracks = repo.find_by_paths(&path_strs).await.unwrap_or_default();
+                let existing_map: std::collections::HashMap<String, Track> = existing_tracks
+                    .into_iter()
+                    .map(|t| (t.file_path.clone(), t))
+                    .collect();
+
+                for (idx, (path_buf, path_str)) in valid_paths.into_iter().enumerate() {
                     let file_name = path_buf
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -503,7 +515,6 @@ pub async fn pick_audio_files_and_import(
                             }
                         }
                         Err(_) => {
-                            let path_str = path_buf.to_string_lossy().to_string();
                             let format = crate::infrastructure::filesystem::scanner::detect_format(
                                 &path_buf,
                             )
@@ -523,17 +534,15 @@ pub async fn pick_audio_files_and_import(
                             if track.title.trim().is_empty() || track.title == "Unknown" {
                                 track.title = file_name.clone();
                             }
-                            if let Ok(existing) = repo.find_by_path(&path_str).await {
-                                if let Some(ext) = existing {
-                                    track.id = ext.id;
-                                    let _ = repo.update(&track).await;
-                                    summary.tracks_updated += 1;
-                                } else {
-                                    let _ = repo.insert(&track).await;
-                                    summary.tracks_added += 1;
-                                }
-                                let _ = app.emit("library:track_imported", &track);
+                            if let Some(ext) = existing_map.get(&path_str) {
+                                track.id = ext.id;
+                                let _ = repo.update(&track).await;
+                                summary.tracks_updated += 1;
+                            } else {
+                                let _ = repo.insert(&track).await;
+                                summary.tracks_added += 1;
                             }
+                            let _ = app.emit("library:track_imported", &track);
                         }
                     }
                 }

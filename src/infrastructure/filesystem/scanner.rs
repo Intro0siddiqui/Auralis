@@ -214,6 +214,24 @@ mod tests {
                 .cloned())
         }
 
+        async fn find_by_paths(
+            &self,
+            paths: &[&str],
+        ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+            let list = self.tracks.lock().unwrap();
+            let track_map: std::collections::HashMap<String, Track> = list
+                .iter()
+                .map(|t| (t.file_path.clone(), t.clone()))
+                .collect();
+            let mut result = Vec::with_capacity(paths.len());
+            for path in paths {
+                if let Some(track) = track_map.get(*path) {
+                    result.push(track.clone());
+                }
+            }
+            Ok(result)
+        }
+
         async fn find_by_artist(
             &self,
             artist: &str,

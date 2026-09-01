@@ -556,14 +556,9 @@ mod tests {
             track_ids.push(track.id);
         }
 
-        // Measure sequential N+1 query (baseline)
+        // Measure batch query via find_by_ids
         let start_seq = std::time::Instant::now();
-        let mut seq_tracks = Vec::with_capacity(track_ids.len());
-        for id in &track_ids {
-            if let Ok(Some(track)) = tr_repo.find_by_id(*id).await {
-                seq_tracks.push(track);
-            }
-        }
+        let seq_tracks = tr_repo.find_by_ids(&track_ids).await.unwrap();
         let elapsed_seq = start_seq.elapsed();
 
         // Measure batch query via tracks_for_playlist (optimized)

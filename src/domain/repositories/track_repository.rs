@@ -33,6 +33,12 @@ pub trait TrackRepository: Send + Sync {
         path: &str,
     ) -> Result<Option<Track>, Box<dyn std::error::Error + Send + Sync>>;
 
+    /// Find multiple tracks by file path list
+    async fn find_by_paths(
+        &self,
+        paths: &[&str],
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>>;
+
     /// Find tracks by artist
     async fn find_by_artist(
         &self,
