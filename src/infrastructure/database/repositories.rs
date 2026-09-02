@@ -1219,9 +1219,11 @@ pub fn parse_format(s: &str) -> AudioFormat {
         "mp3" => AudioFormat::Mp3,
         "flac" => AudioFormat::Flac,
         "aac" => AudioFormat::Aac,
-        "ogg" => AudioFormat::Ogg,
+        "ogg" | "oga" => AudioFormat::Ogg,
         "wav" => AudioFormat::Wav,
-        "m4a" => AudioFormat::M4a,
+        "m4a" | "mp4" => AudioFormat::M4a,
+        "opus" => AudioFormat::Opus,
+        "webm" => AudioFormat::Webm,
         _ => AudioFormat::Mp3,
     }
 }

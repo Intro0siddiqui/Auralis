@@ -17,6 +17,8 @@ pub enum AudioFormat {
     Ogg,
     Wav,
     M4a,
+    Opus,
+    Webm,
 }
 
 impl AudioFormat {
@@ -29,6 +31,8 @@ impl AudioFormat {
             AudioFormat::Ogg => "ogg",
             AudioFormat::Wav => "wav",
             AudioFormat::M4a => "m4a",
+            AudioFormat::Opus => "opus",
+            AudioFormat::Webm => "webm",
         }
     }
 
@@ -41,6 +45,8 @@ impl AudioFormat {
             AudioFormat::Ogg => "audio/ogg",
             AudioFormat::Wav => "audio/wav",
             AudioFormat::M4a => "audio/mp4",
+            AudioFormat::Opus => "audio/opus",
+            AudioFormat::Webm => "audio/webm",
         }
     }
 
@@ -53,6 +59,8 @@ impl AudioFormat {
             "ogg" | "oga" => Some(AudioFormat::Ogg),
             "wav" => Some(AudioFormat::Wav),
             "m4a" | "mp4" => Some(AudioFormat::M4a),
+            "opus" => Some(AudioFormat::Opus),
+            "webm" => Some(AudioFormat::Webm),
             _ => None,
         }
     }

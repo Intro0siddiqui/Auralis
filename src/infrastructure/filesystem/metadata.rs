@@ -50,8 +50,15 @@ impl MetadataExtractor {
     pub fn extract_with_size(path: &Path, file_size: Option<u64>) -> Result<Track, MetadataError> {
         debug!(path = %path.display(), "Extracting metadata");
 
-        let tagged_file =
-            lofty::read_from_path(path).map_err(|e| MetadataError::ReadError(e.to_string()))?;
+        let tagged_file = lofty::read_from_path(path).or_else(|_| {
+            // Fallback: guess file type from content magic bytes (e.g. webm/opus disguised as m4a or vice versa)
+            lofty::probe::Probe::open(path)
+                .map_err(|e| MetadataError::ReadError(e.to_string()))?
+                .guess_file_type()
+                .map_err(|e| MetadataError::ReadError(e.to_string()))?
+                .read()
+                .map_err(|e| MetadataError::ReadError(e.to_string()))
+        })?;
 
         let properties = tagged_file.properties();
         let tag = tagged_file
@@ -62,7 +69,16 @@ impl MetadataExtractor {
         let file_size =
             file_size.unwrap_or_else(|| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
 
-        let format = Self::detect_format(path);
+        let format = match tagged_file.file_type() {
+            lofty::file::FileType::Mpeg => AudioFormat::Mp3,
+            lofty::file::FileType::Flac => AudioFormat::Flac,
+            lofty::file::FileType::Aac => AudioFormat::Aac,
+            lofty::file::FileType::Opus => AudioFormat::Opus,
+            lofty::file::FileType::Vorbis => AudioFormat::Ogg,
+            lofty::file::FileType::Wav => AudioFormat::Wav,
+            lofty::file::FileType::Mp4 => AudioFormat::M4a,
+            _ => Self::detect_format(path),
+        };
 
         // Use the unified title extractor that handles Option<&dyn Accessor>
         let title = tag
