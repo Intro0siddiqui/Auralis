@@ -1,9 +1,12 @@
-# 🤖 Auralis Agent Takeover — v2.6.22 Smart Scanner & Playability Gate
+# 🤖 Auralis Agent Takeover — v2.6.22 Smart Scanner & Playability Gate — ✅ SHIPPED
+
+> **Status: COMPLETE — shipped as `ab9f932` on `main`, tag `v2.6.22` (2026-09-01)**
+> Original orchestrator instructions preserved below for audit. Do not re-run without bumping to next version.
 
 > **Instructions for the receiving orchestrator agent**: This document contains everything
 > you need to continue work on the Auralis codebase without any prior context.
 > Follow the workflow described below precisely. Do NOT commit anything until
-> both fixer subagents confirm zero warnings and 42/42 node tests pass. Then
+> both fixer subagents confirm zero warnings and 48/48 node tests pass (42 base + 3 format-scoring). Then
 > bump to v2.6.22, commit, tag, and push.
 
 ---
@@ -11,7 +14,7 @@
 ## 1. Repository Context
 
 - **Repo**: `/workspaces/Auralis` (Tauri v2, Rust backend, HTMX frontend)
-- **Current version**: `v2.6.21` (tag `fd59043` on `main`)
+- **Current version**: `v2.6.22` (tag `ab9f932` on `main`) — was `v2.6.21` (`fd59043`) at takeover start
 - **AGENTS.md** at the repo root contains all architecture and convention rules — all agents MUST read it before touching code.
 - **`fileopt-todo.md`**: Roadmap for future monolithic file decomposition (do NOT do this now).
 - **CI**: `.github/workflows/build.yml` — the lint job runs `cargo fmt --check` + `cargo clippy --all-targets --all-features -- -D warnings`. This MUST pass or the release is broken.
@@ -123,10 +126,10 @@ function scoreFormat(fmt) {
    - Check `updateDownloadProgressUI` — confirm `event.payload.error` is surfaced correctly.
 
 3. **Test requirement**: `node --test scripts/tests/youtube_resolver.test.js` must remain
-   42/42 pass. If format scoring is added, add a test asserting
+   42/42 pass (now 48/48 after scoring tests). If format scoring is added, add a test asserting
    `scoreFormat({itag:140, mimeType:'audio/mp4'}) > scoreFormat({itag:251, mimeType:'audio/webm'})`.
 
-**Ensure all node tests pass before reporting back.**
+**Ensure all node tests pass before reporting back. — DONE: 48/48 pass**
 
 ---
 
@@ -206,3 +209,19 @@ Spawn **Subagents 1 and 2 in parallel**, then spawn Subagent 3 after both report
 - **Clippy is `-D warnings`** — `sort_by` vs `sort_by_key` killed v2.6.21's lint. Be careful.
 - **Do not touch `fileopt-todo.md`** — it is a tracked roadmap for a future session.
 - **Do not bump versions** — the orchestrator does that only after verification passes.
+
+---
+
+## 7. Shipped — v2.6.22 Completion Log (2026-09-01)
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --check` | PASS |
+| `cargo clippy --all-targets --all-features -- -D warnings` | PASS (0 warnings, 12.46s) |
+| `cargo check --all-targets` | PASS |
+| `node --test youtube_resolver.test.js` | 48/48 PASS (12 suites) |
+| Commit | `ab9f932` — `fix(scanner,downloader,frontend): static playability health check...` |
+| Tag | `v2.6.22` pushed to `origin` |
+| CI | `main` + `v2.6.22` both queued (`gh run list` 33551895253 / 33551899212) |
+
+**Next takeover:** bump base to `v2.6.22` and create new `takeover.md` for `v2.6.23`. Do not reuse this file's version numbers.
