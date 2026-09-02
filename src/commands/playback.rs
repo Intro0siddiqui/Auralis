@@ -241,9 +241,17 @@ pub async fn play(
     emit_track_changed(&app, &player).await;
     emit_state_changed(&app, &player).await;
     background_service::push_now_playing(&player).await;
+    background_service::request_notification_permission();
 
     debug!(%track_id, "Playback started");
     Ok(now_playing)
+}
+
+/// Request notification permissions (Android 13+ / API 33+).
+#[tauri::command]
+pub async fn request_notification_permission() -> Result<(), String> {
+    background_service::request_notification_permission();
+    Ok(())
 }
 
 /// Pause current playback.

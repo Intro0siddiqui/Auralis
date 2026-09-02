@@ -210,5 +210,13 @@ export const playerMethods = {
                 if (window.lucide) window.lucide.createIcons();
             }
         }
+    },
+
+    async requestNotificationPermission() {
+        try {
+            await this.invoke('request_notification_permission');
+        } catch (err) {
+            console.warn('request_notification_permission failed:', err);
+        }
     }
 };

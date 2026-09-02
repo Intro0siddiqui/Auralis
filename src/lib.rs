@@ -154,6 +154,7 @@ impl AuralisApp {
                 commands::playback::play_next,
                 commands::playback::remove_from_queue,
                 commands::playback::clear_queue,
+                commands::playback::request_notification_permission,
                 // Download commands
                 commands::downloads::download_audio,
                 commands::downloads::download_playlist,

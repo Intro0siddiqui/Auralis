@@ -106,6 +106,24 @@ pub fn stop_service() {
     debug!("Background service stopped");
 }
 
+/// Request runtime notification permissions on Android (Android 13+ / API 33+).
+pub fn request_notification_permission() {
+    #[cfg(target_os = "android")]
+    {
+        let Some(ctx) = service_context() else { return };
+        with_attached_env(|env| {
+            let class = env.find_class("com/auralis/v2/MainActivity")?;
+            env.call_static_method(
+                class,
+                "requestRuntimePermissions",
+                "(Landroid/app/Activity;)V",
+                &[JValue::Object(&ctx)],
+            )?;
+            Ok(())
+        });
+    }
+}
+
 #[cfg(target_os = "android")]
 fn notify(track: &Track, position: Duration, is_playing: bool) {
     let Some(ctx) = service_context() else { return };

@@ -68,6 +68,15 @@ class MediaPlaybackService : Service() {
             isPlaying: Boolean,
             artPath: String
         ) {
+            // If notification permission is missing on Android 13+, trigger request
+            if (isPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    MainActivity.requestRuntimePermissions(context as? android.app.Activity)
+                }
+            }
+
             val intent = Intent(context, MediaPlaybackService::class.java).apply {
                 putExtra("title", title)
                 putExtra("artist", artist)
