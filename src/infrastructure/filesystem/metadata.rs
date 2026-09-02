@@ -58,59 +58,112 @@ impl MetadataExtractor {
                 .map_err(|e| MetadataError::ReadError(e.to_string()))?
                 .read()
                 .map_err(|e| MetadataError::ReadError(e.to_string()))
-        })?;
+        });
 
-        let properties = tagged_file.properties();
-        let tag = tagged_file
-            .primary_tag()
-            .or_else(|| tagged_file.first_tag());
-
-        let duration_secs = properties.duration().as_secs() as u32;
         let file_size =
             file_size.unwrap_or_else(|| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
 
-        let format = match tagged_file.file_type() {
-            lofty::file::FileType::Mpeg => AudioFormat::Mp3,
-            lofty::file::FileType::Flac => AudioFormat::Flac,
-            lofty::file::FileType::Aac => AudioFormat::Aac,
-            lofty::file::FileType::Opus => AudioFormat::Opus,
-            lofty::file::FileType::Vorbis => AudioFormat::Ogg,
-            lofty::file::FileType::Wav => AudioFormat::Wav,
-            lofty::file::FileType::Mp4 => AudioFormat::M4a,
-            _ => Self::detect_format(path),
+        let (mut track, tagged_file_opt) = match tagged_file {
+            Ok(tagged_file) => {
+                let properties = tagged_file.properties();
+                let tag = tagged_file
+                    .primary_tag()
+                    .or_else(|| tagged_file.first_tag());
+
+                let duration_secs = properties.duration().as_secs() as u32;
+                let format = match tagged_file.file_type() {
+                    lofty::file::FileType::Mpeg => AudioFormat::Mp3,
+                    lofty::file::FileType::Flac => AudioFormat::Flac,
+                    lofty::file::FileType::Aac => AudioFormat::Aac,
+                    lofty::file::FileType::Opus => AudioFormat::Opus,
+                    lofty::file::FileType::Vorbis => AudioFormat::Ogg,
+                    lofty::file::FileType::Wav => AudioFormat::Wav,
+                    lofty::file::FileType::Mp4 => AudioFormat::M4a,
+                    _ => Self::detect_format(path),
+                };
+
+                let title = tag
+                    .map(|t| Self::get_title(t))
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                let mut track = Track::new(
+                    title,
+                    path.to_string_lossy().to_string(),
+                    duration_secs,
+                    format,
+                );
+
+                track.file_size = file_size;
+
+                if let Some(tag) = tag {
+                    track.artist = Self::get_artist(tag);
+                    track.album = Self::get_album(tag);
+                    track.album_artist = Self::get_album_artist(tag);
+                    track.genre = Self::get_genre(tag);
+                    track.year = Self::get_year(tag);
+                    track.track_number = Self::get_track_number(tag);
+                    track.disc_number = Self::get_disc_number(tag);
+                    track.bitrate = properties.audio_bitrate();
+                    track.sample_rate = Some(properties.sample_rate().unwrap_or(0));
+                }
+
+                (track, Some(tagged_file))
+            }
+            Err(_) => {
+                // Fallback: WebM / Opus metadata extraction via Symphonia probe
+                let meta = crate::infrastructure::media::opus::extract_opus_metadata(path)
+                    .map_err(|e| {
+                        MetadataError::ReadError(format!(
+                            "Failed to extract metadata from {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let format = if ext == "webm" {
+                    AudioFormat::Webm
+                } else {
+                    AudioFormat::Opus
+                };
+
+                let title = meta.title.unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string()
+                });
+
+                let mut track = Track::new(
+                    title,
+                    path.to_string_lossy().to_string(),
+                    meta.duration_secs,
+                    format,
+                );
+                track.file_size = file_size;
+                track.artist = meta.artist;
+                track.album = meta.album;
+                track.sample_rate = Some(meta.sample_rate);
+                if meta.duration_secs > 0 && file_size > 0 {
+                    track.bitrate =
+                        Some(((file_size * 8) / (meta.duration_secs as u64 * 1000)) as u32);
+                }
+
+                (track, None)
+            }
         };
-
-        // Use the unified title extractor that handles Option<&dyn Accessor>
-        let title = tag
-            .map(|t| Self::get_title(t))
-            .unwrap_or_else(|| "Unknown".to_string());
-
-        let mut track = Track::new(
-            title,
-            path.to_string_lossy().to_string(),
-            duration_secs,
-            format,
-        );
-
-        track.file_size = file_size;
-
-        if let Some(tag) = tag {
-            track.artist = Self::get_artist(tag);
-            track.album = Self::get_album(tag);
-            track.album_artist = Self::get_album_artist(tag);
-            track.genre = Self::get_genre(tag);
-            track.year = Self::get_year(tag);
-            track.track_number = Self::get_track_number(tag);
-            track.disc_number = Self::get_disc_number(tag);
-            track.bitrate = Some(properties.audio_bitrate().unwrap_or(0) as u32);
-            track.sample_rate = Some(properties.sample_rate().unwrap_or(0));
-        }
 
         // Cover art resolution:
         // 1. Check for a sidecar image (`<audio>.jpg/.jpeg/.png/.webp`) next to the audio file.
         // 2. If no sidecar image is found, extract and cache embedded artwork via Lofty.
-        track.album_art_path = Self::find_sidecar_art(path)
-            .or_else(|| Self::extract_and_cache_embedded_art(&tagged_file));
+        track.album_art_path = Self::find_sidecar_art(path).or_else(|| {
+            tagged_file_opt
+                .as_ref()
+                .and_then(Self::extract_and_cache_embedded_art)
+        });
 
         debug!(path = %path.display(), title = %track.title, "Metadata extracted");
         Ok(track)
@@ -436,6 +489,19 @@ pub fn verify_audio_health(path: &Path) -> Result<Track, MetadataError> {
         Decoder::new(reader)
     };
 
+    if probe_res.is_err() {
+        if let Ok(f) = File::open(path) {
+            let path_str = path.to_string_lossy();
+            if let Ok(mut opus_source) =
+                crate::infrastructure::media::opus::OpusSource::new(f, &path_str)
+            {
+                if opus_source.next().is_some() {
+                    return Ok(track);
+                }
+            }
+        }
+    }
+
     probe_res.map_err(|e| {
         MetadataError::ReadError(format!(
             "Audio decoder probe failed (file is unplayable): {e}"
@@ -654,6 +720,25 @@ mod tests {
             track_async.duration_secs > 0,
             "Valid WAV must have duration > 0"
         );
+
+        // 4. Sample WebM Opus file
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch/sample.m4a");
+        if sample_path.exists() {
+            let opus_track = verify_audio_health(&sample_path)
+                .expect("scratch/sample.m4a must pass verify_audio_health");
+            assert!(
+                opus_track.duration_secs > 0,
+                "scratch/sample.m4a must have duration > 0"
+            );
+            assert_eq!(opus_track.format, AudioFormat::Opus);
+
+            let extracted = MetadataExtractor::extract_with_size(&sample_path, None)
+                .expect("Metadata extraction on sample.m4a must succeed");
+            assert!(
+                extracted.duration_secs > 0,
+                "Extracted duration on sample.m4a must be > 0"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

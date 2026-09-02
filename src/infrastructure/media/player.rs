@@ -5,11 +5,13 @@
 use rodio::{mixer::Mixer, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
+use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use super::opus::OpusSource;
 use crate::domain::models::{RepeatMode, Track};
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand::RngExt;
@@ -743,19 +745,89 @@ impl AudioPlayer {
     }
 }
 
-/// Helper to construct a `rodio::Decoder` with extension hinting and fallback.
-fn create_decoder(mut file: File, path: &str) -> Result<Decoder<BufReader<File>>, PlayerError> {
+/// Unified audio source supporting standard Rodio decoders and Opus/WebM decoders.
+pub enum DecodedAudioSource {
+    Rodio(Decoder<BufReader<File>>),
+    Opus(Box<OpusSource>),
+}
+
+impl Iterator for DecodedAudioSource {
+    type Item = f32;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Rodio(s) => s.next(),
+            Self::Opus(s) => s.next(),
+        }
+    }
+}
+
+impl Source for DecodedAudioSource {
+    #[inline]
+    fn current_span_len(&self) -> Option<usize> {
+        match self {
+            Self::Rodio(s) => s.current_span_len(),
+            Self::Opus(s) => s.current_span_len(),
+        }
+    }
+
+    #[inline]
+    fn channels(&self) -> NonZeroU16 {
+        match self {
+            Self::Rodio(s) => s.channels(),
+            Self::Opus(s) => s.channels(),
+        }
+    }
+
+    #[inline]
+    fn sample_rate(&self) -> NonZeroU32 {
+        match self {
+            Self::Rodio(s) => s.sample_rate(),
+            Self::Opus(s) => s.sample_rate(),
+        }
+    }
+
+    #[inline]
+    fn total_duration(&self) -> Option<Duration> {
+        match self {
+            Self::Rodio(s) => s.total_duration(),
+            Self::Opus(s) => s.total_duration(),
+        }
+    }
+
+    #[inline]
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        match self {
+            Self::Rodio(s) => s.try_seek(pos),
+            Self::Opus(s) => s.try_seek(pos),
+        }
+    }
+}
+
+/// Helper to construct an audio decoder with extension hinting, Rodio fallback, and native Opus/WebM decoding.
+fn create_decoder(mut file: File, path: &str) -> Result<DecodedAudioSource, PlayerError> {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_lowercase();
 
+    // 1. If extension is explicitly webm or opus, prioritize OpusSource
+    if ext == "webm" || ext == "opus" {
+        if let Ok(cloned_file) = file.try_clone() {
+            if let Ok(opus_src) = OpusSource::new(cloned_file, path) {
+                return Ok(DecodedAudioSource::Opus(Box::new(opus_src)));
+            }
+        }
+    }
+
+    // 2. Try rodio's standard extension-hinted decoder
     if !ext.is_empty() {
         if let Ok(cloned_file) = file.try_clone() {
             let reader = BufReader::with_capacity(64 * 1024, cloned_file);
             match Decoder::builder().with_data(reader).with_hint(&ext).build() {
-                Ok(decoder) => return Ok(decoder),
+                Ok(decoder) => return Ok(DecodedAudioSource::Rodio(decoder)),
                 Err(e) => {
                     warn!(
                         path = %path,
@@ -768,9 +840,23 @@ fn create_decoder(mut file: File, path: &str) -> Result<Decoder<BufReader<File>>
         }
     }
 
+    // 3. Try default rodio Decoder::new
     let _ = file.seek(SeekFrom::Start(0));
-    Decoder::new(BufReader::with_capacity(64 * 1024, file))
-        .map_err(|e| PlayerError::DecodeError(format!("Failed to decode audio file {path}: {e}")))
+    if let Ok(cloned_file) = file.try_clone() {
+        let reader = BufReader::with_capacity(64 * 1024, cloned_file);
+        if let Ok(decoder) = Decoder::new(reader) {
+            return Ok(DecodedAudioSource::Rodio(decoder));
+        }
+    }
+
+    // 4. Fallback: try OpusSource (handles WebM/Opus files, including misnamed .m4a/.mp3)
+    let _ = file.seek(SeekFrom::Start(0));
+    match OpusSource::new(file, path) {
+        Ok(opus_src) => Ok(DecodedAudioSource::Opus(Box::new(opus_src))),
+        Err(e) => Err(PlayerError::DecodeError(format!(
+            "Failed to decode audio file {path}: {e}"
+        ))),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -910,6 +996,18 @@ mod tests {
             dec_corrupt.is_err(),
             "Expected corrupt file to fail decoding"
         );
+
+        // 4. Test real WebM Opus file (scratch/sample.m4a)
+        let sample_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch/sample.m4a");
+        if sample_path.exists() {
+            let file_sample = File::open(&sample_path).unwrap();
+            let dec_sample = create_decoder(file_sample, sample_path.to_str().unwrap());
+            assert!(
+                dec_sample.is_ok(),
+                "Expected create_decoder to succeed on WebM Opus file"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }
