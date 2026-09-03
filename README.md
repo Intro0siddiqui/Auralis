@@ -1,5 +1,9 @@
 # Auralis v2
 
+[![Version](https://img.shields.io/badge/version-2.6.26-6366f1.svg)](Cargo.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](Cargo.toml)
+[![CI/CD](https://github.com/Intro0siddiqui/Auralis/actions/workflows/build.yml/badge.svg)](https://github.com/Intro0siddiqui/Auralis/actions/workflows/build.yml)
+
 A lightweight, offline-first music player with integrated media downloading and P2P synchronization — rewritten from scratch in **Rust + Tauri + HTMX** to replace the original Kotlin/Compose Multiplatform application.
 
 > **Status: Active Development.** Core architecture is in place and most features are implemented (database, audio playback, downloads, playlists, settings, P2P networking). Sync transfers use real libp2p request-response.
@@ -25,9 +29,10 @@ The rewrite trades the JVM's startup cost and Compose's runtime overhead for a t
 
 | Feature | Status | Notes |
 | :--- | :--- | :--- |
-| **Music Library** | Implemented | SQLite-backed; scanner extracts metadata via lofty |
-| **Audio Playback** | Implemented | rodio 0.22 (mp3/mp4/flac/vorbis/wav — vorbis≠opus) with queue, shuffle, repeat, seek, auto-advance watcher, background `MediaPlaybackService` |
-| **Media Downloading** | Implemented | `youtube.js` URL resolution (PO-token `&pot=` unconditional, `403` auto-retry) + `reqwest` streaming to `app_data_dir/downloads/<title>.<ext>`, progress tracking, pause/resume/cancel |
+| **Music Library** | Implemented | SQLite-backed; scanner extracts metadata via lofty + Android native MediaStore scanner with instant OS metadata ingestion |
+| **Audio Playback** | Implemented | rodio 0.22 + Symphonia with target-conditional Opus codec (rusty-opus 64-bit SIMD + pure-Rust 32-bit decoder; mp3/mp4/flac/vorbis/wav/ogg/opus/webm) with queue, shuffle, repeat, seek, auto-advance watcher, background `MediaPlaybackService` |
+| **YouTube Search & Streaming** | Implemented | In-app YouTube song/artist/album search, instant live stream playback with real-time player bar & full-screen UI sync, one-click downloading with format and quality preferences |
+| **Media Downloading** | Implemented | `youtube.js` URL resolution (PO-token `&pot=` unconditional, `403` auto-retry) + `reqwest` streaming to `app_data_dir/downloads/<title>.<ext>`, progress tracking, pause/resume/cancel; Android MediaStore dual-save |
 | **Playlist Management** | Implemented | Full CRUD with SQLite persistence |
 | **P2P Networking** | Implemented | libp2p with mDNS, gossipsub, request-response |
 | **Settings** | Implemented | SQLite-backed load/save |
@@ -78,8 +83,8 @@ auralis-v2/
 │   │   └── services/       # Service implementations
 │   ├── infrastructure/     # External integrations
 │   │   ├── database/       # SQLite + rusqlite
-│   │   ├── filesystem/     # Track scanner + metadata
-│   │   ├── media/          # AudioPlayer (rodio/cpal/oboe) + Downloader (reqwest streaming of resolved URLs)
+│   │   ├── filesystem/     # Track scanner (DesktopScanner + AndroidScanner native MediaStore ingestion) + metadata
+│   │   ├── media/          # AudioPlayer (rodio/cpal/oboe + Opus decoder) + Downloader (reqwest streaming of resolved URLs)
 │   │   └── network.rs      # libp2p: mDNS, gossipsub, request-response
 │   ├── commands/           # Tauri command handlers
 │   │   ├── library.rs
@@ -170,12 +175,47 @@ See [AGENTS.md](AGENTS.md) for detailed implementation guidelines and the roadma
 
 ---
 
+## YouTube Search & Live Audio Streaming
+
+Auralis v2.6.26 brings native YouTube song search and instant live audio streaming:
+
+- **Search & Download inside the Download Tab**: Direct in-app search for tracks, artists, and albums without leaving the application. Results display rich metadata including album art thumbnails, channel names, and durations.
+- **Live Stream Playback**: Listen to tracks immediately via live audio streaming without waiting for downloads to finish:
+  - Real-time player bar integration with play/pause, volume control, and seeking.
+  - Full-screen player (`player-full`) modal synchronization with live duration and position tracking.
+  - System `MediaSession` synchronization for desktop and mobile lockscreen/notification controls.
+- **One-Click Downloading**: Download any search result or pasted URL with a single click. Configure format preferences (`mp3`, `m4a`, `opus`, `flac`, `wav`) and audio quality options (Best, 320kbps, 256kbps, 128kbps) before starting.
+- **PO-Token & Multi-Client Resolution**: Integrated PO-token generation (`WebPoMinter` with `GenerateIT` protobuf) and multi-client fallback rotation (`TV`, `ANDROID_VR`, `IOS`, `ANDROID`) ensuring resilient playback without external Python or `yt-dlp` binaries.
+
+---
+
 ## Media Downloading (Pure-Rust Engine)
 
 Auralis v2 features a **pure-Rust media downloader** with zero mandatory external binaries:
 
 - **YouTube resolution (`youtube.js`, vendored `youtubei.js`)**: Runs in the app's webview and resolves a direct `googlevideo` audio URL using PO-token-aware InnerTube clients (6 clients `TV`/`ANDROID_VR`→`IOS` with `effectiveOrderedClients`/`retryClients` rotation, `&pot=` unconditional via `po_token.js` `GenerateIT` protobuf, `n`/`signatureCipher` decipher), with client-matched headers.
-- **Native Direct Audio Streaming (`reqwest`)**: Streams the resolved URL (and direct HTTPS audio files — `.mp3`, `.flac`, `.m4a`, `.wav`, `.aac`) natively in Rust to `app_data_dir/downloads/` (`sanitize_filename` + UUID dedup, `*.jpg` sidecar, scanned via `AndroidScanner`/`DesktopScanner`) with live byte progress tracking + `403` auto-retry (`downloads.js` `TV→ANDROID+pot→WEB_SAFARI`). On Android **v2.5.11 dual-save** publishes a copy to `Download/Auralis/` via `MediaStore.Downloads` (`IS_PENDING` on API 29+, `MediaScanner` legacy) when `Settings.downloads.use_system_downloads` is enabled (default `true`); library scan stays sandboxed to avoid duplicate entries. No Python, no sidecar.
+- **Native Direct Audio Streaming (`reqwest`)**: Streams the resolved URL (and direct HTTPS audio files — `.mp3`, `.flac`, `.m4a`, `.wav`, `.aac`) natively in Rust to `app_data_dir/downloads/` (`sanitize_filename` + UUID dedup, `*.jpg` sidecar, scanned via `AndroidScanner`/`DesktopScanner`) with live byte progress tracking + `403` auto-retry (`downloads.js` `TV→ANDROID+pot→WEB_SAFARI`). On Android **dual-save** publishes a copy to `Download/Auralis/` via `MediaStore.Downloads` (`IS_PENDING` on API 29+, `MediaScanner` legacy) when `Settings.downloads.use_system_downloads` is enabled (default `true`); library scan stays sandboxed to avoid duplicate entries. No Python, no sidecar.
+
+---
+
+## Native Audio Playback & Opus Engine
+
+Auralis provides low-latency, cross-platform audio playback built on `rodio` and Symphonia:
+
+- **Target-Conditional Opus Codec**:
+  - **64-bit Targets (`aarch64`, `x86_64`)**: SIMD-accelerated Opus decoding via `rusty-opus` with ARM NEON support for ultra-low power consumption.
+  - **32-bit Targets (`armv7`, `i686`)**: Pure-Rust `opus-decoder` fallback guaranteeing portable cross-compilation across all platforms.
+- **Universal Format Support**: Native playback for MP3, M4A/AAC, FLAC, OGG Vorbis, WAV, and WebM/Opus.
+- **Playback Controls**: Full queue management, shuffle, repeat-all, repeat-one, seek, volume normalization, and background playback via an Android foreground `MediaPlaybackService`.
+
+---
+
+## Android MediaStore Native Scanner
+
+Modern Android storage architecture requires efficient indexing:
+
+- **Native MediaStore Ingestion**: Queries Android's `MediaStore.Audio` content provider directly over JNI via `AndroidScanner`, retrieving track metadata, album art, and audio durations instantly without slow filesystem walks.
+- **Scoped Storage Compliance**: Seamlessly handles Android 10+ (API 29 to 36) Scoped Storage restrictions, supporting internal app-sandboxed libraries alongside public `Download/Auralis/` dual-saving.
 
 ---
 

@@ -681,5 +681,49 @@ describe('Format preference scoring (itag 140 m4a rodio compat — opus would De
     });
 });
 
+describe('YouTube Search & Streaming Integration', () => {
+    const ytPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/youtube.js');
+    const dlPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/partials/download.html');
+    const dlsModulePath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/modules/downloads.js');
+    const playerJsPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/player.js');
+
+    it('ui/js/youtube.js search returns normalized structure up to 15 items', () => {
+        const src = fs.readFileSync(ytPath, 'utf8');
+        assert.ok(src.includes('async search(query, opts = {})'), 'search method must exist');
+        assert.ok(src.includes('if (out.length >= 15) break;'), 'search results must be capped at 15');
+        assert.ok(src.includes("url: `https://www.youtube.com/watch?v=${id}`"), 'url must be standard watch url');
+        assert.ok(src.includes('channel:'), 'channel field must be returned');
+        assert.ok(src.includes('duration_text:'), 'duration_text field must be returned');
+        assert.ok(src.includes('thumbnail:'), 'thumbnail field must be returned');
+    });
+
+    it('ui/partials/download.html has sleek neu-glass search card with placeholder and spinner', () => {
+        const html = fs.readFileSync(dlPath, 'utf8');
+        assert.ok(html.includes('id="youtube-search-results"'), 'must have #youtube-search-results container');
+        assert.ok(html.includes('id="youtube-search-spinner"'), 'must have #youtube-search-spinner');
+        assert.ok(html.includes('Search YouTube songs, artists, albums…'), 'must have specified placeholder');
+        assert.ok(html.includes('card neu-glass'), 'must have card neu-glass glassmorphic styling');
+        assert.ok(html.includes('data-lucide="search"'), 'must have search icon');
+    });
+
+    it('ui/js/modules/downloads.js provides streamYouTubeSearchResult and downloadSearchResult', () => {
+        assert.equal(typeof downloadMethods.streamYouTubeSearchResult, 'function', 'streamYouTubeSearchResult must be a function');
+        assert.equal(typeof downloadMethods.downloadSearchResult, 'function', 'downloadSearchResult must be a function');
+        const src = fs.readFileSync(dlsModulePath, 'utf8');
+        assert.ok(src.includes('.track-row.neu-glass') || src.includes('track-row neu-glass'), 'must render track-row neu-glass');
+        assert.ok(src.includes('play-yt-btn'), 'must include play-yt-btn');
+        assert.ok(src.includes('download-yt-btn'), 'must include download-yt-btn');
+        assert.ok(src.includes('streamYouTubeSearchResult'), 'must call streamYouTubeSearchResult');
+        assert.ok(src.includes('new Audio'), 'must instantiate Audio element for streaming');
+    });
+
+    it('ui/js/player.js coordinates smoothly with streaming audio element', () => {
+        const src = fs.readFileSync(playerJsPath, 'utf8');
+        assert.ok(src.includes('window._auralisStreamAudio'), 'player.js must check window._auralisStreamAudio');
+        assert.ok(src.includes('window._auralisStreamAudio.play()') || src.includes('await window._auralisStreamAudio.play()'), 'play must resume streaming audio');
+        assert.ok(src.includes('window._auralisStreamAudio.pause()'), 'pause must pause streaming audio');
+    });
+});
+
 
 

@@ -39,6 +39,14 @@ class PlayerController {
         });
 
         window.Auralis.bridge.on('playback:track', (payload) => {
+            if (window._auralisStreamAudio) {
+                try {
+                    window._auralisStreamAudio.pause();
+                    window._auralisStreamAudio.removeAttribute('src');
+                    window._auralisStreamAudio.load();
+                } catch (_) {}
+                window._auralisStreamAudio = null;
+            }
             const track = (payload && payload.track) ? payload.track : payload;
             if (!track) return;
             this.currentTrack = track;
@@ -552,6 +560,14 @@ class PlayerController {
         this.isPlaying = true;
         this.updatePlayButton();
         this.startTimeTracking();
+        if (window._auralisStreamAudio) {
+            try {
+                await window._auralisStreamAudio.play();
+            } catch (e) {
+                console.warn('Stream resume failed:', e);
+            }
+            return;
+        }
         if (!window.Auralis || !window.Auralis.bridge) return;
         // If we have a current track, resume is correct — it preserves position.
         if (this.currentTrack && this.currentTrack.id) {
@@ -597,6 +613,14 @@ class PlayerController {
         this.isPlaying = false;
         this.updatePlayButton();
         this.stopTimeTracking();
+        if (window._auralisStreamAudio) {
+            try {
+                window._auralisStreamAudio.pause();
+            } catch (e) {
+                console.warn('Stream pause failed:', e);
+            }
+            return;
+        }
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('pause').catch((err) => {
                 const msg = String(err || 'pause failed');
@@ -676,6 +700,14 @@ class PlayerController {
         const pos = Math.floor(this.progress);
         if (!isFinite(pos) || pos < 0) return;
         this.updatePositionState();
+        if (window._auralisStreamAudio) {
+            try {
+                window._auralisStreamAudio.currentTime = pos;
+            } catch (e) {
+                console.warn('Stream seek failed:', e);
+            }
+            return;
+        }
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('seek', { request: { position_secs: pos } }).catch((err)=>{
                 const msg = String(err || 'seek failed');
@@ -722,6 +754,9 @@ class PlayerController {
     }
 
     async hydrateState() {
+        if (window._auralisStreamAudio && !window._auralisStreamAudio.paused) {
+            return;
+        }
         try {
             if (!window.Auralis || !window.Auralis.bridge || typeof window.Auralis.bridge.invoke !== 'function') return;
             let state = null;
@@ -956,6 +991,9 @@ class PlayerController {
     setVolumeLevel(vol) {
         this.volume = Math.max(0, Math.min(1, vol));
         this.updateVolumeUI();
+        if (window._auralisStreamAudio) {
+            window._auralisStreamAudio.volume = this.volume;
+        }
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('set_volume', { volume: this.volume }).catch((err)=>{
                 const msg = String(err || 'volume failed');

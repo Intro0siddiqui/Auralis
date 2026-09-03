@@ -1503,8 +1503,33 @@
     }
     to {
         opacity: 0;
-        transform: translateY(-8px) scale(0.96);
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
     }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.spin {
+    animation: spin 1s linear infinite;
+    display: inline-block;
+}
+
+.track-row.neu-glass .track-row-actions {
+    opacity: 1;
+}
+
+.play-yt-btn {
+    color: var(--accent);
+}
+
+.play-yt-btn:hover {
+    color: var(--accent-hover);
+    background: var(--glass-base);
 }
 
 /* ==========================================================================

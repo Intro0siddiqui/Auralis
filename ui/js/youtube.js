@@ -923,20 +923,95 @@ class YouTubeResolver {
         }
         if (!res) return [];
 
-        const raw = res.videos || res.results || res.contents || [];
+        let raw = [];
+        if (Array.isArray(res.videos)) {
+            raw = res.videos;
+        } else if (Array.isArray(res.results)) {
+            raw = res.results;
+        } else if (Array.isArray(res.contents)) {
+            raw = res.contents;
+        } else if (Array.isArray(res)) {
+            raw = res;
+        }
+
         const out = [];
         for (const r of raw) {
-            const id = r.id || r.videoId;
-            if (!id) continue;
-            const title = typeof r.title === 'string' ? r.title : (r.title?.text || String(r.title || 'Unknown'));
-            const author = typeof r.author === 'string' ? r.author : (r.author?.name || (r.artists && r.artists[0]?.name) || '');
+            if (!r) continue;
+            const id = r.id || r.videoId || r.video_id;
+            if (!id || typeof id !== 'string') continue;
+
+            let title = 'Unknown';
+            if (typeof r.title === 'string' && r.title.trim()) {
+                title = r.title.trim();
+            } else if (typeof r.title?.text === 'string' && r.title.text.trim()) {
+                title = r.title.text.trim();
+            } else if (Array.isArray(r.title?.runs) && r.title.runs[0]?.text) {
+                title = r.title.runs.map(run => run.text || '').join('').trim() || 'Unknown';
+            } else if (r.name && typeof r.name === 'string') {
+                title = r.name.trim();
+            }
+
+            let author = 'YouTube';
+            if (typeof r.author === 'string' && r.author.trim()) {
+                author = r.author.trim();
+            } else if (typeof r.author?.name === 'string' && r.author.name.trim()) {
+                author = r.author.name.trim();
+            } else if (typeof r.author?.text === 'string' && r.author.text.trim()) {
+                author = r.author.text.trim();
+            } else if (Array.isArray(r.artists) && r.artists[0]?.name) {
+                author = r.artists.map(a => a.name || '').filter(Boolean).join(', ').trim() || 'YouTube';
+            } else if (r.channel && typeof r.channel === 'string' && r.channel.trim()) {
+                author = r.channel.trim();
+            } else if (r.channel && typeof r.channel?.name === 'string' && r.channel.name.trim()) {
+                author = r.channel.name.trim();
+            } else if (r.short_byline_text?.text) {
+                author = String(r.short_byline_text.text).trim();
+            } else if (Array.isArray(r.short_byline_text?.runs) && r.short_byline_text.runs[0]?.text) {
+                author = r.short_byline_text.runs.map(rn => rn.text || '').join('').trim() || 'YouTube';
+            }
+
+            let durationSecs = 0;
+            if (typeof r.duration?.seconds === 'number') {
+                durationSecs = r.duration.seconds;
+            } else if (typeof r.duration_seconds === 'number') {
+                durationSecs = r.duration_seconds;
+            } else if (typeof r.duration === 'number') {
+                durationSecs = r.duration;
+            } else if (typeof r.length_seconds === 'number' || typeof r.length_seconds === 'string') {
+                durationSecs = parseInt(r.length_seconds, 10) || 0;
+            }
+
+            let durationText = '';
+            if (typeof r.duration?.text === 'string' && r.duration.text.trim()) {
+                durationText = r.duration.text.trim();
+            } else if (typeof r.duration === 'string' && r.duration.trim()) {
+                durationText = r.duration.trim();
+            }
+
+            if (!durationText && durationSecs > 0) {
+                const m = Math.floor(durationSecs / 60);
+                const s = Math.floor(durationSecs % 60);
+                durationText = `${m}:${s < 10 ? '0' : ''}${s}`;
+            } else if (durationText && (!durationSecs || durationSecs === 0)) {
+                const parts = String(durationText).split(':').map(p => parseInt(p, 10));
+                if (parts.every(p => !isNaN(p))) {
+                    if (parts.length === 2) durationSecs = parts[0] * 60 + parts[1];
+                    else if (parts.length === 3) durationSecs = parts[0] * 3600 + parts[1] * 60 + parts[2];
+                }
+            }
+
+            const thumb = this.pickThumb(r.thumbnails || r.thumbnail || r.best_thumbnail);
+
             out.push({
-                id,
+                id: String(id),
                 title: String(title).trim() || 'Unknown',
+                channel: String(author).trim() || 'YouTube',
+                duration: Number(durationSecs) || 0,
+                duration_text: String(durationText || '').trim(),
+                thumbnail: thumb || null,
                 url: `https://www.youtube.com/watch?v=${id}`,
-                channel: String(author).trim(),
             });
-            if (out.length >= 10) break;
+            if (out.length >= 15) break;
         }
         return out;
     }

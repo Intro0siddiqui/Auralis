@@ -284,8 +284,20 @@ export const downloadMethods = {
         await this.performYouTubeSearch(q.value.trim(), this.getDownloadOptions(form || searchForm));
     },
 
+    _bindSearchBridgeMethods() {
+        if (typeof window !== 'undefined') {
+            window.Auralis = window.Auralis || {};
+            const target = window.Auralis.bridge || this;
+            if (target) {
+                target.streamYouTubeSearchResult = this.streamYouTubeSearchResult.bind(this);
+                target.downloadSearchResult = this.downloadSearchResult.bind(this);
+            }
+        }
+    },
+
     async loadDownloadView() {
         this._ensureDownloadSubmitListeners();
+        this._bindSearchBridgeMethods();
         const form = document.getElementById('download-form');
         if (!form) return;
 
@@ -298,36 +310,258 @@ export const downloadMethods = {
             return;
         }
         const resultsEl = document.getElementById('youtube-search-results');
+        const spinnerEl = document.getElementById('youtube-search-spinner');
+        const searchBtn = document.getElementById('youtube-search-btn');
         if (!resultsEl) return;
+
         this.showToast('Searching YouTube…', 'info');
+        if (spinnerEl) spinnerEl.style.display = 'block';
+        resultsEl.style.display = 'block';
+        resultsEl.innerHTML = `
+            <div class="track-row neu-glass" style="display: flex; align-items: center; justify-content: center; padding: var(--space-6); border-radius: var(--radius-md);">
+                <i data-lucide="loader-2" class="spin" style="width: 24px; height: 24px; color: var(--accent);"></i>
+                <span style="margin-left: var(--space-2); color: var(--text-3); font-size: var(--text-sm);">Searching YouTube for “${this.escapeHtml(query)}”…</span>
+            </div>
+        `;
+        if (window.lucide) window.lucide.createIcons();
+        if (searchBtn) searchBtn.disabled = true;
+
         try {
             const results = await window.AuralisYouTube.search(query, opts);
-            resultsEl.style.display = 'block';
+            if (spinnerEl) spinnerEl.style.display = 'none';
+
             if (!results || results.length === 0) {
                 resultsEl.innerHTML = `
-                    <div class="empty-state" style="padding: var(--space-4);">
+                    <div class="empty-state" style="padding: var(--space-4); text-align: center;">
                         <p style="color: var(--text-3); font-size: var(--text-sm);">No results found for “${this.escapeHtml(query)}”.</p>
                     </div>`;
                 return;
             }
             this._lastSearchResults = results;
-            resultsEl.innerHTML = results.map((r, i) => `
-                <div class="track-row neu-glass" style="cursor: pointer;">
-                    <div class="track-row-info" style="flex: 1; min-width: 0;" onclick="window.Auralis.bridge.downloadSearchResult(${i})">
-                        <div class="track-row-title">${this.escapeHtml(r.title)}</div>
-                        <div class="track-row-subtitle">YouTube${r.channel ? ` • ${this.escapeHtml(r.channel)}` : ''}</div>
+            this._bindSearchBridgeMethods();
+
+            resultsEl.innerHTML = results.map((r, i) => {
+                const durText = r.duration_text || (r.duration ? this.formatTime(r.duration) : '');
+                const durationPill = durText ? `
+                    <div class="track-row-duration" style="margin-right: var(--space-2); flex-shrink: 0;">
+                        <span class="neu-inset" style="padding: 2px 8px; font-size: var(--text-xs); color: var(--text-3); font-variant-numeric: tabular-nums;">${this.escapeHtml(durText)}</span>
                     </div>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); window.Auralis.bridge.downloadSearchResult(${i})">
-                        <i data-lucide="download"></i>
-                    </button>
-                </div>
-            `).join('');
+                ` : '';
+
+                const thumbContent = r.thumbnail
+                    ? `<img src="${this.escapeHtml(r.thumbnail)}" alt="${this.escapeHtml(r.title)}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.onerror=null;this.parentElement.innerHTML='<i data-lucide=\\'music\\'></i>';if(window.lucide)window.lucide.createIcons();">`
+                    : `<i data-lucide="music"></i>`;
+
+                return `
+                    <div class="track-row neu-glass" style="cursor: pointer; display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); margin-bottom: var(--space-2);">
+                        <div class="track-row-artwork" style="width: 44px; height: 44px; border-radius: var(--radius-sm); overflow: hidden; flex-shrink: 0; background: var(--glass-weak); display: flex; align-items: center; justify-content: center;">
+                            ${thumbContent}
+                        </div>
+                        <div class="track-row-info" style="flex: 1; min-width: 0;" onclick="window.Auralis.bridge.streamYouTubeSearchResult(${i})">
+                            <div class="track-row-title" style="font-weight: var(--font-medium); font-size: var(--text-sm); color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(r.title)}</div>
+                            <div class="track-row-subtitle" style="font-size: var(--text-xs); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(r.channel || 'YouTube')}</div>
+                        </div>
+                        ${durationPill}
+                        <div class="track-row-actions" style="display: flex; align-items: center; gap: var(--space-2); opacity: 1; flex-shrink: 0;">
+                            <button class="btn btn-ghost btn-icon play-yt-btn" title="Stream Now" onclick="event.stopPropagation(); window.Auralis.bridge.streamYouTubeSearchResult(${i})">
+                                <i data-lucide="play"></i>
+                            </button>
+                            <button class="btn btn-primary btn-sm neu download-yt-btn" title="Download Audio" onclick="event.stopPropagation(); window.Auralis.bridge.downloadSearchResult(${i})">
+                                <i data-lucide="download"></i> Download
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
             if (window.lucide) window.lucide.createIcons();
         } catch (err) {
+            if (spinnerEl) spinnerEl.style.display = 'none';
             const msg2 = err && err.message ? err.message : String(err);
             console.error('DIAGNOSTIC search_failed', { query, error: msg2, stack: err && err.stack });
             console.error(err);
             this.showToast(`Search failed: ${msg2}`, 'error', 6000);
+            resultsEl.innerHTML = `
+                <div class="empty-state" style="padding: var(--space-4); text-align: center;">
+                    <p style="color: var(--danger, #ff4d4f); font-size: var(--text-sm);">Search failed: ${this.escapeHtml(msg2)}</p>
+                </div>`;
+        } finally {
+            if (searchBtn) searchBtn.disabled = false;
+        }
+    },
+
+    async streamYouTubeSearchResult(index) {
+        const results = this._lastSearchResults || [];
+        const item = results[index];
+        if (!item) return;
+
+        // If this same stream item is already loaded, toggle play/pause
+        if (window._auralisStreamAudio && window.Auralis?.player?.currentTrack?.title === item.title) {
+            if (window._auralisStreamAudio.paused) {
+                try {
+                    await window._auralisStreamAudio.play();
+                } catch (e) {
+                    console.warn('Stream play toggle failed:', e);
+                }
+            } else {
+                window._auralisStreamAudio.pause();
+            }
+            return;
+        }
+
+        const rows = document.querySelectorAll('#youtube-search-results .track-row');
+        const row = rows[index];
+        const playBtn = row ? row.querySelector('.play-yt-btn') : null;
+        if (playBtn) {
+            playBtn.innerHTML = '<i data-lucide="loader-2" class="spin"></i>';
+            if (window.lucide) window.lucide.createIcons();
+        }
+
+        this.showToast(`Connecting stream for “${this.escapeHtml(item.title)}”…`, 'info');
+
+        try {
+            // Pause any backend Rust playback
+            if (window.Auralis && window.Auralis.player) {
+                try { window.Auralis.player.pause(); } catch (_) {}
+            }
+            await this.invoke('pause').catch(() => {});
+
+            // Stop any existing streaming audio element
+            if (window._auralisStreamAudio) {
+                try {
+                    window._auralisStreamAudio.pause();
+                    window._auralisStreamAudio.removeAttribute('src');
+                    window._auralisStreamAudio.load();
+                } catch (_) {}
+                window._auralisStreamAudio = null;
+            }
+
+            const form = document.getElementById('download-form');
+            const opts = this.getDownloadOptions(form);
+            const resolved = await window.AuralisYouTube.resolve(item.url, opts);
+            if (!resolved || resolved.kind !== 'track' || !resolved.stream_url) {
+                throw new Error('Could not resolve playable stream URL');
+            }
+
+            const trackObj = {
+                title: item.title || resolved.title || 'YouTube Audio',
+                artist: item.channel || resolved.author || 'YouTube',
+                duration_secs: item.duration || 0,
+                album_art_path: item.thumbnail || resolved.thumbnail || null,
+            };
+
+            // Set current track and player bar reactive state
+            if (window.Auralis && window.Auralis.player) {
+                window.Auralis.player.currentTrack = trackObj;
+                window.Auralis.player.duration = item.duration || 0;
+                window.Auralis.player.progress = 0;
+                window.Auralis.player.isPlaying = true;
+                window.Auralis.player.updatePlayButton();
+                window.Auralis.player.updateProgressUI();
+                if (typeof window.Auralis.player.updateFullScreenMetadata === 'function') {
+                    window.Auralis.player.updateFullScreenMetadata();
+                }
+                if (typeof window.Auralis.player.updateMediaSessionMetadata === 'function') {
+                    window.Auralis.player.updateMediaSessionMetadata(trackObj);
+                }
+            }
+
+            if (typeof this.updatePlayerBar === 'function') {
+                this.updatePlayerBar(trackObj);
+            } else if (window.Auralis?.bridge?.updatePlayerBar) {
+                window.Auralis.bridge.updatePlayerBar(trackObj);
+            }
+
+            const audio = new Audio();
+            audio.crossOrigin = 'anonymous';
+            audio.src = resolved.stream_url;
+            if (window.Auralis?.player && typeof window.Auralis.player.volume === 'number') {
+                audio.volume = window.Auralis.player.volume;
+            }
+            window._auralisStreamAudio = audio;
+
+            audio.addEventListener('loadedmetadata', () => {
+                if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
+                    trackObj.duration_secs = Math.round(audio.duration);
+                    if (window.Auralis && window.Auralis.player) {
+                        window.Auralis.player.duration = audio.duration;
+                        window.Auralis.player.updateProgressUI();
+                    }
+                }
+            });
+
+            audio.addEventListener('timeupdate', () => {
+                if (window.Auralis && window.Auralis.player && !window.Auralis.player.isSeeking) {
+                    window.Auralis.player.progress = audio.currentTime;
+                    if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
+                        window.Auralis.player.duration = audio.duration;
+                    }
+                    window.Auralis.player.updateProgressUI();
+                    window.Auralis.player.updatePositionState();
+                }
+            });
+
+            audio.addEventListener('play', () => {
+                if (window.Auralis && window.Auralis.player) {
+                    window.Auralis.player.isPlaying = true;
+                    window.Auralis.player.updatePlayButton();
+                }
+                if (playBtn) {
+                    playBtn.innerHTML = '<i data-lucide="pause"></i>';
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            });
+
+            audio.addEventListener('pause', () => {
+                if (window.Auralis && window.Auralis.player) {
+                    window.Auralis.player.isPlaying = false;
+                    window.Auralis.player.updatePlayButton();
+                }
+                if (playBtn) {
+                    playBtn.innerHTML = '<i data-lucide="play"></i>';
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            });
+
+            audio.addEventListener('ended', () => {
+                if (window.Auralis && window.Auralis.player) {
+                    window.Auralis.player.isPlaying = false;
+                    window.Auralis.player.progress = 0;
+                    window.Auralis.player.updatePlayButton();
+                    window.Auralis.player.updateProgressUI();
+                }
+                if (playBtn) {
+                    playBtn.innerHTML = '<i data-lucide="play"></i>';
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            });
+
+            audio.addEventListener('error', (e) => {
+                console.error('Direct audio stream error:', e);
+                this.showToast('Direct stream playback error', 'error', 6000);
+                if (window.Auralis && window.Auralis.player) {
+                    window.Auralis.player.isPlaying = false;
+                    window.Auralis.player.updatePlayButton();
+                }
+                if (playBtn) {
+                    playBtn.innerHTML = '<i data-lucide="play"></i>';
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            });
+
+            await audio.play();
+            this.showToast(`Streaming “${this.escapeHtml(trackObj.title)}”`, 'success');
+        } catch (err) {
+            const m = err && err.message ? err.message : String(err);
+            console.error('DIAGNOSTIC streamYouTubeSearchResult failed', { item, error: m, stack: err && err.stack });
+            this.showToast(`Stream failed: ${m}`, 'error', 6000);
+            if (window.Auralis && window.Auralis.player) {
+                window.Auralis.player.isPlaying = false;
+                window.Auralis.player.updatePlayButton();
+            }
+            if (playBtn) {
+                playBtn.innerHTML = '<i data-lucide="play"></i>';
+                if (window.lucide) window.lucide.createIcons();
+            }
         }
     },
 
@@ -335,6 +569,17 @@ export const downloadMethods = {
         const results = this._lastSearchResults || [];
         const item = results[index];
         if (!item) return;
+
+        const rows = document.querySelectorAll('#youtube-search-results .track-row');
+        const row = rows[index];
+        const dlBtn = row ? row.querySelector('.download-yt-btn') : null;
+        const prevContent = dlBtn ? dlBtn.innerHTML : null;
+        if (dlBtn) {
+            dlBtn.disabled = true;
+            dlBtn.innerHTML = '<i data-lucide="loader-2" class="spin"></i> Starting…';
+            if (window.lucide) window.lucide.createIcons();
+        }
+
         const form = document.getElementById('download-form');
         const opts = this.getDownloadOptions(form);
         this.showToast('Resolving track…', 'info');
@@ -349,6 +594,12 @@ export const downloadMethods = {
             console.error('DIAGNOSTIC downloadSearchResult failed', { item, error: m, stack: err && err.stack });
             console.error(err);
             this.showToast(`Resolve failed: ${m}`, 'error', 6000);
+        } finally {
+            if (dlBtn && prevContent) {
+                dlBtn.disabled = false;
+                dlBtn.innerHTML = prevContent;
+                if (window.lucide) window.lucide.createIcons();
+            }
         }
     },
 
@@ -660,3 +911,13 @@ export const downloadMethods = {
         }
     }
 };
+
+try {
+    if (typeof window !== 'undefined') {
+        window.Auralis = window.Auralis || {};
+        if (window.Auralis.bridge) {
+            window.Auralis.bridge.streamYouTubeSearchResult = downloadMethods.streamYouTubeSearchResult.bind(window.Auralis.bridge);
+            window.Auralis.bridge.downloadSearchResult = downloadMethods.downloadSearchResult.bind(window.Auralis.bridge);
+        }
+    }
+} catch (_) {}
