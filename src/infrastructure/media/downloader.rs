@@ -175,6 +175,37 @@ fn sanitize_filename(name: &str) -> String {
     trimmed
 }
 
+/// Try the Opus/WebM fallback (Symphonia probe with EBML sniffing) for files
+/// lofty/rodio cannot handle — e.g. Opus-in-WebM mislabeled as `.m4a`
+/// (`https://d.uguu.se/jXSTGTDj.m4a`: EBML `1A 45 DF A3`, `google/video-file`,
+/// lofty guesses `Mpeg` and fails, rodio reports "format not recognized").
+/// Returns `Some(duration)` when the Symphonia probe yields a usable duration
+/// within the ±5s expected-duration tolerance.
+fn try_opus_fallback(path: &Path, expected_duration_secs: Option<u32>) -> Option<u32> {
+    let meta = super::opus::extract_opus_metadata(path).ok()?;
+    if meta.duration_secs == 0 {
+        return None;
+    }
+    if let Some(expected) = expected_duration_secs {
+        if expected > 0 && (meta.duration_secs as i64 - expected as i64).abs() > 5 {
+            return None;
+        }
+    }
+    Some(meta.duration_secs)
+}
+
+/// Check whether a file starts with the EBML header (`1A 45 DF A3`)
+/// identifying a WebM/Matroska container (usually Opus audio from YouTube).
+fn is_ebml_container(path: &Path) -> bool {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut header = [0u8; 4];
+    file.read_exact(&mut header).is_ok() && header == [0x1a, 0x45, 0xdf, 0xa3]
+}
+
 /// Validate downloaded audio file integrity using lofty.
 /// Checks that the file is non-empty, contains valid audio headers/properties,
 /// and that decoded duration matches expected duration within ±5s tolerance (if expected is known).
@@ -194,6 +225,16 @@ pub fn validate_audio_file(
         return Err("Staging file is empty (0 bytes)".to_string());
     }
 
+    // Fast path: EBML/WebM container (Opus audio mislabeled as .m4a/.mp3, …).
+    // lofty misdetects these bytes as `Mpeg` and rodio cannot decode Opus at
+    // all, so consult the Symphonia Opus probe first — mirroring
+    // `player.rs::create_decoder` + `metadata.rs::extract_with_size`.
+    if is_ebml_container(path) {
+        if let Some(dur) = try_opus_fallback(path, expected_duration_secs) {
+            return Ok(dur);
+        }
+    }
+
     let mut probe =
         Probe::open(path).map_err(|e| format!("Failed to open file for lofty probe: {e}"))?;
 
@@ -211,9 +252,17 @@ pub fn validate_audio_file(
         }
     }
 
-    let tagged_file = probe
-        .read()
-        .map_err(|e| format!("Corrupt or unreadable audio headers: {e}"))?;
+    let tagged_file = match probe.read() {
+        Ok(tf) => tf,
+        Err(e) => {
+            // lofty cannot parse WebM/Opus (no WebM FileType; EBML bytes guess
+            // as Mpeg) — fall back to the Symphonia Opus probe before failing.
+            if let Some(dur) = try_opus_fallback(path, expected_duration_secs) {
+                return Ok(dur);
+            }
+            return Err(format!("Corrupt or unreadable audio headers: {e}"));
+        }
+    };
 
     let duration_secs = tagged_file.properties().duration().as_secs() as u32;
     if duration_secs == 0 {
@@ -281,6 +330,11 @@ pub fn validate_audio_file(
     };
 
     if let Err(e) = probe_res {
+        // rodio has no Opus decoder (WebM/Opus always fails here) — accept the
+        // file when the native OpusSource probe decodes its metadata.
+        if let Some(dur) = try_opus_fallback(path, expected_duration_secs) {
+            return Ok(dur);
+        }
         return Err(format!("Decoder probe failed for {}: {e}", path.display()));
     }
 
@@ -1307,5 +1361,28 @@ mod tests {
         assert!(res_fail.is_err(), "Expected duration mismatch to fail");
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_validate_audio_file_webm_opus_mislabeled_m4a() {
+        // Regression: Opus-in-WebM mislabeled as `.m4a`
+        // (EBML `1A 45 DF A3`, e.g. https://d.uguu.se/jXSTGTDj.m4a which is
+        // byte-identical to scratch/sample.m4a). lofty guesses `Mpeg` and
+        // rodio reports "format not recognized", so validation must fall back
+        // to the Symphonia Opus probe instead of rejecting the download.
+        let sample_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch/sample.m4a");
+        if !sample_path.exists() {
+            eprintln!("scratch/sample.m4a not found, skipping test");
+            return;
+        }
+        assert!(is_ebml_container(&sample_path));
+        let res = validate_audio_file(&sample_path, None, "m4a", AudioFormat::M4a);
+        assert!(
+            res.is_ok(),
+            "Expected WebM/Opus mislabeled as .m4a to pass validation: {:?}",
+            res
+        );
+        assert!(res.unwrap() > 0, "Duration should be non-zero");
     }
 }

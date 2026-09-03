@@ -440,11 +440,17 @@ export const viewMethods = {
                 });
             }
 
-            const currentTheme = String(settings.appearance?.theme || 'dark').toLowerCase();
+            const currentTheme = String(settings.appearance?.theme || 'system').toLowerCase();
             const themeOptions = settingsView.querySelectorAll('.theme-option[data-theme]');
             themeOptions.forEach((opt) => {
                 opt.classList.toggle('active', opt.dataset.theme === currentTheme);
             });
+            // Keep the live DOM in sync with the persisted value (single
+            // source of truth is SQLite; initTheme applied it at boot, but a
+            // later external change must not leave pixels stale).
+            if (typeof this.applyTheme === 'function') {
+                this.applyTheme(currentTheme);
+            }
 
             if (settingsView.dataset.bound) {
                 if (window.lucide) window.lucide.createIcons();

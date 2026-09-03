@@ -50,7 +50,11 @@ object NativeBridge {
 class MediaPlaybackService : Service() {
 
     companion object {
-        const val CHANNEL_ID = "auralis_playback_channel"
+        // v2 channel id: v1 shipped with IMPORTANCE_LOW on some installs and
+        // Android keeps channel settings sticky across upgrades (create is a
+        // no-op once the channel exists). Bumping the id forces a fresh
+        // IMPORTANCE_DEFAULT channel so notifications are visible again.
+        const val CHANNEL_ID = "auralis_playback_channel_v2"
         const val NOTIFICATION_ID = 101
 
         const val ACTION_PLAY = "com.auralis.v2.action.PLAY"
@@ -171,14 +175,26 @@ class MediaPlaybackService : Service() {
         val art = loadArtBitmap(artPath)
         updateMediaSession(title, artist, durationSecs, positionSecs, isPlaying, art)
         val notification = buildNotification(title, artist, isPlaying, art)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            // Android 14+ (API 34, incl. 16): a background startForegroundService
+            // throws ForegroundServiceStartNotAllowedException when the app has
+            // no visible Activity (e.g. Rust watcher / auto-advance fires while
+            // backgrounded). Fall back to a plain media notification so controls
+            // are still visible instead of nothing at all.
+            try {
+                notificationManager?.notify(NOTIFICATION_ID, notification)
+            } catch (_: Exception) { }
+            return START_NOT_STICKY
         }
         notificationManager?.notify(NOTIFICATION_ID, notification)
         return START_STICKY
@@ -282,6 +298,7 @@ class MediaPlaybackService : Service() {
                 description = "Keeps audio playback active in background"
                 setSound(null, null)
                 enableVibration(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }

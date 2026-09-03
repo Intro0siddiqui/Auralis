@@ -4,6 +4,10 @@
    ========================================================================== */
 
 :root {
+  /* The page handles both schemes itself via [data-theme]; this also tells
+     Android WebViews not to apply algorithmic (force) darkening, which would
+     otherwise re-invert light-theme pixels when the OS is in dark mode. */
+  color-scheme: dark;
   /* ========================================
      Background Colors (Deep Metallic Obsidian)
      ======================================== */
@@ -189,6 +193,9 @@
   --z-overlay: 300;
   --z-full-player: 400;
 
+  /* Borders */
+  --border-subtle: rgba(255, 255, 255, 0.12);
+
   /* Mobile Touch Targets */
   --touch-target: 48px;
 
@@ -205,11 +212,40 @@
 }
 
 /* ==========================================================================
+   EXPLICIT DARK THEME (manual selection always wins over OS preference)
+   ========================================================================== */
+
+:root[data-theme="dark"],
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-0: #020406;
+  --bg-1: #06090e;
+  --bg-2: #0b1017;
+  --bg-3: #121924;
+  --bg-gradient: radial-gradient(ellipse at 50% -15%, #131d2b 0%, #06090e 60%, #010204 100%);
+  --glass-weak: rgba(255, 255, 255, 0.03);
+  --glass-base: rgba(11, 16, 23, 0.72);
+  --glass-strong: rgba(18, 25, 36, 0.88);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-border-strong: rgba(255, 255, 255, 0.18);
+  --border-subtle: rgba(255, 255, 255, 0.12);
+  --text-1: #f8fafc;
+  --text-2: rgba(241, 245, 249, 0.75);
+  --text-3: rgba(241, 245, 249, 0.48);
+  --text-4: rgba(245, 248, 250, 0.42);
+  --accent-hover: #8aeeff;
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.85);
+}
+
+/* ==========================================================================
    LIGHT THEME OVERRIDES
    ========================================================================== */
 
 :root[data-theme="light"],
 [data-theme="light"] {
+  color-scheme: light;
+  --border-subtle: rgba(15, 23, 42, 0.12);
   --bg-0: #f0f4f8;
   --bg-1: #ffffff;
   --bg-2: #e8eef4;
@@ -258,7 +294,9 @@
 }
 
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
+  /* Only when no explicit choice was made (no data-theme in DOM). Manual
+     dark/light always win — this never overrides [data-theme]. */
+  :root:not([data-theme]) {
     --bg-0: #f0f4f8;
     --bg-1: #ffffff;
     --bg-2: #e8eef4;

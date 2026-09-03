@@ -1,227 +1,70 @@
-# 🤖 Auralis Agent Takeover — v2.6.22 Smart Scanner & Playability Gate — ✅ SHIPPED
+# Takeover Guide: Critical Runtime Issues & Solutions
 
-> **Status: COMPLETE — shipped as `ab9f932` on `main`, tag `v2.6.22` (2026-09-01)**
-> Original orchestrator instructions preserved below for audit. Do not re-run without bumping to next version.
-
-> **Instructions for the receiving orchestrator agent**: This document contains everything
-> you need to continue work on the Auralis codebase without any prior context.
-> Follow the workflow described below precisely. Do NOT commit anything until
-> both fixer subagents confirm zero warnings and 48/48 node tests pass (42 base + 3 format-scoring). Then
-> bump to v2.6.22, commit, tag, and push.
+This document outlines four critical runtime bugs in Auralis v2, their real-world symptoms, root causes, and the verified fixes applied to resolve them.
 
 ---
 
-## 1. Repository Context
+## 1. Opus Audio File Playing Silently (No Sound Output)
 
-- **Repo**: `/workspaces/Auralis` (Tauri v2, Rust backend, HTMX frontend)
-- **Current version**: `v2.6.22` (tag `ab9f932` on `main`) — was `v2.6.21` (`fd59043`) at takeover start
-- **AGENTS.md** at the repo root contains all architecture and convention rules — all agents MUST read it before touching code.
-- **`fileopt-todo.md`**: Roadmap for future monolithic file decomposition (do NOT do this now).
-- **CI**: `.github/workflows/build.yml` — the lint job runs `cargo fmt --check` + `cargo clippy --all-targets --all-features -- -D warnings`. This MUST pass or the release is broken.
+### Runtime Symptoms
+- The track loaded into the player bar and full-screen view.
+- The elapsed time and progress bar advanced normally.
+- **No audible sound was emitted from speakers or headphones.**
+- Sample file tested: `scratch/sample.m4a` (downloaded from YouTube / third-party sources).
 
-### Key Files for This Task
+### Root Cause
+1. **Container / Extension Discrepancy**: Hex analysis of the file header revealed EBML magic bytes (`0x1A 0x45 0xDF 0xA3`), which identify a Matroska/WebM container carrying Opus audio. The file had been mislabeled or saved with an `.m4a` extension.
+2. **Blind Extension Dispatch**: In `src/infrastructure/media/player.rs`, `create_decoder` relied on the `.m4a` extension to route the stream directly to Rodio's MP4/AAC decoder. The decoder accepted the stream but yielded empty PCM blocks without returning an error.
+3. **Misleading Demuxer Hint**: When fallback was attempted, `src/infrastructure/media/opus.rs` passed the file's extension (`"m4a"`) to Symphonia's `Hint`. Symphonia attempted an MP4 probe and failed to demux the WebM container.
 
-| File | Purpose |
-|---|---|
-| `src/infrastructure/media/downloader.rs` | Download engine: `validate_audio_file`, staging/atomic rename, retry loop |
-| `src/infrastructure/filesystem/android.rs` | Android scanner: `ingest_buffer` (local import), `scan_sandboxed_dir` |
-| `src/infrastructure/filesystem/desktop.rs` | Desktop scanner: `scan_library_paths_with_progress` |
-| `src/infrastructure/filesystem/metadata.rs` | `MetadataExtractor::extract` — lofty-based metadata + embedded art |
-| `src/commands/library.rs` | `import_audio_file` Tauri command — calls `ingest_buffer` |
-| `ui/js/youtube.js` | YouTube resolver — `resolve()`, client fallback, PO-token, format selection |
-| `Cargo.toml` | Version (bump to `2.6.22`) |
-| `tauri.conf.json` | Version (bump to `2.6.22`) |
-| `package.json` | Version (bump to `2.6.22`) |
-| `AGENTS.md` | Update version references to `v2.6.22` |
+### The Fix
+- **EBML Header Sniffing**: In `create_decoder` (`src/infrastructure/media/player.rs`), inspect the first 4 bytes of the file stream before inspecting extensions. If the header matches `b"\x1a\x45\xdf\xa3"`, immediately bypass MP4 and instantiate an `OpusSource`.
+- **Enforced Container Hint**: In both `OpusSource::new` and `extract_opus_metadata` (`src/infrastructure/media/opus.rs`), detect EBML magic bytes and force `hint.with_extension("webm")`. This ensures Symphonia's WebM demuxer parses the container and delegates to the native Opus sample decoder.
 
 ---
 
-## 2. What Needs to Be Built — The Problem
+## 2. Android Playback Notification Not Displaying
 
-Files downloaded from YouTube or imported from Android file pickers are silently accepted
-into the library even when:
-1. The `.m4a` moov atom is at the end of the file (non-FastStart layout), causing
-   Symphonia/rodio to throw `Decode error: An IO error occurred while reading, writing,
-   or seeking the stream`.
-2. The file has `duration_secs = 0` due to lofty failing to parse headers.
-3. The file is partially written, truncated, or outright corrupt.
-4. A track appears in "Continue Listening" with `0:00` duration and `"Unknown Artist"`,
-   and crashes playback when tapped.
+### Runtime Symptoms
+- Audio played in the background on Android devices.
+- `POST_NOTIFICATIONS` permission was granted by the user.
+- **No playback notification or media controls appeared in the Android notification shade or lockscreen.**
 
-The fix is a **static playability health check** that gates every file before it enters
-the database or library.
+### Root Cause
+1. **Suppressed Notification Channel**: In `scripts/android/MediaPlaybackService.kt`, `createNotificationChannel` configured the playback channel with `NotificationManager.IMPORTANCE_LOW` and `setShowBadge(false)`. On modern Android (Android 13–16 / API 33–36), `IMPORTANCE_LOW` notifications are treated as ambient/silent notifications and suppressed from the status bar, lockscreen, and heads-up banner.
+2. **Adaptive Icon Rejection**: In `buildNotification`, the small icon fallback used `applicationInfo.icon`. On Android 13+, the status bar small icon (`setSmallIcon`) requires a monochrome alpha-only vector drawable. Passing an adaptive color bitmap icon causes SystemUI to suppress the notification or fail rendering.
 
----
-
-## 3. Exact Implementation Tasks
-
-### 🔧 Task A — Backend Fixer Subagent
-
-**File: `src/infrastructure/media/downloader.rs`**
-
-1. **Strict Duration Gate in `validate_audio_file`** (already exists ~line 171, strengthen it):
-   - If `duration_secs == 0` AND `expected_duration_secs.is_some()` → return error:
-     `"Decoded duration is 0s — file has unreadable atom index tables or is truncated"`.
-   - If `duration_secs == 0` AND no expected duration → validate that `file_size > 10_240`
-     (10 KB minimum) AND `sample_rate > 0` AND `channels > 0` from `AudioProperties`.
-     If any fail → return error.
-   - Do NOT remove the existing ±5s tolerance check for non-zero expected durations.
-
-2. **Downloader `run_stream` reject-on-zero gate** (~line 781 where `validate_audio_file` is called):
-   - If `validate_audio_file` returns `Err(...)`, mark download as `Failed`, delete the
-     `.part` staging file, emit `download:failed` event. Do NOT fall through to atomic rename.
-   - Verify the existing `cleanup_staging_file` helper is called correctly on validation failure.
-
-**File: `src/infrastructure/filesystem/android.rs` — `ingest_buffer` method (~line 75)**
-
-3. **Static playability health check on local import**:
-   - After the file bytes are written to disk, add a **Symphonia dry-run probe**:
-     open the written file, pass it to `rodio::Decoder::builder().with_data(BufReader::new(file)).build()`.
-   - If decoder initialization fails → delete the written file (`tokio::fs::remove_file`)
-     and return `ScannerError::MetadataError(format!("File is unplayable by the audio decoder: {e}"))`.
-     Do NOT insert a shell track into the DB.
-   - If it succeeds → drop the decoder handle (dry-run only) and continue normally.
-
-4. **Scanner skip-on-zero in `scan_sandboxed_dir`** (and desktop `scan_library_paths_with_progress`):
-   - When `MetadataExtractor::extract` returns `Ok(track)` but `track.duration_secs == 0`,
-     try a secondary `Probe::open().guess_file_type().read()` probe.
-   - If guessed probe also returns 0 duration → log warning, skip file entirely (no DB insert),
-     increment a `skipped_unplayable` counter in `ScanSummary`.
-   - Include `skipped_unplayable` count in the tracing log and returned `ScanSummary`.
-
-5. **Re-scan repair for existing 0-duration tracks**:
-   - In scanner, when a path already exists in DB (`find_by_path` returns `Some(existing)`)
-     but `existing.duration_secs == 0`, treat it as `needs_rescan` and attempt re-extraction
-     rather than skipping as "already scanned".
-
-**Ensure `cargo check --lib` passes with zero warnings before reporting back.**
+### The Fix
+- **Channel Importance Upgrade**: In `scripts/android/MediaPlaybackService.kt`, set `NotificationManager.IMPORTANCE_DEFAULT` with `lockscreenVisibility = Notification.VISIBILITY_PUBLIC`.
+- **System Vector Fallback**: Use `android.R.drawable.ic_media_play` for `iconRes` in `buildNotification` to guarantee valid monochrome rendering across all Android versions.
 
 ---
 
-### 🔧 Task B — Frontend & Format Fixer Subagent
+## 3. "Scan Storage" Button Inactive on Android
 
-**File: `ui/js/youtube.js`**
+### Runtime Symptoms
+- Tapping the "Scan Storage" button in the Library view did nothing on Android.
+- No folder picker was displayed, and local device tracks were not indexed.
 
-1. **Format preference scoring** in `resolve()` where the winning format is selected:
+### Root Cause
+- **Unsupported Attribute in Mobile WebViews**: In `ui/js/modules/library.js`, `triggerFolderScan()` triggered a click on `<input type="file" webkitdirectory directory multiple>`. While desktop Chromium supports `webkitdirectory`, Android WebViews completely ignore directory-selection attributes on DOM file inputs.
 
-```js
-function scoreFormat(fmt) {
-  const mime = (fmt.mimeType || '').toLowerCase();
-  // itag 140 = standard M4A 128kbps, usually FastStart from YouTube CDN
-  if (fmt.itag === 140) return 3;
-  if (mime.includes('mp4') && !mime.includes('video')) return 2;
-  if (mime.includes('m4a')) return 2;
-  return 1;
-}
-```
-
-   Sort candidate formats by `scoreFormat` descending before picking the winner.
-   **⚠️ IMPORTANT**: Check `Cargo.toml` first — rodio `0.22.2` in this project does NOT
-   have the `opus` feature declared. Do NOT prefer WebM/Opus — it will cause `DecodeError`
-   on rodio. Only apply itag 140 / m4a progressive preference.
-
-2. **Error propagation to UI (`ui/js/modules/downloads.js`)**:
-   - Ensure `download:failed` events (not just `download:completed`) surface the full error
-     string including `"unplayable"` / `"0s duration"` text in the failed download row.
-   - Check `updateDownloadProgressUI` — confirm `event.payload.error` is surfaced correctly.
-
-3. **Test requirement**: `node --test scripts/tests/youtube_resolver.test.js` must remain
-   42/42 pass (now 48/48 after scoring tests). If format scoring is added, add a test asserting
-   `scoreFormat({itag:140, mimeType:'audio/mp4'}) > scoreFormat({itag:251, mimeType:'audio/webm'})`.
-
-**Ensure all node tests pass before reporting back. — DONE: 48/48 pass**
+### The Fix
+- **Mobile-Aware Storage Discovery**: In `ui/js/modules/library.js`, detect mobile environments and call `scanLibrary()` directly. On Android, this triggers native `MediaStore` querying to discover all audio files on public storage (`Music/`, `Download/`, SD cards) without requiring manual folder picking.
+- **Picker Fallback**: Provide an automated fallback to the multi-file audio input (`global-audio-import-input`) if explicit user selection is required.
 
 ---
 
-### 🔎 Task C — Verification Investigator Subagent
+## 4. Theme Button Overridden by System Dark/Light Mode
 
-After both fixer subagents report completion, run:
+### Runtime Symptoms
+- Switching themes (Dark / Light / System) in Settings failed to take effect, or the UI snapped back to the device's system appearance.
+- Manual Light or Dark selections were ignored when the operating system was set to the opposite mode.
 
-```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo check --all-targets
-node --test scripts/tests/youtube_resolver.test.js
-git status -s
-```
+### Root Cause
+1. **Malformed CSS Syntax**: In `ui/styles/tokens.css`, orphaned closing braces `}` and duplicate un-scoped variable definitions at the end of the file corrupted stylesheet parsing in the browser engine.
+2. **Media Query Specificity**: `@media (prefers-color-scheme: light)` rules were overriding `:root[data-theme="dark"]` when the operating system was set to light theme.
 
-Report back PASS or FAIL with full output. Do NOT modify any files.
-
----
-
-## 4. Release Steps (Orchestrator Does This After Verification PASS)
-
-1. **Bump version to `2.6.22`** in:
-   - `Cargo.toml` line 3: `version = "2.6.22"`
-   - `tauri.conf.json` line 4: `"version": "2.6.22"`
-   - `package.json` line 3: `"version": "2.6.22"`
-   - `AGENTS.md`: update all `v2.6.21` / `2.6.21` references to `v2.6.22` / `2.6.22`
-
-2. **Update Cargo.lock**:
-   ```bash
-   cargo check --lib
-   ```
-
-3. **Commit, tag, push**:
-   ```bash
-   git add -A
-   git commit -m "fix(scanner,downloader,frontend): static playability health check, reject 0-duration and corrupt audio on import and download"
-   git tag v2.6.22
-   git push origin main
-   git push origin v2.6.22
-   ```
-
-4. **Verify CI** with `gh run list -L 3` — both `main` and `v2.6.22` builds must show ✓.
-
----
-
-## 5. Subagent Dispatch Instructions
-
-Spawn **Subagents 1 and 2 in parallel**, then spawn Subagent 3 after both report done.
-
-### Subagent 1 — Backend Scanner & Downloader Health Check Engineer
-- **Task**: Implement all of Task A (Section 3) above.
-- **Primary files**: `src/infrastructure/media/downloader.rs`,
-  `src/infrastructure/filesystem/android.rs`,
-  `src/infrastructure/filesystem/desktop.rs`
-- **Constraint**: `cargo check --lib` must pass with zero warnings.
-- **Must read**: `/workspaces/Auralis/AGENTS.md` before any changes.
-
-### Subagent 2 — Frontend Format Scoring & Error UI Specialist
-- **Task**: Implement all of Task B (Section 3) above.
-- **Primary files**: `ui/js/youtube.js`, `ui/js/modules/downloads.js`,
-  `scripts/tests/youtube_resolver.test.js`
-- **Constraint**: 42/42 node tests pass.
-- **Must read**: `/workspaces/Auralis/AGENTS.md` and check `Cargo.toml` rodio features
-  before touching format preferences.
-
-### Subagent 3 — Release Verification Investigator
-- **Task**: Run Task C verification suite (Section 3). Read-only.
-- **Start only after Subagents 1 AND 2 both report success.**
-
----
-
-## 6. Non-Negotiable Conventions
-
-- **No `unwrap()`/`panic!()` in production code** — use `Result`/`Option` + `tracing`.
-- **All Tauri commands return `Result<T, String>`** on the wire.
-- **`cargo fmt` must be clean before any commit** — CI fails on format errors.
-- **Clippy is `-D warnings`** — `sort_by` vs `sort_by_key` killed v2.6.21's lint. Be careful.
-- **Do not touch `fileopt-todo.md`** — it is a tracked roadmap for a future session.
-- **Do not bump versions** — the orchestrator does that only after verification passes.
-
----
-
-## 7. Shipped — v2.6.22 Completion Log (2026-09-01)
-
-| Check | Result |
-|-------|--------|
-| `cargo fmt --check` | PASS |
-| `cargo clippy --all-targets --all-features -- -D warnings` | PASS (0 warnings, 12.46s) |
-| `cargo check --all-targets` | PASS |
-| `node --test youtube_resolver.test.js` | 48/48 PASS (12 suites) |
-| Commit | `ab9f932` — `fix(scanner,downloader,frontend): static playability health check...` |
-| Tag | `v2.6.22` pushed to `origin` |
-| CI | `main` + `v2.6.22` both queued (`gh run list` 33551895253 / 33551899212) |
-
-**Next takeover:** bump base to `v2.6.22` and create new `takeover.md` for `v2.6.23`. Do not reuse this file's version numbers.
+### The Fix
+- **Excise Corrupted Syntax**: Removed all orphaned braces and duplicate rules at the end of `ui/styles/tokens.css`.
+- **Explicit Theme Precedence**: Structured theme rules so that `:root[data-theme="dark"]` and `:root[data-theme="light"]` take absolute precedence over `@media (prefers-color-scheme)` when manually configured by the user.
