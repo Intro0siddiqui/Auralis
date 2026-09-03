@@ -813,8 +813,13 @@ fn create_decoder(mut file: File, path: &str) -> Result<DecodedAudioSource, Play
         .unwrap_or_default()
         .to_lowercase();
 
-    // 1. If extension is explicitly webm or opus, prioritize OpusSource
-    if ext == "webm" || ext == "opus" {
+    // 1. Sniff first 4 bytes for EBML container (WebM/Matroska containing Opus)
+    let mut header = [0u8; 4];
+    use std::io::Read;
+    let is_ebml = file.read(&mut header).unwrap_or(0) == 4 && &header == b"\x1a\x45\xdf\xa3";
+    let _ = file.seek(SeekFrom::Start(0));
+
+    if is_ebml || ext == "webm" || ext == "opus" {
         if let Ok(cloned_file) = file.try_clone() {
             if let Ok(opus_src) = OpusSource::new(cloned_file, path) {
                 return Ok(DecodedAudioSource::Opus(Box::new(opus_src)));

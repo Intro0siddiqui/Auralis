@@ -8,6 +8,7 @@
 use rodio::source::SeekError;
 use rodio::Source;
 use std::fs::File;
+use std::io::SeekFrom;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::path::Path;
 use std::time::Duration;
@@ -115,13 +116,21 @@ impl OpusSource {
     }
 
     /// Create a new OpusSource from a seekable reader and file path hint.
-    pub fn new<R: MediaSource + 'static>(reader: R, path: &str) -> Result<Self, String> {
-        let mss = MediaSourceStream::new(Box::new(reader), Default::default());
+    pub fn new<R: MediaSource + 'static>(mut reader: R, path: &str) -> Result<Self, String> {
         let mut hint = Hint::new();
 
-        if let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) {
+        // Sniff EBML container header (0x1A 0x45 0xDF 0xA3) for WebM/Matroska
+        let mut header = [0u8; 4];
+        let is_ebml = reader.read(&mut header).unwrap_or(0) == 4 && &header == b"\x1a\x45\xdf\xa3";
+        let _ = reader.seek(SeekFrom::Start(0));
+
+        if is_ebml {
+            hint.with_extension("webm");
+        } else if let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
         }
+
+        let mss = MediaSourceStream::new(Box::new(reader), Default::default());
 
         let format_opts = FormatOptions {
             enable_gapless: true,
@@ -325,12 +334,20 @@ pub struct OpusMetadata {
 
 /// Extract metadata from a WebM / Matroska or Opus audio file using Symphonia probe.
 pub fn extract_opus_metadata(path: &Path) -> Result<OpusMetadata, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
+    let mut header = [0u8; 4];
+    use std::io::{Read, Seek, SeekFrom};
+    let is_ebml = file.read(&mut header).unwrap_or(0) == 4 && &header == b"\x1a\x45\xdf\xa3";
+    let _ = file.seek(SeekFrom::Start(0));
+
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if is_ebml {
+        hint.with_extension("webm");
+    } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
+
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut probed = symphonia::default::get_probe()
         .format(

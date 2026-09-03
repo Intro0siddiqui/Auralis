@@ -1,6 +1,6 @@
 # Auralis v2
 
-[![Version](https://img.shields.io/badge/version-2.6.26-6366f1.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-2.6.27-6366f1.svg)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](Cargo.toml)
 [![CI/CD](https://github.com/Intro0siddiqui/Auralis/actions/workflows/build.yml/badge.svg)](https://github.com/Intro0siddiqui/Auralis/actions/workflows/build.yml)
 

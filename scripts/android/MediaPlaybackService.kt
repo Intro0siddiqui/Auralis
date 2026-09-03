@@ -64,12 +64,11 @@ class MediaPlaybackService : Service() {
                 val channel = NotificationChannel(
                     CHANNEL_ID,
                     "Audio Playback",
-                    NotificationManager.IMPORTANCE_LOW
+                    NotificationManager.IMPORTANCE_DEFAULT
                 ).apply {
                     description = "Keeps audio playback active in background"
                     setSound(null, null)
                     enableVibration(false)
-                    setShowBadge(false)
                     lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 }
                 context.getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
@@ -407,7 +406,10 @@ class MediaPlaybackService : Service() {
             Notification.Builder(this)
         }
 
-        val iconRes = if (applicationInfo.icon != 0) applicationInfo.icon else android.R.drawable.ic_media_play
+        // Android requires a monochrome alpha-only icon for the status bar smallIcon.
+        // Using applicationInfo.icon can cause Android 13+ SystemUI to suppress or crash notifications
+        // when the app uses adaptive color bitmap icons.
+        val iconRes = android.R.drawable.ic_media_play
 
         val playPause = if (isPlaying) {
             Notification.Action.Builder(

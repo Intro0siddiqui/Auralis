@@ -71,15 +71,30 @@ export const libraryMethods = {
 
     async triggerFolderScan() {
         this.appendScanLog('📂 Requesting music storage scan...');
-        // On mobile: DOM file input is the only reliable path
-        this.ensureFileInput();
-        const input = document.getElementById('global-folder-scan-input') || document.getElementById('global-audio-import-input');
-        if (input) {
-            input.value = '';
-            input.click();
+
+        // Check if running on Android/mobile WebView
+        const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || Boolean(window.__TAURI_METADATA__ && window.__TAURI_METADATA__.__currentWindow && !window.__TAURI_METADATA__.__currentWindow.label);
+
+        if (isMobile) {
+            // On mobile/Android:
+            // 1. Run the system MediaStore & sandboxed storage scan directly to find all songs on device
+            await this.scanLibrary();
+
+            // 2. Also offer file picker if user wanted manual folder/file selection
+            this.ensureFileInput();
+            const folderInput = document.getElementById('global-folder-scan-input');
+            if (folderInput) {
+                try {
+                    folderInput.value = '';
+                    folderInput.click();
+                } catch (_) {
+                    this.triggerAudioImport();
+                }
+            }
             return;
         }
-        // Desktop-only: native folder dialog
+
+        // Desktop: native folder dialog
         try {
             const summary = await this.invoke('pick_folder_and_scan');
             if (summary !== undefined && summary !== null) {
@@ -94,6 +109,8 @@ export const libraryMethods = {
             }
         } catch (err) {
             console.warn('pick_folder_and_scan error:', err);
+            // Fallback to scanLibrary if dialog not supported
+            await this.scanLibrary();
         }
     },
 
