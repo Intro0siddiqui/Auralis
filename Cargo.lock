@@ -290,7 +290,7 @@ dependencies = [
  "libp2p",
  "lofty",
  "ndk-context",
- "opus-rs",
+ "opus-decoder",
  "qrcode",
  "rand 0.10.2",
  "reqwest 0.12.28",
@@ -3812,10 +3812,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
-name = "opus-rs"
-version = "0.1.32"
+name = "opus-decoder"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f18e50e3ad1d816434f675150eca1b4c669e49cac7b685f733a88127cd75551"
+checksum = "15ae32c275dabb0cd2c863460bf349e9abc3568ba2abf0f9eb7b7d2edeeed07e"
+dependencies = [
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "os_pipe"

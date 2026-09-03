@@ -3,7 +3,7 @@
 //! Provides demuxing for WebM/Matroska and Ogg containers via Symphonia,
 //! with high-performance pure-Rust Opus sample decoding:
 //! - On 64-bit architectures (`aarch64`, `x86_64`): uses `rusty-opus` with AVX2 & ARM64 NEON SIMD kernels.
-//! - On 32-bit architectures (`armv7`, `i686`): uses `opus-rs` for clean non-64-bit SIMD compatibility.
+//! - On 32-bit architectures (`armv7`, `i686`): uses `opus-decoder` for clean non-64-bit SIMD compatibility.
 
 use rodio::source::SeekError;
 use rodio::Source;
@@ -18,12 +18,15 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tracing::{debug, warn};
 
-/// Decoder engine abstraction selecting `rusty-opus` on 64-bit and `opus-rs` on 32-bit.
+/// Decoder engine abstraction selecting `rusty-opus` on 64-bit and `opus-decoder` on 32-bit.
 pub enum OpusDecoderEngine {
     #[cfg(target_pointer_width = "64")]
     RustyOpus(rusty_opus::OpusDecoder),
     #[cfg(target_pointer_width = "32")]
-    OpusRs(opus_rs::OpusDecoder),
+    OpusDecoder {
+        decoder: opus_decoder::OpusDecoder,
+        i16_scratch: Vec<i16>,
+    },
 }
 
 impl OpusDecoderEngine {
@@ -37,9 +40,12 @@ impl OpusDecoderEngine {
 
         #[cfg(target_pointer_width = "32")]
         {
-            opus_rs::OpusDecoder::new(sample_rate as i32, channels as usize)
-                .map(OpusDecoderEngine::OpusRs)
-                .map_err(|e| format!("opus-rs error: {e}"))
+            opus_decoder::OpusDecoder::new(sample_rate, channels as usize)
+                .map(|decoder| OpusDecoderEngine::OpusDecoder {
+                    decoder,
+                    i16_scratch: vec![0i16; 5760 * channels as usize],
+                })
+                .map_err(|e| format!("opus-decoder error: {e:?}"))
         }
     }
 
@@ -57,9 +63,25 @@ impl OpusDecoderEngine {
                 .decode(data, max_samples_per_channel, out)
                 .map_err(|e| format!("rusty-opus decode error: {e}")),
             #[cfg(target_pointer_width = "32")]
-            OpusDecoderEngine::OpusRs(dec) => dec
-                .decode(data, max_samples_per_channel, out)
-                .map_err(|e| format!("opus-rs decode error: {e}")),
+            OpusDecoderEngine::OpusDecoder {
+                decoder,
+                i16_scratch,
+            } => {
+                let needed = max_samples_per_channel * decoder.channels();
+                if i16_scratch.len() < needed {
+                    i16_scratch.resize(needed, 0);
+                }
+                match decoder.decode(data, i16_scratch, false) {
+                    Ok(samples_per_ch) => {
+                        let total = samples_per_ch * decoder.channels();
+                        for (i, &s) in i16_scratch[..total].iter().enumerate() {
+                            out[i] = s as f32 / 32768.0;
+                        }
+                        Ok(samples_per_ch)
+                    }
+                    Err(e) => Err(format!("opus-decoder decode error: {e:?}")),
+                }
+            }
         }
     }
 }
