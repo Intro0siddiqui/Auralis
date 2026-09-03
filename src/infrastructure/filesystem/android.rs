@@ -528,21 +528,57 @@ impl AndroidScanner {
         );
 
         for (idx, raw) in media_store_tracks.into_iter().enumerate() {
-            let path_buf = PathBuf::from(&raw.path);
-            let path_str = raw.path.clone();
+            let path_str = raw.path.trim().to_string();
+            if path_str.is_empty() {
+                continue;
+            }
+            let path_buf = PathBuf::from(&path_str);
 
             // Skip if path is in sandboxed dirs to avoid double processing
             if sandboxed_dirs.iter().any(|p| path_buf.starts_with(p)) {
                 continue;
             }
 
-            // Strict scope check: only process files within standard Music or Download folders
-            let path_lower = path_str.to_ascii_lowercase();
-            let is_music_or_download = path_lower.contains("/music/")
-                || path_lower.contains("/download/")
-                || path_lower.contains("/downloads/");
-            if !is_music_or_download {
-                continue;
+            let mut duration_secs = (raw.duration_ms / 1000) as u32;
+
+            // If duration is 0, attempt a fallback probe only if file is directly accessible
+            if duration_secs == 0 {
+                let path_for_probe = path_buf.clone();
+                let probe_duration = tokio::task::spawn_blocking(move || {
+                    if !path_for_probe.exists() {
+                        return None;
+                    }
+                    let mut probe = match Probe::open(&path_for_probe) {
+                        Ok(p) => p,
+                        Err(_) => return None,
+                    };
+                    if probe.file_type().is_none() {
+                        match probe.guess_file_type() {
+                            Ok(p) => probe = p,
+                            Err(_) => return None,
+                        }
+                    }
+                    let tagged = match probe.read() {
+                        Ok(tagged) => tagged,
+                        Err(_) => return None,
+                    };
+                    let d = tagged.properties().duration().as_secs() as u32;
+                    if d > 0 {
+                        Some(d)
+                    } else {
+                        None
+                    }
+                })
+                .await
+                .unwrap_or(None);
+
+                if let Some(d) = probe_duration {
+                    duration_secs = d;
+                } else {
+                    warn!(path = %path_str, "Skipping MediaStore audio track with 0s duration or missing stream");
+                    summary.skipped_unplayable += 1;
+                    continue;
+                }
             }
 
             let existing = track_repo
@@ -550,97 +586,84 @@ impl AndroidScanner {
                 .await
                 .map_err(|e| ScannerError::RepositoryError(e.to_string()))?;
 
-            // Try to extract rich lofty metadata if file is directly readable
-            let path_buf_clone = path_buf.clone();
-            let file_readable = tokio::task::spawn_blocking(move || path_buf_clone.exists())
-                .await
-                .unwrap_or(false);
+            let mtime = raw.date_modified.unwrap_or(0);
 
-            let extract_res = if file_readable {
-                let p_clone = path_buf.clone();
-                tokio::task::spawn_blocking(move || MetadataExtractor::extract(&p_clone))
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-            } else {
-                None
-            };
+            // Incremental check: if track exists, duration > 0, and size/mtime match, skip
+            if let Some(existing_track) = existing.as_ref() {
+                let mtime_match = raw.date_modified.is_none() || existing_track.mtime == mtime;
+                if existing_track.duration_secs > 0
+                    && existing_track.file_size == raw.size
+                    && mtime_match
+                {
+                    debug!(path = %path_str, "MediaStore track unchanged, skipping");
+                    let processed = idx + 1;
+                    let percentage = if total_mediastore > 0 {
+                        (processed as f32 / total_mediastore as f32) * 100.0
+                    } else {
+                        100.0
+                    };
+                    if let Some(ref mut cb) = progress_callback {
+                        cb(ScanProgress {
+                            current_file: path_str,
+                            total_files: total_mediastore,
+                            processed_files: processed,
+                            percentage,
+                            tracks_added: summary.tracks_added,
+                            tracks_updated: summary.tracks_updated,
+                            error_count: summary.errors.len(),
+                        });
+                    }
+                    continue;
+                }
+            }
 
             let format = detect_format(&path_buf)
                 .or_else(|| {
                     raw.mime_type.as_deref().and_then(|m| match m {
-                        "audio/mpeg" => Some(AudioFormat::Mp3),
-                        "audio/mp4" | "audio/aac" => Some(AudioFormat::M4a),
-                        "audio/flac" => Some(AudioFormat::Flac),
-                        "audio/ogg" | "audio/opus" => Some(AudioFormat::Ogg),
-                        "audio/wav" => Some(AudioFormat::Wav),
+                        "audio/mpeg" | "audio/mp3" => Some(AudioFormat::Mp3),
+                        "audio/mp4" | "audio/aac" | "audio/m4a" | "audio/x-m4a" => {
+                            Some(AudioFormat::M4a)
+                        }
+                        "audio/flac" | "audio/x-flac" => Some(AudioFormat::Flac),
+                        "audio/ogg" | "audio/opus" | "application/ogg" => Some(AudioFormat::Ogg),
+                        "audio/wav" | "audio/x-wav" | "audio/wave" => Some(AudioFormat::Wav),
                         _ => None,
                     })
                 })
                 .unwrap_or(AudioFormat::Mp3);
 
-            let fallback_needs_secondary =
-                extract_res.as_ref().is_some_and(|t| t.duration_secs == 0);
-            let track = if let Some(mut t) = extract_res.filter(|t| t.duration_secs > 0) {
-                if t.album_art_path.is_none() && raw.art_uri.is_some() {
-                    t.album_art_path = raw.art_uri;
-                }
-                t
+            let title = if !raw.title.trim().is_empty() {
+                raw.title.trim().to_string()
             } else {
-                if fallback_needs_secondary {
-                    let path_for_probe = path_buf.clone();
-                    let secondary_ok = tokio::task::spawn_blocking(move || {
-                        let mut probe = match Probe::open(&path_for_probe) {
-                            Ok(p) => p,
-                            Err(_) => return false,
-                        };
-                        if probe.file_type().is_none() {
-                            match probe.guess_file_type() {
-                                Ok(p) => probe = p,
-                                Err(_) => return false,
-                            }
-                        }
-                        let tagged = match probe.read() {
-                            Ok(tagged) => tagged,
-                            Err(_) => return false,
-                        };
-                        tagged.properties().duration().as_secs() > 0
-                    })
-                    .await
-                    .unwrap_or(false);
-                    if !secondary_ok {
-                        warn!(path = %path_str, "Skipping MediaStore audio track with 0s duration — secondary probe also 0, unplayable");
-                        summary.skipped_unplayable += 1;
-                        continue;
-                    }
-                }
-                let duration_secs = (raw.duration_ms / 1000) as u32;
-                if duration_secs == 0 {
-                    warn!(path = %path_str, "Skipping MediaStore audio track with 0s duration or missing stream");
-                    summary.skipped_unplayable += 1;
-                    continue;
-                }
-                let title = if !raw.title.trim().is_empty() {
-                    raw.title.clone()
-                } else {
-                    path_buf
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "Unknown".to_string())
-                };
-                let mut t = Track::new(title, path_str.clone(), duration_secs, format);
-                t.artist = raw
-                    .artist
-                    .filter(|s| !s.trim().is_empty() && s != "<unknown>");
-                t.album = raw
-                    .album
-                    .filter(|s| !s.trim().is_empty() && s != "<unknown>");
-                t.track_number = raw.track_number;
-                t.year = raw.year;
-                t.file_size = raw.size;
-                t.album_art_path = raw.art_uri.filter(|s| !s.trim().is_empty());
-                t
+                path_buf
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string())
             };
+
+            let mut track = Track::new(title, path_str.clone(), duration_secs, format);
+            track.artist = raw
+                .artist
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "<unknown>")
+                .map(ToString::to_string);
+            track.album = raw
+                .album
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "<unknown>")
+                .map(ToString::to_string);
+            track.track_number = raw.track_number;
+            track.year = raw.year;
+            track.file_size = raw.size;
+            track.mtime = mtime;
+            track.album_art_path = raw
+                .art_uri
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string);
 
             if let Some(existing_track) = existing {
                 let mut updated_track = track;
@@ -702,14 +725,24 @@ pub struct MediaStoreRawTrack {
     pub id: i64,
     pub path: String,
     pub title: String,
+    #[serde(default)]
     pub artist: Option<String>,
+    #[serde(default)]
     pub album: Option<String>,
+    #[serde(default)]
     pub duration_ms: u64,
+    #[serde(default)]
     pub track_number: Option<u32>,
+    #[serde(default)]
     pub year: Option<i32>,
+    #[serde(default)]
     pub size: u64,
+    #[serde(default)]
     pub mime_type: Option<String>,
+    #[serde(default)]
     pub art_uri: Option<String>,
+    #[serde(default)]
+    pub date_modified: Option<i64>,
 }
 
 #[cfg(target_os = "android")]
@@ -1132,5 +1165,65 @@ mod tests {
         assert_eq!(count, 1, "Track must be inserted in repo");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_mediastore_raw_track_deserialization() {
+        let json = r#"[
+            {
+                "id": 101,
+                "path": "/storage/emulated/0/Music/song1.mp3",
+                "title": "Song One",
+                "artist": "Artist One",
+                "album": "Album One",
+                "duration_ms": 210000,
+                "track_number": 1,
+                "year": 2024,
+                "size": 5242880,
+                "mime_type": "audio/mpeg",
+                "art_uri": "content://media/external/audio/albums/5",
+                "date_modified": 1717000000
+            },
+            {
+                "id": 102,
+                "path": "/storage/emulated/0/Download/song2.flac",
+                "title": "Song Two",
+                "artist": null,
+                "album": null,
+                "duration_ms": 180000,
+                "track_number": null,
+                "year": null,
+                "size": 15728640,
+                "mime_type": "audio/flac",
+                "art_uri": ""
+            }
+        ]"#;
+
+        let tracks: Vec<MediaStoreRawTrack> =
+            serde_json::from_str(json).expect("Should deserialize MediaStore tracks JSON");
+
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].id, 101);
+        assert_eq!(tracks[0].title, "Song One");
+        assert_eq!(tracks[0].artist.as_deref(), Some("Artist One"));
+        assert_eq!(tracks[0].album.as_deref(), Some("Album One"));
+        assert_eq!(tracks[0].duration_ms, 210000);
+        assert_eq!(tracks[0].track_number, Some(1));
+        assert_eq!(tracks[0].year, Some(2024));
+        assert_eq!(tracks[0].size, 5242880);
+        assert_eq!(tracks[0].mime_type.as_deref(), Some("audio/mpeg"));
+        assert_eq!(
+            tracks[0].art_uri.as_deref(),
+            Some("content://media/external/audio/albums/5")
+        );
+        assert_eq!(tracks[0].date_modified, Some(1717000000));
+
+        assert_eq!(tracks[1].id, 102);
+        assert_eq!(tracks[1].title, "Song Two");
+        assert_eq!(tracks[1].artist, None);
+        assert_eq!(tracks[1].duration_ms, 180000);
+        assert_eq!(tracks[1].size, 15728640);
+        assert_eq!(tracks[1].mime_type.as_deref(), Some("audio/flac"));
+        assert_eq!(tracks[1].date_modified, None);
     }
 }

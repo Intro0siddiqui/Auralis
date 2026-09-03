@@ -33,14 +33,17 @@ object MediaStoreScanner {
             MediaStore.Audio.Media.YEAR,
             MediaStore.Audio.Media.SIZE,
             MediaStore.Audio.Media.MIME_TYPE,
-            MediaStore.Audio.Media.ALBUM_ID
+            MediaStore.Audio.Media.ALBUM_ID,
+            MediaStore.Audio.Media.DATE_MODIFIED
         )
 
-        // Filter: only audio located in standard Music or Download directories, size > 10 KB
+        // Filter: Music/Podcast/Audiobook, Size > 100KB (102400 bytes), exclude notifications, alarms, ringtones
         val selection = "((${MediaStore.Audio.Media.IS_MUSIC} != 0) OR (${MediaStore.Audio.Media.IS_PODCAST} != 0) OR (${MediaStore.Audio.Media.IS_AUDIOBOOK} != 0)) " +
-                "AND (${MediaStore.Audio.Media.SIZE} > 10240) " +
-                "AND (${MediaStore.Audio.Media.DATA} LIKE '%/Music/%' OR ${MediaStore.Audio.Media.DATA} LIKE '%/Download/%' OR ${MediaStore.Audio.Media.DATA} LIKE '%/Downloads/%')"
-        val sortOrder = "${MediaStore.Audio.Media.DATE_ADDED} DESC"
+                "AND (${MediaStore.Audio.Media.SIZE} > 102400) " +
+                "AND (${MediaStore.Audio.Media.IS_NOTIFICATION} = 0 OR ${MediaStore.Audio.Media.IS_NOTIFICATION} IS NULL) " +
+                "AND (${MediaStore.Audio.Media.IS_ALARM} = 0 OR ${MediaStore.Audio.Media.IS_ALARM} IS NULL) " +
+                "AND (${MediaStore.Audio.Media.IS_RINGTONE} = 0 OR ${MediaStore.Audio.Media.IS_RINGTONE} IS NULL)"
+        val sortOrder = "${MediaStore.Audio.Media.DATE_MODIFIED} DESC"
 
         try {
             resolver.query(collection, projection, selection, null, sortOrder)?.use { cursor ->
@@ -55,6 +58,7 @@ object MediaStoreScanner {
                 val sizeCol = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE)
                 val mimeCol = cursor.getColumnIndex(MediaStore.Audio.Media.MIME_TYPE)
                 val albumIdCol = cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM_ID)
+                val dateModifiedCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
 
                 while (cursor.moveToNext()) {
                     val id = if (idCol != -1) cursor.getLong(idCol) else 0L
@@ -68,24 +72,32 @@ object MediaStoreScanner {
                     val size = if (sizeCol != -1) cursor.getLong(sizeCol) else 0L
                     val mimeType = if (mimeCol != -1) cursor.getString(mimeCol) else ""
                     val albumId = if (albumIdCol != -1) cursor.getLong(albumIdCol) else -1L
+                    val dateModified = if (dateModifiedCol != -1) cursor.getLong(dateModifiedCol) else 0L
 
                     val artUri = if (albumId > 0) {
-                        val albumArtUri = Uri.parse("content://media/external/audio/albumart")
-                        ContentUris.withAppendedId(albumArtUri, albumId).toString()
+                        try {
+                            ContentUris.withAppendedId(
+                                MediaStore.Audio.Albums.EXTERNAL_CONTENT_URI,
+                                albumId
+                            ).toString()
+                        } catch (_: Exception) {
+                            ""
+                        }
                     } else ""
 
                     val obj = JSONObject().apply {
                         put("id", id)
                         put("path", path ?: "")
                         put("title", title ?: "")
-                        put("artist", if (artist != "<unknown>") artist else "")
-                        put("album", if (album != "<unknown>") album else "")
+                        put("artist", if (artist != null && artist != "<unknown>") artist else "")
+                        put("album", if (album != null && album != "<unknown>") album else "")
                         put("duration_ms", durationMs)
                         put("track_number", if (trackNum > 0) trackNum else JSONObject.NULL)
                         put("year", if (year > 0) year else JSONObject.NULL)
                         put("size", size)
                         put("mime_type", mimeType ?: "")
                         put("art_uri", artUri)
+                        put("date_modified", dateModified)
                     }
                     jsonArray.put(obj)
                 }

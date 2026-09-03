@@ -326,11 +326,23 @@ class MediaPlaybackService : Service() {
     private fun loadArtBitmap(path: String): Bitmap? {
         if (path.isEmpty()) return null
         return try {
-            val f = java.io.File(path)
-            if (!f.exists()) return null
-            // Downsample to avoid ANR/OOM decoding large art on main thread.
-            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-            BitmapFactory.decodeFile(path, opts)
+            if (path.startsWith("content://")) {
+                val uri = Uri.parse(path)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    contentResolver.loadThumbnail(uri, android.util.Size(512, 512), null)
+                } else {
+                    contentResolver.openInputStream(uri)?.use { stream ->
+                        val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+                        BitmapFactory.decodeStream(stream, null, opts)
+                    }
+                }
+            } else {
+                val f = java.io.File(path)
+                if (!f.exists()) return null
+                // Downsample to avoid ANR/OOM decoding large art on main thread.
+                val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+                BitmapFactory.decodeFile(path, opts)
+            }
         } catch (_: Exception) {
             null
         } catch (_: OutOfMemoryError) {
