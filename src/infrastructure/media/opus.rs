@@ -1,7 +1,7 @@
 //! Opus & WebM Audio Decoder
 //!
 //! Provides demuxing for WebM/Matroska and Ogg containers via Symphonia,
-//! and audio sample decoding via pure-Rust `rusty-opus`.
+//! and audio sample decoding via pure-Rust `opus-decoder`.
 
 use rodio::source::SeekError;
 use rodio::Source;
@@ -17,19 +17,19 @@ use symphonia::core::probe::Hint;
 use tracing::{debug, warn};
 
 /// An audio source that demuxes WebM/MKV/Ogg containers with Symphonia
-/// and decodes Opus packets using `rusty-opus` into PCM `f32` samples.
+/// and decodes Opus packets using `opus-decoder` into PCM `f32` samples.
 pub struct OpusSource {
     format_reader: Box<dyn FormatReader>,
     track_id: u32,
-    decoder: rusty_opus::OpusDecoder,
+    decoder: opus_decoder::OpusDecoder,
     channels: u16,
     sample_rate: u32,
     total_duration: Option<Duration>,
     /// Decoded samples waiting to be yielded by Iterator
     current_samples: Vec<f32>,
     sample_index: usize,
-    /// Scratch buffer for Opus decoding
-    decode_buf: Vec<f32>,
+    /// Scratch buffer for Opus decoding (16-bit PCM intermediate)
+    pcm_i16_buf: Vec<i16>,
     /// Reached EOF on packets
     is_eof: bool,
 }
@@ -95,11 +95,11 @@ impl OpusSource {
             None
         };
 
-        let decoder = rusty_opus::OpusDecoder::new(sample_rate as i32, channels as usize)
-            .map_err(|e| format!("Failed to create OpusDecoder for {path}: {e}"))?;
+        let decoder = opus_decoder::OpusDecoder::new(sample_rate, channels as usize)
+            .map_err(|e| format!("Failed to create OpusDecoder for {path}: {e:?}"))?;
 
         // 120ms max frame size at 48kHz = 5760 samples per channel
-        let decode_buf = vec![0.0f32; 5760 * channels as usize];
+        let pcm_i16_buf = vec![0i16; 5760 * channels as usize];
 
         Ok(Self {
             format_reader,
@@ -110,7 +110,7 @@ impl OpusSource {
             total_duration,
             current_samples: Vec::with_capacity(5760 * channels as usize),
             sample_index: 0,
-            decode_buf,
+            pcm_i16_buf,
             is_eof: false,
         })
     }
@@ -131,21 +131,19 @@ impl OpusSource {
                     }
                     let max_samples_per_channel = 5760;
                     let needed_len = max_samples_per_channel * self.channels as usize;
-                    if self.decode_buf.len() < needed_len {
-                        self.decode_buf.resize(needed_len, 0.0);
+                    if self.pcm_i16_buf.len() < needed_len {
+                        self.pcm_i16_buf.resize(needed_len, 0);
                     }
-                    match self
-                        .decoder
-                        .decode(data, max_samples_per_channel, &mut self.decode_buf)
-                    {
+                    match self.decoder.decode(data, &mut self.pcm_i16_buf, false) {
                         Ok(samples_per_ch) => {
-                            let count = samples_per_ch * self.channels as usize;
-                            self.current_samples
-                                .extend_from_slice(&self.decode_buf[..count]);
+                            let total_samples = samples_per_ch * self.channels as usize;
+                            for &s in &self.pcm_i16_buf[..total_samples] {
+                                self.current_samples.push(s as f32 / 32768.0);
+                            }
                             return true;
                         }
                         Err(e) => {
-                            warn!("Opus decode error on packet: {e}");
+                            warn!("Opus decode error on packet: {e:?}");
                             continue;
                         }
                     }
@@ -223,7 +221,7 @@ impl Source for OpusSource {
         ) {
             Ok(_) => {
                 if let Ok(new_dec) =
-                    rusty_opus::OpusDecoder::new(self.sample_rate as i32, self.channels as usize)
+                    opus_decoder::OpusDecoder::new(self.sample_rate, self.channels as usize)
                 {
                     self.decoder = new_dec;
                 }

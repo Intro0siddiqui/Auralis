@@ -79,7 +79,7 @@ base64 = "0.23"
 # symphonia-mkv provides WebM/Matroska container demuxing; symphonia-ogg provides Ogg demuxing).
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "symphonia-aac", "symphonia-alac", "symphonia-mkv", "symphonia-ogg", "flac", "vorbis", "wav"] }
 symphonia = { version = "0.5.5", default-features = false, features = ["mkv", "ogg", "isomp4"] }
-rusty-opus = "0.9"
+opus-decoder = "0.1"
 # Audio metadata
 lofty = "0.25"
 

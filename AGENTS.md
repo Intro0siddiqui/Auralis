@@ -138,7 +138,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 rusqlite = { version = "0.40", features = ["bundled"] }   # chrono/uuid features removed — datetimes & UUIDs are stored as TEXT; lock 0.40.2
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream", "gzip", "brotli", "deflate"] } # see deferred-upgrades note below; lock has 0.12.28 + 0.13.4 (0.13 via transitive dep)
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "symphonia-aac", "symphonia-alac", "symphonia-mkv", "symphonia-ogg", "flac", "vorbis", "wav"] }
-rusty-opus = "0.9"     # pure Rust Opus codec for native Opus/WebM audio decoding via Symphonia demuxer and custom rodio Source
+opus-decoder = "0.1"   # pure Rust Opus codec (RFC 8251 conformant, cross-platform) for native Opus/WebM audio decoding via Symphonia demuxer and custom rodio Source
 symphonia = { version = "0.5.5", default-features = false, features = ["mkv", "ogg", "isomp4"] }
 lofty = "0.25"  # lock 0.25.1
 libp2p = { version = "0.56", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "json"] } # lock 0.56.0
