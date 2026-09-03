@@ -25,6 +25,7 @@ pub enum OpusDecoderEngine {
     #[cfg(target_pointer_width = "32")]
     OpusDecoder {
         decoder: opus_decoder::OpusDecoder,
+        channels: usize,
         i16_scratch: Vec<i16>,
     },
 }
@@ -43,6 +44,7 @@ impl OpusDecoderEngine {
             opus_decoder::OpusDecoder::new(sample_rate, channels as usize)
                 .map(|decoder| OpusDecoderEngine::OpusDecoder {
                     decoder,
+                    channels: channels as usize,
                     i16_scratch: vec![0i16; 5760 * channels as usize],
                 })
                 .map_err(|e| format!("opus-decoder error: {e:?}"))
@@ -65,15 +67,16 @@ impl OpusDecoderEngine {
             #[cfg(target_pointer_width = "32")]
             OpusDecoderEngine::OpusDecoder {
                 decoder,
+                channels,
                 i16_scratch,
             } => {
-                let needed = max_samples_per_channel * decoder.channels();
+                let needed = max_samples_per_channel * *channels;
                 if i16_scratch.len() < needed {
                     i16_scratch.resize(needed, 0);
                 }
                 match decoder.decode(data, i16_scratch, false) {
                     Ok(samples_per_ch) => {
-                        let total = samples_per_ch * decoder.channels();
+                        let total = samples_per_ch * *channels;
                         for (i, &s) in i16_scratch[..total].iter().enumerate() {
                             out[i] = s as f32 / 32768.0;
                         }
