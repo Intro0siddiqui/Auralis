@@ -57,6 +57,24 @@ class MediaPlaybackService : Service() {
         const val ACTION_NEXT = "com.auralis.v2.action.NEXT"
         const val ACTION_PREVIOUS = "com.auralis.v2.action.PREVIOUS"
 
+        @JvmStatic
+        fun createNotificationChannel(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "Audio Playback",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Keeps audio playback active in background"
+                    setSound(null, null)
+                    enableVibration(false)
+                    setShowBadge(false)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                }
+                context.getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+            }
+        }
+
         /** Start (or refresh) the foreground service with the current track info. */
         @JvmStatic
         fun start(
@@ -68,12 +86,14 @@ class MediaPlaybackService : Service() {
             isPlaying: Boolean,
             artPath: String
         ) {
+            createNotificationChannel(context)
+
             // If notification permission is missing on Android 13+, trigger request
             if (isPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 if (context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                     != android.content.pm.PackageManager.PERMISSION_GRANTED
                 ) {
-                    MainActivity.requestRuntimePermissions(context as? android.app.Activity)
+                    MainActivity.requestRuntimePermissions(context)
                 }
             }
 
@@ -169,6 +189,12 @@ class MediaPlaybackService : Service() {
     override fun onDestroy() {
         releaseWakeLock()
         abandonAudioFocus()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
         mediaSession?.isActive = false
         mediaSession?.release()
         mediaSession = null
@@ -263,6 +289,16 @@ class MediaPlaybackService : Service() {
 
     private fun setupMediaSession() {
         val session = MediaSession(this, "AuralisPlayback")
+        val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+            setClass(this@MediaPlaybackService, MediaPlaybackService::class.java)
+        }
+        val pendingMediaButton = PendingIntent.getService(
+            this,
+            0,
+            mediaButtonIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        session.setMediaButtonReceiver(pendingMediaButton)
         session.setCallback(object : MediaSession.Callback() {
             override fun onPlay() {
                 NativeBridge.command("play")
@@ -283,6 +319,7 @@ class MediaPlaybackService : Service() {
         session.setFlags(
             MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
         )
+        session.isActive = true
         mediaSession = session
     }
 
@@ -325,26 +362,27 @@ class MediaPlaybackService : Service() {
         val session = mediaSession ?: return
         val metadataBuilder = MediaMetadata.Builder()
             .putString(MediaMetadata.METADATA_KEY_TITLE, title)
-            .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
-            .putLong(MediaMetadata.METADATA_KEY_DURATION, durationSecs * 1000L)
+            .putString(MediaMetadata.METADATA_KEY_ARTIST, artist.ifEmpty { "Auralis" })
+            .putLong(MediaMetadata.METADATA_KEY_DURATION, (durationSecs.toLong() * 1000L).coerceAtLeast(0L))
         if (art != null) {
             metadataBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art)
             metadataBuilder.putBitmap(MediaMetadata.METADATA_KEY_ART, art)
         }
-        val metadata = metadataBuilder.build()
-        val actions = PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
-            PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT or
-            PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_SEEK_TO
-        val state = PlaybackState.Builder()
+        session.setMetadata(metadataBuilder.build())
+
+        val state = if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED
+        val actions = PlaybackState.ACTION_PLAY or
+            PlaybackState.ACTION_PAUSE or
+            PlaybackState.ACTION_PLAY_PAUSE or
+            PlaybackState.ACTION_SKIP_TO_NEXT or
+            PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+            PlaybackState.ACTION_SEEK_TO or
+            PlaybackState.ACTION_STOP
+        val playbackState = PlaybackState.Builder()
             .setActions(actions)
-            .setState(
-                if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
-                positionSecs * 1000L,
-                1f
-            )
+            .setState(state, (positionSecs.toLong() * 1000L).coerceAtLeast(0L), 1.0f)
             .build()
-        session.setMetadata(metadata)
-        session.setPlaybackState(state)
+        session.setPlaybackState(playbackState)
         session.isActive = true
     }
 
@@ -355,6 +393,9 @@ class MediaPlaybackService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
+
+        val iconRes = if (applicationInfo.icon != 0) applicationInfo.icon else android.R.drawable.ic_media_play
+
         val playPause = if (isPlaying) {
             Notification.Action.Builder(
                 android.R.drawable.ic_media_pause,
@@ -380,7 +421,7 @@ class MediaPlaybackService : Service() {
         return builder
             .setContentTitle(title)
             .setContentText(artist.ifEmpty { "Auralis Music Player" })
-            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setSmallIcon(iconRes)
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setShowWhen(false)

@@ -116,7 +116,7 @@ pub fn request_notification_permission() {
             env.call_static_method(
                 class,
                 "requestRuntimePermissions",
-                "(Landroid/app/Activity;)V",
+                "(Landroid/content/Context;)V",
                 &[JValue::Object(&ctx)],
             )?;
             Ok(())

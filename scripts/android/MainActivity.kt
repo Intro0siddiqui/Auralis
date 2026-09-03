@@ -19,8 +19,9 @@ class MainActivity : TauriActivity() {
         private var currentActivityRef: WeakReference<MainActivity>? = null
 
         @JvmStatic
-        fun requestRuntimePermissions(activity: Activity? = null) {
-            val act = (activity as? MainActivity) ?: currentActivityRef?.get() ?: return
+        @JvmOverloads
+        fun requestRuntimePermissions(context: Any? = null) {
+            val act = (context as? MainActivity) ?: currentActivityRef?.get() ?: return
             act.runOnUiThread {
                 act.checkAndRequestPermissions()
             }
@@ -31,6 +32,9 @@ class MainActivity : TauriActivity() {
         super.onCreate(savedInstanceState)
         currentActivityRef = WeakReference(this)
         WebView.setWebContentsDebuggingEnabled(true)
+
+        // Ensure playback notification channel exists early on app startup
+        MediaPlaybackService.createNotificationChannel(this)
         
         // Post permission check after window and webview layout attach
         Handler(Looper.getMainLooper()).postDelayed({
