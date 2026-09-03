@@ -138,7 +138,8 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 rusqlite = { version = "0.40", features = ["bundled"] }   # chrono/uuid features removed — datetimes & UUIDs are stored as TEXT; lock 0.40.2
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream", "gzip", "brotli", "deflate"] } # see deferred-upgrades note below; lock has 0.12.28 + 0.13.4 (0.13 via transitive dep)
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "symphonia-aac", "symphonia-alac", "symphonia-mkv", "symphonia-ogg", "flac", "vorbis", "wav"] }
-opus-decoder = "0.1"   # pure Rust Opus codec (RFC 8251 conformant, cross-platform) for native Opus/WebM audio decoding via Symphonia demuxer and custom rodio Source
+rusty-opus = "0.9"     # 64-bit targets (aarch64, x86_64): pure-Rust Opus codec with AVX2 & ARM64 NEON SIMD kernels
+opus-rs = "0.1"        # 32-bit targets (armv7, i686): pure-Rust Opus codec for compatibility and battery efficiency
 symphonia = { version = "0.5.5", default-features = false, features = ["mkv", "ogg", "isomp4"] }
 lofty = "0.25"  # lock 0.25.1
 libp2p = { version = "0.56", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "json"] } # lock 0.56.0
@@ -163,12 +164,12 @@ Notes from the audit/upgrade pass:
 
 - `bundle.targets` is `["deb", "app", "dmg", "msi", "nsis"]` (no `"all"`).
 - `identifier` is `com.auralis.v2` (was `com.auralis.app`).
-- `version` is `2.6.24` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
+- `version` is `2.6.25` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
 - CSP is `default-src 'self' tauri: data: blob: ipc: http://ipc.localhost; img-src 'self' data: blob: asset: https://i.ytimg.com https://*.ytimg.com; media-src 'self' data: blob: asset: ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost https://*.googlevideo.com https://*.ytimg.com https://i.ytimg.com https://www.youtube.com https://youtubei.googleapis.com https://*.youtube.com https://jnn-pa.googleapis.com https://www.google.com https://*.google.com; font-src 'self' data: https:;` — all third-party JS vendored under `ui/vendor/` (no CDN), `https:` kept for `youtubei`/`googlevideo`/`jnn-pa` `connect-src` (see `scripts/tests/youtube_resolver.test.js`). `unsafe-eval` is required for `youtube.js` `new Function` decipher (BotGuard) — noted as intentional.
 
-### 4.3 Android CI Optimization (`.github/workflows/build.yml`) — ✅ DONE (2026-08-31, v2.6.24)
+### 4.3 Android CI Optimization (`.github/workflows/build.yml`) — ✅ DONE (2026-09-03, v2.6.25)
 
-- APKs are built for **both 64-bit and 32-bit ABIs (`aarch64`, armv7, x86_64, i686) via `--split-per-abi`** (`cargo tauri android build --apk --target aarch64 armv7 x86_64 i686 --split-per-abi`, producing `auralis-v2.6.24-android-arm64.apk`, `-armv7.apk`, `-x86_64.apk`, `-x86.apk`); `x86_64` powers emulator E2E `pixel_6 api33 google_apis`.
+- APKs are built for **both 64-bit and 32-bit ABIs (`aarch64`, armv7, x86_64, i686) via `--split-per-abi`** (`cargo tauri android build --apk --target aarch64 armv7 x86_64 i686 --split-per-abi`, producing `auralis-v2.6.25-android-arm64.apk`, `-armv7.apk`, `-x86_64.apk`, `-x86.apk`); `x86_64` powers emulator E2E `pixel_6 api33 google_apis`.
 - `cargo tauri android init` is guarded with `|| true` before build — harmless idempotent.
 - NDK is pinned to **`27.2.12479018` (r27)** — 16KB-page-size capable; `compileSdk`/`targetSdk` sed'd to **36** in `build.gradle.kts`; `tauri-cli` pinned to **`2.11.4`** (via `npm install -g @tauri-apps/cli@2.11.4` + `~/.cargo` cache).
 - `libc++_shared.so` is bundled for all ABIs (`arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`) via `.cargo/config.toml` (`-lc++_shared` per target) and copied into `jniLibs` during CI.
@@ -177,7 +178,7 @@ Notes from the audit/upgrade pass:
 - CI **enforces 16KB alignment**: `zipalign -c -P 16` + `llvm-readelf p_align==0x4000` on 64-bit `.so` libraries (`arm64-v8a`, `x86_64`), with standard 4KB alignment for 32-bit (`armeabi-v7a`, `x86`) — misaligned 64-bit build fails CI. `sccache` + `shared-key` + NDK cache enabled (~11m per release).
 - E2E note: `test-android-e2e` verifies **player-working** via `e2e_player_test.js` — seeds `AudioTrack` from `/sdcard/{Music,Download}` (`SIDELoad` → `scan_library_paths` → `get_tracks` → `play`/`set_queue`/`Next`/`Prev` + DOM `data-role` tap), no YouTube network dependency. Desktop `desktop_download_player_e2e.js` seeds 2 tracks + verifies `set_queue` queue length `2` + modal hydration.
 
-**Verify**: `gh release view v2.6.24` shows `arm64`, `armv7`, `x86_64`, and `x86` APKs + desktop artifacts.
+**Verify**: `gh release view v2.6.25` shows `arm64`, `armv7`, `x86_64`, and `x86` APKs + desktop artifacts.
 
 ### 4.5 Downloads — where files live (v2.5.18, dual-save since v2.5.11)
 - **Saved to:** `app_data_dir/downloads/<sanitized title>.<ext>` — `src/lib.rs:322` `download_dir = app_data_dir.join("downloads")` → `Downloader::new(download_dir)`. `downloader.rs:192 sanitize_filename` strips path separators/control chars/`..` + `ALLOWED_EXTS` check, appends 8-char UUID suffix on collision, saves thumbnail sidecar `<audio>.jpg`. **Android dual-save (v2.5.11, still v2.5.18):** when `Settings.downloads.use_system_downloads` (default `true`, `settings.rs` + `settings.html` toggle) is on, `downloader.rs` also publishes a copy to `Download/Auralis/<name>` via `infrastructure/media/android_downloads.rs` `publish_to_downloads` (`MediaStore.Downloads` `IS_PENDING` on API 29+, legacy `Environment.getExternalStoragePublicDirectory` + `MediaScanner` on 26-28, non-fatal fallback keeps internal path; `player.rs` `cached_copy_for_path` reads public copy if internal missing).

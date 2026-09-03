@@ -1,6 +1,6 @@
 [package]
 name = "auralis"
-version = "2.6.24"
+version = "2.6.25"
 edition = "2021"
 authors = ["Auralis Team"]
 description = "A lightweight, offline-first music player with integrated media downloading and P2P synchronization"
@@ -79,12 +79,19 @@ base64 = "0.23"
 # symphonia-mkv provides WebM/Matroska container demuxing; symphonia-ogg provides Ogg demuxing).
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "mp4", "symphonia-aac", "symphonia-alac", "symphonia-mkv", "symphonia-ogg", "flac", "vorbis", "wav"] }
 symphonia = { version = "0.5.5", default-features = false, features = ["mkv", "ogg", "isomp4"] }
-opus-decoder = "0.1"
 # Audio metadata
 lofty = "0.25"
 
 # Filesystem globbing
 glob = "0.3"
+
+# 64-bit platforms: use rusty-opus with AVX2 & ARM64 NEON SIMD kernels
+[target.'cfg(target_pointer_width = "64")'.dependencies]
+rusty-opus = "0.9"
+
+# 32-bit platforms (e.g. armv7 / i686): use opus-rs pure-Rust codec without 64-bit intrinsics
+[target.'cfg(target_pointer_width = "32")'.dependencies]
+opus-rs = "0.1"
 
 # Android: initialize the ndk-context global used by cpal/oboe's audio
 # backend. Tauri v2 does not set it up, so we export JNI_OnLoad ourselves.

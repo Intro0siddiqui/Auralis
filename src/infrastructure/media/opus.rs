@@ -1,7 +1,9 @@
 //! Opus & WebM Audio Decoder
 //!
 //! Provides demuxing for WebM/Matroska and Ogg containers via Symphonia,
-//! and audio sample decoding via pure-Rust `opus-decoder`.
+//! with high-performance pure-Rust Opus sample decoding:
+//! - On 64-bit architectures (`aarch64`, `x86_64`): uses `rusty-opus` with AVX2 & ARM64 NEON SIMD kernels.
+//! - On 32-bit architectures (`armv7`, `i686`): uses `opus-rs` for clean non-64-bit SIMD compatibility.
 
 use rodio::source::SeekError;
 use rodio::Source;
@@ -16,20 +18,66 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tracing::{debug, warn};
 
+/// Decoder engine abstraction selecting `rusty-opus` on 64-bit and `opus-rs` on 32-bit.
+pub enum OpusDecoderEngine {
+    #[cfg(target_pointer_width = "64")]
+    RustyOpus(rusty_opus::OpusDecoder),
+    #[cfg(target_pointer_width = "32")]
+    OpusRs(opus_rs::OpusDecoder),
+}
+
+impl OpusDecoderEngine {
+    pub fn new(sample_rate: u32, channels: u16) -> Result<Self, String> {
+        #[cfg(target_pointer_width = "64")]
+        {
+            rusty_opus::OpusDecoder::new(sample_rate as i32, channels as usize)
+                .map(OpusDecoderEngine::RustyOpus)
+                .map_err(|e| format!("rusty-opus error: {e}"))
+        }
+
+        #[cfg(target_pointer_width = "32")]
+        {
+            opus_rs::OpusDecoder::new(sample_rate as i32, channels as usize)
+                .map(OpusDecoderEngine::OpusRs)
+                .map_err(|e| format!("opus-rs error: {e}"))
+        }
+    }
+
+    /// Decode an encoded Opus packet into the provided `out` buffer of f32 samples.
+    /// Returns the number of decoded samples per channel.
+    pub fn decode(
+        &mut self,
+        data: &[u8],
+        max_samples_per_channel: usize,
+        out: &mut [f32],
+    ) -> Result<usize, String> {
+        match self {
+            #[cfg(target_pointer_width = "64")]
+            OpusDecoderEngine::RustyOpus(dec) => dec
+                .decode(data, max_samples_per_channel, out)
+                .map_err(|e| format!("rusty-opus decode error: {e}")),
+            #[cfg(target_pointer_width = "32")]
+            OpusDecoderEngine::OpusRs(dec) => dec
+                .decode(data, max_samples_per_channel, out)
+                .map_err(|e| format!("opus-rs decode error: {e}")),
+        }
+    }
+}
+
 /// An audio source that demuxes WebM/MKV/Ogg containers with Symphonia
-/// and decodes Opus packets using `opus-decoder` into PCM `f32` samples.
+/// and decodes Opus packets into PCM `f32` samples.
 pub struct OpusSource {
     format_reader: Box<dyn FormatReader>,
     track_id: u32,
-    decoder: opus_decoder::OpusDecoder,
+    decoder: OpusDecoderEngine,
     channels: u16,
     sample_rate: u32,
     total_duration: Option<Duration>,
     /// Decoded samples waiting to be yielded by Iterator
     current_samples: Vec<f32>,
     sample_index: usize,
-    /// Scratch buffer for Opus decoding (16-bit PCM intermediate)
-    pcm_i16_buf: Vec<i16>,
+    /// Scratch buffer for Opus decoding
+    decode_buf: Vec<f32>,
     /// Reached EOF on packets
     is_eof: bool,
 }
@@ -95,11 +143,11 @@ impl OpusSource {
             None
         };
 
-        let decoder = opus_decoder::OpusDecoder::new(sample_rate, channels as usize)
-            .map_err(|e| format!("Failed to create OpusDecoder for {path}: {e:?}"))?;
+        let decoder = OpusDecoderEngine::new(sample_rate, channels)
+            .map_err(|e| format!("Failed to create OpusDecoder for {path}: {e}"))?;
 
         // 120ms max frame size at 48kHz = 5760 samples per channel
-        let pcm_i16_buf = vec![0i16; 5760 * channels as usize];
+        let decode_buf = vec![0.0f32; 5760 * channels as usize];
 
         Ok(Self {
             format_reader,
@@ -110,7 +158,7 @@ impl OpusSource {
             total_duration,
             current_samples: Vec::with_capacity(5760 * channels as usize),
             sample_index: 0,
-            pcm_i16_buf,
+            decode_buf,
             is_eof: false,
         })
     }
@@ -131,19 +179,21 @@ impl OpusSource {
                     }
                     let max_samples_per_channel = 5760;
                     let needed_len = max_samples_per_channel * self.channels as usize;
-                    if self.pcm_i16_buf.len() < needed_len {
-                        self.pcm_i16_buf.resize(needed_len, 0);
+                    if self.decode_buf.len() < needed_len {
+                        self.decode_buf.resize(needed_len, 0.0);
                     }
-                    match self.decoder.decode(data, &mut self.pcm_i16_buf, false) {
+                    match self
+                        .decoder
+                        .decode(data, max_samples_per_channel, &mut self.decode_buf)
+                    {
                         Ok(samples_per_ch) => {
-                            let total_samples = samples_per_ch * self.channels as usize;
-                            for &s in &self.pcm_i16_buf[..total_samples] {
-                                self.current_samples.push(s as f32 / 32768.0);
-                            }
+                            let count = samples_per_ch * self.channels as usize;
+                            self.current_samples
+                                .extend_from_slice(&self.decode_buf[..count]);
                             return true;
                         }
                         Err(e) => {
-                            warn!("Opus decode error on packet: {e:?}");
+                            warn!("Opus decode error on packet: {e}");
                             continue;
                         }
                     }
@@ -220,9 +270,7 @@ impl Source for OpusSource {
             },
         ) {
             Ok(_) => {
-                if let Ok(new_dec) =
-                    opus_decoder::OpusDecoder::new(self.sample_rate, self.channels as usize)
-                {
+                if let Ok(new_dec) = OpusDecoderEngine::new(self.sample_rate, self.channels) {
                     self.decoder = new_dec;
                 }
                 self.current_samples.clear();
