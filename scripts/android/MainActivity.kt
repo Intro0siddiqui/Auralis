@@ -136,7 +136,7 @@ class MainActivity : TauriActivity() {
                         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                             @Suppress("DEPRECATION")
                             try {
-                                s.forceDark = WebView.FORCE_DARK_OFF
+                                s.forceDark = android.webkit.WebSettings.FORCE_DARK_OFF
                             } catch (_: Exception) { }
                         }
                     } catch (_: Exception) { }
