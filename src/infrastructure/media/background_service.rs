@@ -113,10 +113,13 @@ pub fn request_notification_permission() {
         let Some(ctx) = service_context() else { return };
         with_attached_env(|env| {
             let class = env.find_class("com/auralis/v2/MainActivity")?;
+            // Kotlin `requestRuntimePermissions(context: Any?)` erases to
+            // `(Ljava/lang/Object;)V` — NOT `(Landroid/content/Context;)V`.
+            // The Context descriptor throws NoSuchMethodError on every call.
             env.call_static_method(
                 class,
                 "requestRuntimePermissions",
-                "(Landroid/content/Context;)V",
+                "(Ljava/lang/Object;)V",
                 &[JValue::Object(&ctx)],
             )?;
             Ok(())

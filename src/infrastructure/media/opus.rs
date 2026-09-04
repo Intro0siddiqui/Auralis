@@ -238,6 +238,11 @@ impl OpusSource {
                     if packet.track_id() != self.track_id {
                         continue;
                     }
+                    // Gapless trim (encoder delay / padding) in decoded frames.
+                    // `enable_gapless` makes the demuxer populate these from
+                    // CodecDelay/SeekPreRoll (Opus pre-skip ≈ 312 frames).
+                    let trim_start = packet.trim_start as usize * self.channels as usize;
+                    let trim_end = packet.trim_end as usize * self.channels as usize;
                     let data = &packet.data[..];
                     if data.is_empty() {
                         continue;
@@ -255,6 +260,17 @@ impl OpusSource {
                             let count = samples_per_ch * self.channels as usize;
                             self.current_samples
                                 .extend_from_slice(&self.decode_buf[..count]);
+                            // Drop encoder-delay frames from the front and
+                            // padding frames from the back (usually only the
+                            // first/last packets carry nonzero trim).
+                            if trim_start > 0 {
+                                let drop = trim_start.min(self.current_samples.len());
+                                self.current_samples.drain(..drop);
+                            }
+                            if trim_end > 0 {
+                                let len = self.current_samples.len();
+                                self.current_samples.truncate(len.saturating_sub(trim_end));
+                            }
                             return true;
                         }
                         Err(e) => {

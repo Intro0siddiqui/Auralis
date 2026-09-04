@@ -1,6 +1,6 @@
 {
   "name": "auralis",
-  "version": "2.6.30",
+  "version": "2.6.31",
   "private": true,
   "scripts": {
     "tauri": "tauri"
