@@ -22,7 +22,10 @@ use tracing::{debug, warn};
 /// Decoder engine abstraction selecting `rusty-opus` on 64-bit and `opus-decoder` on 32-bit.
 pub enum OpusDecoderEngine {
     #[cfg(target_pointer_width = "64")]
-    RustyOpus(rusty_opus::OpusDecoder),
+    RustyOpus {
+        decoder: rusty_opus::OpusDecoder,
+        sample_rate: u32,
+    },
     #[cfg(target_pointer_width = "32")]
     OpusDecoder {
         decoder: opus_decoder::OpusDecoder,
@@ -36,7 +39,10 @@ impl OpusDecoderEngine {
         #[cfg(target_pointer_width = "64")]
         {
             rusty_opus::OpusDecoder::new(sample_rate as i32, channels as usize)
-                .map(OpusDecoderEngine::RustyOpus)
+                .map(|decoder| OpusDecoderEngine::RustyOpus {
+                    decoder,
+                    sample_rate,
+                })
                 .map_err(|e| format!("rusty-opus error: {e}"))
         }
 
@@ -62,9 +68,34 @@ impl OpusDecoderEngine {
     ) -> Result<usize, String> {
         match self {
             #[cfg(target_pointer_width = "64")]
-            OpusDecoderEngine::RustyOpus(dec) => dec
-                .decode(data, max_samples_per_channel, out)
-                .map_err(|e| format!("rusty-opus decode error: {e}")),
+            OpusDecoderEngine::RustyOpus {
+                decoder: dec,
+                sample_rate,
+            } => {
+                // rusty-opus treats `frame_size` as the exact frame duration to
+                // decode (not a capacity): passing the 120ms maximum (5760)
+                // for every packet makes short frames decode as silence while
+                // still reporting 5760 samples. Derive the exact per-packet
+                // frame count from the TOC (nb_frames × samples_per_frame),
+                // mirroring libopus `opus_packet_get_nb_samples`.
+                if data.is_empty() {
+                    return Err("empty Opus packet".to_string());
+                }
+                let toc = data[0];
+                let nb = rusty_opus::repacketizer::nb_frames(data)
+                    .map_err(|e| format!("rusty-opus packet parse error: {e}"))?
+                    as usize;
+                let spf =
+                    rusty_opus::repacketizer::samples_per_frame(toc, *sample_rate as i32) as usize;
+                let exact = nb.saturating_mul(spf);
+                if exact == 0 || exact > max_samples_per_channel {
+                    return Err(format!(
+                        "Opus packet needs {exact} samples/channel, buffer holds {max_samples_per_channel}"
+                    ));
+                }
+                dec.decode(data, exact, out)
+                    .map_err(|e| format!("rusty-opus decode error: {e}"))
+            }
             #[cfg(target_pointer_width = "32")]
             OpusDecoderEngine::OpusDecoder {
                 decoder,
@@ -439,19 +470,34 @@ mod tests {
         assert_eq!(source.sample_rate().get(), 48000);
         assert_eq!(source.channels().get(), 2);
 
-        // Decode at least the first 50000 samples (~0.5s of stereo audio)
-        let mut sample_count = 0;
-        for _ in 0..50000 {
-            if source.next().is_some() {
-                sample_count += 1;
-            } else {
-                break;
+        // Decode ~15s of stereo audio (past the ~2.7s near-silent DTX lead-in
+        // typical of YouTube WebM) and require real signal: counting `Some`
+        // alone passes even when the decoder emits pure zeros (the 5760-vs-
+        // exact frame-size bug), so assert on non-zero energy instead.
+        let mut sample_count = 0u64;
+        let mut nonzero = 0u64;
+        let mut peak = 0.0f32;
+        for _ in 0..1_440_000 {
+            match source.next() {
+                Some(s) => {
+                    sample_count += 1;
+                    if s.abs() > 0.0001 {
+                        nonzero += 1;
+                    }
+                    if s.abs() > peak {
+                        peak = s.abs();
+                    }
+                }
+                None => break,
             }
         }
         assert!(
-            sample_count > 1000,
-            "Expected to decode at least 1000 samples, decoded {}",
-            sample_count
+            sample_count > 1_000_000,
+            "Expected to decode ~15s of audio, decoded {sample_count} samples"
+        );
+        assert!(
+            nonzero * 100 / sample_count.max(1) > 20,
+            "Decoded audio is (near-)silent: {nonzero}/{sample_count} nonzero, peak {peak}"
         );
 
         let meta = extract_opus_metadata(&sample_path).expect("extract_opus_metadata failed");
