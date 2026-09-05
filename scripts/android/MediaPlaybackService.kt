@@ -111,10 +111,23 @@ class MediaPlaybackService : Service() {
                 putExtra("isPlaying", isPlaying)
                 putExtra("artPath", artPath)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                Log.e("AuralisMedia", "startForegroundService restricted in background; falling back to direct notification notify", e)
+                try {
+                    val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                    val art = loadArtBitmapStatic(context, artPath)
+                    val notification = buildNotificationStatic(context, title, artist, isPlaying, art, null)
+                    notificationManager?.notify(NOTIFICATION_ID, notification)
+                } catch (fallbackErr: Exception) {
+                    Log.e("AuralisMedia", "Fallback notification notify failed", fallbackErr)
+                }
             }
         }
 
@@ -122,6 +135,126 @@ class MediaPlaybackService : Service() {
         @JvmStatic
         fun stop(context: Context) {
             context.stopService(Intent(context, MediaPlaybackService::class.java))
+        }
+
+        @JvmStatic
+        fun loadArtBitmapStatic(context: Context, path: String): Bitmap? {
+            if (path.isEmpty()) return null
+            return try {
+                if (path.startsWith("content://")) {
+                    val uri = Uri.parse(path)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        context.contentResolver.loadThumbnail(uri, android.util.Size(512, 512), null)
+                    } else {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+                            BitmapFactory.decodeStream(stream, null, opts)
+                        }
+                    }
+                } else {
+                    val f = java.io.File(path)
+                    if (!f.exists()) return null
+                    // Downsample to avoid ANR/OOM decoding large art on main thread.
+                    val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+                    BitmapFactory.decodeFile(path, opts)
+                }
+            } catch (_: Exception) {
+                null
+            } catch (_: OutOfMemoryError) {
+                null
+            }
+        }
+
+        @JvmStatic
+        fun buildNotificationStatic(
+            context: Context,
+            title: String,
+            artist: String,
+            isPlaying: Boolean,
+            art: Bitmap? = null,
+            sessionToken: MediaSession.Token? = null
+        ): Notification {
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(context, CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(context)
+            }
+
+            // Android 13+ (API 33-36) SystemUI requires framework icons to explicitly specify
+            // package "android" via Icon.createWithResource("android", resId). Passing raw int
+            // resource IDs causes SystemUI to look up system icons in com.auralis.v2 package,
+            // throwing Resources$NotFoundException and suppressing the notification entirely.
+            val smallIcon = Icon.createWithResource("android", android.R.drawable.ic_media_play)
+            val pauseIcon = Icon.createWithResource("android", android.R.drawable.ic_media_pause)
+            val playIcon = Icon.createWithResource("android", android.R.drawable.ic_media_play)
+            val prevIcon = Icon.createWithResource("android", android.R.drawable.ic_media_previous)
+            val nextIcon = Icon.createWithResource("android", android.R.drawable.ic_media_next)
+
+            val playPauseAction = if (isPlaying) {
+                Notification.Action.Builder(
+                    pauseIcon,
+                    "Pause",
+                    pendingServiceIntentStatic(context, ACTION_PAUSE)
+                ).build()
+            } else {
+                Notification.Action.Builder(
+                    playIcon,
+                    "Play",
+                    pendingServiceIntentStatic(context, ACTION_PLAY)
+                ).build()
+            }
+
+            val prevAction = Notification.Action.Builder(
+                prevIcon,
+                "Previous",
+                pendingServiceIntentStatic(context, ACTION_PREVIOUS)
+            ).build()
+
+            val nextAction = Notification.Action.Builder(
+                nextIcon,
+                "Next",
+                pendingServiceIntentStatic(context, ACTION_NEXT)
+            ).build()
+
+            if (art != null) {
+                builder.setLargeIcon(art)
+            }
+            val mediaStyle = Notification.MediaStyle()
+            sessionToken?.let { token ->
+                mediaStyle.setMediaSession(token)
+            }
+            mediaStyle.setShowActionsInCompactView(0, 1, 2)
+
+            return builder
+                .setContentTitle(title)
+                .setContentText(artist.ifEmpty { "Auralis Music Player" })
+                .setSmallIcon(smallIcon)
+                .setCategory(Notification.CATEGORY_TRANSPORT)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setShowWhen(false)
+                .setOngoing(isPlaying)
+                .setStyle(mediaStyle)
+                .addAction(prevAction)
+                .addAction(playPauseAction)
+                .addAction(nextAction)
+                .setContentIntent(pendingActivityIntentStatic(context))
+                .build()
+        }
+
+        private fun pendingServiceIntentStatic(context: Context, action: String): PendingIntent {
+            val intent = Intent(context, MediaPlaybackService::class.java).setAction(action)
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            return PendingIntent.getService(context, action.hashCode(), intent, flags)
+        }
+
+        private fun pendingActivityIntentStatic(context: Context): PendingIntent {
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            return PendingIntent.getActivity(context, 0, intent, flags)
         }
     }
 
@@ -345,32 +478,7 @@ class MediaPlaybackService : Service() {
         mediaSession = session
     }
 
-    private fun loadArtBitmap(path: String): Bitmap? {
-        if (path.isEmpty()) return null
-        return try {
-            if (path.startsWith("content://")) {
-                val uri = Uri.parse(path)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    contentResolver.loadThumbnail(uri, android.util.Size(512, 512), null)
-                } else {
-                    contentResolver.openInputStream(uri)?.use { stream ->
-                        val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                        BitmapFactory.decodeStream(stream, null, opts)
-                    }
-                }
-            } else {
-                val f = java.io.File(path)
-                if (!f.exists()) return null
-                // Downsample to avoid ANR/OOM decoding large art on main thread.
-                val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                BitmapFactory.decodeFile(path, opts)
-            }
-        } catch (_: Exception) {
-            null
-        } catch (_: OutOfMemoryError) {
-            null
-        }
-    }
+    private fun loadArtBitmap(path: String): Bitmap? = loadArtBitmapStatic(this, path)
 
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) return
@@ -421,87 +529,6 @@ class MediaPlaybackService : Service() {
     }
 
     private fun buildNotification(title: String, artist: String, isPlaying: Boolean, art: Bitmap? = null): Notification {
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-        }
-
-        // Android 13+ (API 33-36) SystemUI requires framework icons to explicitly specify
-        // package "android" via Icon.createWithResource("android", resId). Passing raw int
-        // resource IDs causes SystemUI to look up system icons in com.auralis.v2 package,
-        // throwing Resources$NotFoundException and suppressing the notification entirely.
-        val smallIcon = Icon.createWithResource("android", android.R.drawable.ic_media_play)
-        val pauseIcon = Icon.createWithResource("android", android.R.drawable.ic_media_pause)
-        val playIcon = Icon.createWithResource("android", android.R.drawable.ic_media_play)
-        val prevIcon = Icon.createWithResource("android", android.R.drawable.ic_media_previous)
-        val nextIcon = Icon.createWithResource("android", android.R.drawable.ic_media_next)
-
-        val playPauseAction = if (isPlaying) {
-            Notification.Action.Builder(
-                pauseIcon,
-                "Pause",
-                pendingServiceIntent(ACTION_PAUSE)
-            ).build()
-        } else {
-            Notification.Action.Builder(
-                playIcon,
-                "Play",
-                pendingServiceIntent(ACTION_PLAY)
-            ).build()
-        }
-
-        val prevAction = Notification.Action.Builder(
-            prevIcon,
-            "Previous",
-            pendingServiceIntent(ACTION_PREVIOUS)
-        ).build()
-
-        val nextAction = Notification.Action.Builder(
-            nextIcon,
-            "Next",
-            pendingServiceIntent(ACTION_NEXT)
-        ).build()
-
-        if (art != null) {
-            builder.setLargeIcon(art)
-        }
-        val mediaStyle = Notification.MediaStyle()
-        mediaSession?.sessionToken?.let { token ->
-            mediaStyle.setMediaSession(token)
-        }
-        mediaStyle.setShowActionsInCompactView(0, 1, 2)
-
-        return builder
-            .setContentTitle(title)
-            .setContentText(artist.ifEmpty { "Auralis Music Player" })
-            .setSmallIcon(smallIcon)
-            .setCategory(Notification.CATEGORY_TRANSPORT)
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
-            .setShowWhen(false)
-            .setOngoing(isPlaying)
-            .setStyle(mediaStyle)
-            .addAction(prevAction)
-            .addAction(playPauseAction)
-            .addAction(nextAction)
-            .setContentIntent(pendingActivityIntent())
-            .build()
-    }
-
-    private fun pendingServiceIntent(action: String): PendingIntent {
-        val intent = Intent(this, MediaPlaybackService::class.java).setAction(action)
-        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        return PendingIntent.getService(this, action.hashCode(), intent, flags)
-    }
-
-    /** Tapping the notification brings the app back to the foreground. */
-    private fun pendingActivityIntent(): PendingIntent {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        return PendingIntent.getActivity(this, 0, intent, flags)
+        return buildNotificationStatic(this, title, artist, isPlaying, art, mediaSession?.sessionToken)
     }
 }
