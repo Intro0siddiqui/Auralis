@@ -11,6 +11,8 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.drawable.Icon
+import android.util.Log
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -186,6 +188,7 @@ class MediaPlaybackService : Service() {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
+            Log.e("AuralisMedia", "Failed to start foreground service", e)
             // Android 14+ (API 34, incl. 16): a background startForegroundService
             // throws ForegroundServiceStartNotAllowedException when the app has
             // no visible Activity (e.g. Rust watcher / auto-advance fires while
@@ -193,7 +196,9 @@ class MediaPlaybackService : Service() {
             // are still visible instead of nothing at all.
             try {
                 notificationManager?.notify(NOTIFICATION_ID, notification)
-            } catch (_: Exception) { }
+            } catch (notifyErr: Exception) {
+                Log.e("AuralisMedia", "Failed fallback notification notify", notifyErr)
+            }
             return START_NOT_STICKY
         }
         notificationManager?.notify(NOTIFICATION_ID, notification)
@@ -423,24 +428,42 @@ class MediaPlaybackService : Service() {
             Notification.Builder(this)
         }
 
-        // Android requires a monochrome alpha-only icon for the status bar smallIcon.
-        // Using applicationInfo.icon can cause Android 13+ SystemUI to suppress or crash notifications
-        // when the app uses adaptive color bitmap icons.
-        val iconRes = android.R.drawable.ic_media_play
+        // Android 13+ (API 33-36) SystemUI requires framework icons to explicitly specify
+        // package "android" via Icon.createWithResource("android", resId). Passing raw int
+        // resource IDs causes SystemUI to look up system icons in com.auralis.v2 package,
+        // throwing Resources$NotFoundException and suppressing the notification entirely.
+        val smallIcon = Icon.createWithResource("android", android.R.drawable.ic_media_play)
+        val pauseIcon = Icon.createWithResource("android", android.R.drawable.ic_media_pause)
+        val playIcon = Icon.createWithResource("android", android.R.drawable.ic_media_play)
+        val prevIcon = Icon.createWithResource("android", android.R.drawable.ic_media_previous)
+        val nextIcon = Icon.createWithResource("android", android.R.drawable.ic_media_next)
 
-        val playPause = if (isPlaying) {
+        val playPauseAction = if (isPlaying) {
             Notification.Action.Builder(
-                android.R.drawable.ic_media_pause,
+                pauseIcon,
                 "Pause",
                 pendingServiceIntent(ACTION_PAUSE)
             ).build()
         } else {
             Notification.Action.Builder(
-                android.R.drawable.ic_media_play,
+                playIcon,
                 "Play",
                 pendingServiceIntent(ACTION_PLAY)
             ).build()
         }
+
+        val prevAction = Notification.Action.Builder(
+            prevIcon,
+            "Previous",
+            pendingServiceIntent(ACTION_PREVIOUS)
+        ).build()
+
+        val nextAction = Notification.Action.Builder(
+            nextIcon,
+            "Next",
+            pendingServiceIntent(ACTION_NEXT)
+        ).build()
+
         if (art != null) {
             builder.setLargeIcon(art)
         }
@@ -453,19 +476,15 @@ class MediaPlaybackService : Service() {
         return builder
             .setContentTitle(title)
             .setContentText(artist.ifEmpty { "Auralis Music Player" })
-            .setSmallIcon(iconRes)
+            .setSmallIcon(smallIcon)
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setShowWhen(false)
             .setOngoing(isPlaying)
             .setStyle(mediaStyle)
-            .addAction(
-                android.R.drawable.ic_media_previous,
-                "Previous",
-                pendingServiceIntent(ACTION_PREVIOUS)
-            )
-            .addAction(playPause)
-            .addAction(android.R.drawable.ic_media_next, "Next", pendingServiceIntent(ACTION_NEXT))
+            .addAction(prevAction)
+            .addAction(playPauseAction)
+            .addAction(nextAction)
             .setContentIntent(pendingActivityIntent())
             .build()
     }
