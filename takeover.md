@@ -1,70 +1,62 @@
-# Takeover Guide: Critical Runtime Issues & Solutions
+$ adb shell grep h
 
-This document outlines four critical runtime bugs in Auralis v2, their real-world symptoms, root causes, and the verified fixes applied to resolve them.
+$ date
+Mon Sep  7 15:07:16 IST 2026
 
----
+$ date
+Mon Sep  7 15:09:45 IST 2026
 
-## 1. Opus Audio File Playing Silently (No Sound Output)
+$ logcat -c
 
-### Runtime Symptoms
-- The track loaded into the player bar and full-screen view.
-- The elapsed time and progress bar advanced normally.
-- **No audible sound was emitted from speakers or headphones.**
-- Sample file tested: `scratch/sample.m4a` (downloaded from YouTube / third-party sources).
+$ logcat -d -s AuralisMedia
 
-### Root Cause
-1. **Container / Extension Discrepancy**: Hex analysis of the file header revealed EBML magic bytes (`0x1A 0x45 0xDF 0xA3`), which identify a Matroska/WebM container carrying Opus audio. The file had been mislabeled or saved with an `.m4a` extension.
-2. **Blind Extension Dispatch**: In `src/infrastructure/media/player.rs`, `create_decoder` relied on the `.m4a` extension to route the stream directly to Rodio's MP4/AAC decoder. The decoder accepted the stream but yielded empty PCM blocks without returning an error.
-3. **Misleading Demuxer Hint**: When fallback was attempted, `src/infrastructure/media/opus.rs` passed the file's extension (`"m4a"`) to Symphonia's `Hint`. Symphonia attempted an MP4 probe and failed to demux the WebM container.
+$ logcat -d | grep -iE "Bad notification | RemoteServiceException|auralis" |
 
-### The Fix
-- **EBML Header Sniffing**: In `create_decoder` (`src/infrastructure/media/player.rs`), inspect the first 4 bytes of the file stream before inspecting extensions. If the header matches `b"\x1a\x45\xdf\xa3"`, immediately bypass MP4 and instantiate an `OpusSource`.
-- **Enforced Container Hint**: In both `OpusSource::new` and `extract_opus_metadata` (`src/infrastructure/media/opus.rs`), detect EBML magic bytes and force `hint.with_extension("webm")`. This ensures Symphonia's WebM demuxer parses the container and delegates to the native Opus sample decoder.
+head -n 20
+09-07 15:19:15.807 21632 21795 E MiuiPadHome_ActivityManagerWrapper:  mainTaskId=2770   userId=0   windowMode=1   baseIntent=Intent { act=android.intent.action.MAIN flag=872415232 cmp=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity} }
+09-07 15:19:15.808 21632 21795 D RecentsTaskManager: diffTasks onUpdate: [TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}, title=Auralis, titleDescription=Auralis, bounds=null, isLaunchTarget=false, isStackTask=true, isSystemApp=false, isDockable=true, isLocked=false, isAccessLocked=false, mNeedHide=false, hasMultipleTasks=false, cti1Key=, cti2Key=, cti1Task=, cti2Task=] 
+09-07 15:19:15.980 21632 21632 D TaskStackLayoutAlgorithm: TaskViewTransformInfo: R: RectF(756.608, 1532.0, 1347.3921, 2514.9) V: true TaskInfo: TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}
+09-07 15:19:15.981 21632 21632 D TaskView: TaskView bind task, task=[TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}, title=Auralis, titleDescription=Auralis, bounds=null, isLaunchTarget=false, isStackTask=true, isSystemApp=false, isDockable=true, isLocked=false, isAccessLocked=false, mNeedHide=false, hasMultipleTasks=false, cti1Key=, cti2Key=, cti1Task=, cti2Task=] , isLock=false
+09-07 15:19:15.981 21632 21632 D TaskView: onTaskDataLoaded key: TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622} PackageName: com.auralis.v2 thumbnail: android.graphics.Bitmap@b05109b
+09-07 15:19:15.981 21632 21632 D TaskViewThumbnail: setThumbnail, t=[TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}, title=Auralis, titleDescription=Auralis, bounds=null, isLaunchTarget=false, isStackTask=true, isSystemApp=false, isDockable=true, isLocked=false, isAccessLocked=false, mNeedHide=false, hasMultipleTasks=false, cti1Key=, cti2Key=, cti1Task=, cti2Task=] , mThumbnailInfo=[width=2136, height=3200, orien=1, scale=1.0, insets=Rect(0, 90 - 0, 44), mThumbnailBitmapRect=Rect(0, 0 - 2136, 3156) mPosition 0
+09-07 15:19:15.981 21632 21632 D TaskViewThumbnail: updateThumbnailScale, t=[TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}, title=Auralis, titleDescription=Auralis, bounds=null, isLaunchTarget=false, isStackTask=true, isSystemApp=false, isDockable=true, isLocked=false, isAccessLocked=false, mNeedHide=false, hasMultipleTasks=false, cti1Key=, cti2Key=, cti1Task=, cti2Task=] , 
+09-07 15:19:15.983 21632 21632 D TaskView: TaskView bind task, task=[TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}, title=Auralis, titleDescription=Auralis, bounds=null, isLaunchTarget=false, isStackTask=true, isSystemApp=false, isDockable=true, isLocked=false, isAccessLocked=false, mNeedHide=false, hasMultipleTasks=false, cti1Key=, cti2Key=, cti1Task=, cti2Task=] , isLock=false
+09-07 15:19:15.984 21632 21632 D TaskView: onTaskDataLoaded key: TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622} PackageName: com.auralis.v2 thumbnail: android.graphics.Bitmap@b05109b
+09-07 15:19:15.984 21632 21632 D TaskViewThumbnail: setThumbnail, t=[TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}, title=Auralis, titleDescription=Auralis, bounds=null, isLaunchTarget=false, isStackTask=true, isSystemApp=false, isDockable=true, isLocked=false, isAccessLocked=false, mNeedHide=false, hasMultipleTasks=false, cti1Key=, cti2Key=, cti1Task=, cti2Task=] , mThumbnailInfo=[width=2136, height=3200, orien=1, scale=1.0, insets=Rect(0, 90 - 0, 44), mThumbnailBitmapRect=Rect(0, 0 - 2136, 3156) mPosition 0
+09-07 15:19:15.984 21632 21632 D TaskViewThumbnail: updateThumbnailScale, t=[TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}, title=Auralis, titleDescription=Auralis, bounds=null, isLaunchTarget=false, isStackTask=true, isSystemApp=false, isDockable=true, isLocked=false, isAccessLocked=false, mNeedHide=false, hasMultipleTasks=false, cti1Key=, cti2Key=, cti1Task=, cti2Task=] , 
+09-07 15:19:15.987 21632 21632 D TaskStackLayoutAlgorithm: TaskViewTransformInfo: R: RectF(756.608, 1532.0, 1347.3921, 2514.9) V: true TaskInfo: TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}
+09-07 15:19:15.989 21632 21632 D TaskViewThumbnail: updateThumbnailScale, t=[TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}, title=Auralis, titleDescription=Auralis, bounds=null, isLaunchTarget=false, isStackTask=true, isSystemApp=false, isDockable=true, isLocked=false, isAccessLocked=false, mNeedHide=false, hasMultipleTasks=false, cti1Key=, cti2Key=, cti1Task=, cti2Task=] , 
+09-07 15:19:15.997 21632 21632 D TaskStackLayoutAlgorithm: TaskViewTransformInfo: R: RectF(756.608, 1532.0, 1347.3921, 2514.9) V: true TaskInfo: TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}
+09-07 15:19:15.998 21632 21632 D TaskViewThumbnail: updateThumbnailScale, t=[TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}, title=Auralis, titleDescription=Auralis, bounds=null, isLaunchTarget=false, isStackTask=true, isSystemApp=false, isDockable=true, isLocked=false, isAccessLocked=false, mNeedHide=false, hasMultipleTasks=false, cti1Key=, cti2Key=, cti1Task=, cti2Task=] , 
+09-07 15:19:16.171 21632 21818 D MiuiMultiWindowUtils: getFreeformSuggestionList end result size:[com.brave.browser, org.mozilla.firefox, com.google.android.googlequicksearchbox, moe.shizuku.privileged.api, in.hridayan.ashell, com.android.chrome, com.mi.android.globalFileexplorer, com.auralis.v2, com.deepseek.chat, com.miui.calculator, com.android.vending, com.google.android.apps.bard, com.google.android.apps.messaging, com.miui.notes, com.google.android.apps.youtube.music, com.miui.phrase, com.linkedin.android, com.chess, com.termux, com.google.android.apps.labs.language.tailwind, com.android.deskclock, com.google.android.apps.docs.editors.docs, com.foobnix.pdf.reader, com.google.android.apps.nbu.files, com.keptmd, com.google.android.apps.photos, juloo.keyboard2, com.google.android.apps.docs, com.google.android.apps.chromecast.app, com.google.android.apps.safetyhub, com.miui.gallery, com.google.android.youtube, com.google.android.apps.subscriptions.red, com.google.android.apps.maps, com.google.android.apps.tachyon, ch.protonvpn.android, com.google.android.videos, com.miui.miservice, com.google.android.contacts, org.telegram.messenger, com.ludo.king, com.miui.weather2, com.xiaomi.smarthome, com.grofers.customerapp, cn.wps.moffice_eng, com.android.providers.downloads.ui, com.gamestar.perfectpiano, com.xiaomi.calendar, com.google.android.gm, com.miui.bugreport, com.android.soundrecorder, com.miui.creation, ai.qwenlm.chat.android]
+09-07 15:19:18.184 21632 21632 D TaskStackLayoutAlgorithm: TaskViewTransformInfo: R: RectF(733.608, 1532.0, 1324.3921, 2514.9) V: true TaskInfo: TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}
+09-07 15:19:18.196 21632 21632 D TaskStackLayoutAlgorithm: TaskViewTransformInfo: R: RectF(715.608, 1532.0, 1306.3921, 2514.9) V: true TaskInfo: TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}
+09-07 15:19:18.221 21632 21632 D TaskStackLayoutAlgorithm: TaskViewTransformInfo: R: RectF(715.608, 1532.0, 1306.3921, 2514.9) V: true TaskInfo: TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}
+09-07 15:19:18.229 21632 21632 D TaskStackLayoutAlgorithm: TaskViewTransformInfo: R: RectF(716.608, 1532.0, 1307.3921, 2514.9) V: true TaskInfo: TaskKey{id=2770, stackId=0, baseIntent=Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x34000000 pkg=com.auralis.v2 cmp=com.auralis.v2/.MainActivity }, userId=0, lastActiveTime=3549236709, windowingMode=1, isThumbnailBlur=false, isScreening=false, topActivity=ComponentInfo{com.auralis.v2/com.auralis.v2.MainActivity}, mHashCode=83444622}
 
----
+$ dumpsys activity services com.auralis.v2 | grep -i mediplayback |
 
-## 2. Android Playback Notification Not Displaying
+head -n 5
 
-### Runtime Symptoms
-- Audio played in the background on Android devices.
-- `POST_NOTIFICATIONS` permission was granted by the user.
-- **No playback notification or media controls appeared in the Android notification shade or lockscreen.**
-
-### Root Cause
-1. **Suppressed Notification Channel**: In `scripts/android/MediaPlaybackService.kt`, `createNotificationChannel` configured the playback channel with `NotificationManager.IMPORTANCE_LOW` and `setShowBadge(false)`. On modern Android (Android 13–16 / API 33–36), `IMPORTANCE_LOW` notifications are treated as ambient/silent notifications and suppressed from the status bar, lockscreen, and heads-up banner.
-2. **Adaptive Icon Rejection**: In `buildNotification`, the small icon fallback used `applicationInfo.icon`. On Android 13+, the status bar small icon (`setSmallIcon`) requires a monochrome alpha-only vector drawable. Passing an adaptive color bitmap icon causes SystemUI to suppress the notification or fail rendering.
-
-### The Fix
-- **Channel Importance Upgrade**: In `scripts/android/MediaPlaybackService.kt`, set `NotificationManager.IMPORTANCE_DEFAULT` with `lockscreenVisibility = Notification.VISIBILITY_PUBLIC`.
-- **System Vector Fallback**: Use `android.R.drawable.ic_media_play` for `iconRes` in `buildNotification` to guarantee valid monochrome rendering across all Android versions.
-
----
-
-## 3. "Scan Storage" Button Inactive on Android
-
-### Runtime Symptoms
-- Tapping the "Scan Storage" button in the Library view did nothing on Android.
-- No folder picker was displayed, and local device tracks were not indexed.
-
-### Root Cause
-- **Unsupported Attribute in Mobile WebViews**: In `ui/js/modules/library.js`, `triggerFolderScan()` triggered a click on `<input type="file" webkitdirectory directory multiple>`. While desktop Chromium supports `webkitdirectory`, Android WebViews completely ignore directory-selection attributes on DOM file inputs.
-
-### The Fix
-- **Mobile-Aware Storage Discovery**: In `ui/js/modules/library.js`, detect mobile environments and call `scanLibrary()` directly. On Android, this triggers native `MediaStore` querying to discover all audio files on public storage (`Music/`, `Download/`, SD cards) without requiring manual folder picking.
-- **Picker Fallback**: Provide an automated fallback to the multi-file audio input (`global-audio-import-input`) if explicit user selection is required.
-
----
-
-## 4. Theme Button Overridden by System Dark/Light Mode
-
-### Runtime Symptoms
-- Switching themes (Dark / Light / System) in Settings failed to take effect, or the UI snapped back to the device's system appearance.
-- Manual Light or Dark selections were ignored when the operating system was set to the opposite mode.
-
-### Root Cause
-1. **Malformed CSS Syntax**: In `ui/styles/tokens.css`, orphaned closing braces `}` and duplicate un-scoped variable definitions at the end of the file corrupted stylesheet parsing in the browser engine.
-2. **Media Query Specificity**: `@media (prefers-color-scheme: light)` rules were overriding `:root[data-theme="dark"]` when the operating system was set to light theme.
-
-### The Fix
-- **Excise Corrupted Syntax**: Removed all orphaned braces and duplicate rules at the end of `ui/styles/tokens.css`.
-- **Explicit Theme Precedence**: Structured theme rules so that `:root[data-theme="dark"]` and `:root[data-theme="light"]` take absolute precedence over `@media (prefers-color-scheme)` when manually configured by the user.
+$ dumpsys notification | grep -i -A8 "auralis" | head -n 30
+AppSettings: com.auralis.v2 (10415) importance=DEFAULT userSet=true
+NotificationChannel{mId='auralis_playback_channel_v2', mName=Aud..., mDescription=hasDescription , mImportance=3, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=null, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedDefaultApp=false, mOriginalImp=3, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0}
+AppSettings: com.qualcomm.qti.workloadclassifier (10263)
+AppSettings: com.google.android.syncadapters.calendar (10179)
+AppSettings: com.miui.core (10213) importance=NONE userSet=false
+NotificationChannel{mId='auto_install_progress_notification', mName=aut..., mDescription=hasDescription , mImportance=2, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=null, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=false, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800 tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedDefaultApp=false, mOriginalImp=2, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0}
+NotificationChannel{mId='auto_install_notification', mName=aut..., mDescription=hasDescription , mImportance=4, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=null, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=false, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800 tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedDefaultApp=false, mOriginalImp=4, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0}
+AppSettings: com.xiaomi.xmsf (10211) importance=DEFAULT userSet=false
+NotificationChannel{mId='com.xiaomi.xmsf', mName=Not..., mDescription=, mImportance=4, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=content://settings/system/notification_sound, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800 tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedDefaultApp=false, mOriginalImp=4, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0}
+AppSettings: com.chess (10242) importance=NONE userSet=true
+--
+2026-09-06T17:38:49.424734 - config: com.auralis.v2|removeAutomaticZenRules (ORIGIN_SYSTEM) no changes
+2026-09-06T17:38:49.424917 - set_zen_mode: off,com.auralis.v2|removeAutomaticZenRules
+2026-09-06T17:38:49.424956 - set_zen_mode: off,updated setting
+2026-09-06T18:12:06.147208 - config: setAzrState: f615511757e24e7d93f14d755e33bea0 (ORIGIN_APP) no changes
+2026-09-06T18:12:06.147829 - set_zen_mode: off,setAzrState: f615511757e24e7d93f14d755e33bea0
+2026-09-06T18:12:06.147921 - set_zen_mode: off,updated setting
+2026-09-06T18:12:11.083346 - config: setAzrState: f615511757e24e7d93f14d755e33bea0 (ORIGIN_APP) no changes
+2026-09-06T18:12:11.084024 - set_zen_mode: off,setAzrState: f615511757e24e7d93f14d755e33bea0
+2026-09-06T18:12:11.084153 - set_zen_mode: off,updated setting
+2026-09-06T20:59:54.080856 - config: setAzrState: f615511757e24e7d93f14d755e33bea0 (ORIGIN_APP) no changes
