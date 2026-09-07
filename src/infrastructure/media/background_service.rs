@@ -24,7 +24,7 @@ use crate::domain::models::Track;
 
 #[cfg(target_os = "android")]
 use jni::{
-    objects::{JObject, JString, JValue},
+    objects::{GlobalRef, JObject, JString, JValue},
     sys::jstring,
     JNIEnv, JavaVM,
 };
@@ -32,6 +32,21 @@ use jni::{
 /// Kotlin `MediaPlaybackService` (kept in the foreground via `startForeground`).
 #[cfg(target_os = "android")]
 const SERVICE_CLASS: &str = "com/auralis/v2/MediaPlaybackService";
+
+/// Kotlin `MainActivity` (runtime permission requests).
+#[cfg(target_os = "android")]
+const ACTIVITY_CLASS: &str = "com/auralis/v2/MainActivity";
+
+/// Cached global refs for app classes.
+///
+/// `JNIEnv::find_class` resolves through the system class loader when called
+/// from an attached native thread (tokio workers), which cannot see app
+/// classes — every lookup therefore goes through [`app_class`], which caches
+/// a global ref and falls back to the app `ClassLoader.loadClass`.
+#[cfg(target_os = "android")]
+static SERVICE_CLASS_REF: OnceLock<GlobalRef> = OnceLock::new();
+#[cfg(target_os = "android")]
+static ACTIVITY_CLASS_REF: OnceLock<GlobalRef> = OnceLock::new();
 
 /// The live `JavaVM`, reconstructed from the pointer captured in `JNI_OnLoad`.
 #[cfg(target_os = "android")]
@@ -93,7 +108,7 @@ pub fn stop_service() {
     {
         let Some(ctx) = service_context() else { return };
         with_attached_env(|env| {
-            let class = env.find_class(SERVICE_CLASS)?;
+            let class = app_class(env, &SERVICE_CLASS_REF, SERVICE_CLASS)?;
             env.call_static_method(
                 class,
                 "stop",
@@ -112,7 +127,7 @@ pub fn request_notification_permission() {
     {
         let Some(ctx) = service_context() else { return };
         with_attached_env(|env| {
-            let class = env.find_class("com/auralis/v2/MainActivity")?;
+            let class = app_class(env, &ACTIVITY_CLASS_REF, ACTIVITY_CLASS)?;
             // Kotlin `requestRuntimePermissions(context: Any?)` erases to
             // `(Ljava/lang/Object;)V` — NOT `(Landroid/content/Context;)V`.
             // The Context descriptor throws NoSuchMethodError on every call.
@@ -131,7 +146,7 @@ pub fn request_notification_permission() {
 fn notify(track: &Track, position: Duration, is_playing: bool) {
     let Some(ctx) = service_context() else { return };
     with_attached_env(|env| {
-        let class = env.find_class(SERVICE_CLASS)?;
+        let class = app_class(env, &SERVICE_CLASS_REF, SERVICE_CLASS)?;
         let title = env.new_string(track.title.as_str())?;
         let artist = env.new_string(track.artist.clone().unwrap_or_default().as_str())?;
         let art_path = env.new_string(track.album_art_path.clone().unwrap_or_default().as_str())?;
@@ -152,6 +167,114 @@ fn notify(track: &Track, position: Duration, is_playing: bool) {
         Ok(())
     });
     debug!(track_id = %track.id, ?position, is_playing, "Background service notified");
+}
+
+/// Resolve an app class to a cached global ref, from any thread.
+///
+/// `find_class` on an attached native thread (tokio workers) resolves through
+/// the system class loader, which cannot see app classes
+/// (`ClassNotFoundException`), so the fast path is tried first and the app
+/// `ClassLoader.loadClass` fallback second. Either way the result is cached,
+/// so later calls never touch the class loader again.
+#[cfg(target_os = "android")]
+fn app_class(
+    env: &mut JNIEnv<'_>,
+    slot: &'static OnceLock<GlobalRef>,
+    slashed: &str,
+) -> jni::errors::Result<&'static GlobalRef> {
+    if let Some(cached) = slot.get() {
+        return Ok(cached);
+    }
+    let global = match env
+        .find_class(slashed)
+        .and_then(|class| env.new_global_ref(class))
+    {
+        Ok(global) => global,
+        Err(_) => {
+            // A pending ClassNotFoundException would poison every later JNI
+            // call on this env — clear it before trying the fallback.
+            let _ = env.exception_clear();
+            class_via_app_loader(env, slashed)?
+        }
+    };
+    Ok(slot.get_or_init(move || global))
+}
+
+/// Resolve `slashed` (e.g. `com/auralis/v2/MediaPlaybackService`) through the
+/// live context's `ClassLoader`, which works from any attached thread.
+#[cfg(target_os = "android")]
+fn class_via_app_loader(env: &mut JNIEnv<'_>, slashed: &str) -> jni::errors::Result<GlobalRef> {
+    let ctx = service_context().ok_or(jni::errors::Error::NullPtr("service context"))?;
+    let loader = env
+        .call_method(ctx, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let dotted = env.new_string(slashed.replace('/', "."))?;
+    let class = env
+        .call_method(
+            loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&dotted)],
+        )?
+        .l()?;
+    env.new_global_ref(class)
+}
+
+/// Best-effort pre-cache of app class refs while `JNI_OnLoad` still runs under
+/// the app class loader. Failures are fine — the classloader fallback in
+/// [`app_class`] covers them — but a warm cache avoids the fallback entirely.
+#[cfg(target_os = "android")]
+pub(crate) fn precache_classes(vm: &jni::JavaVM) {
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    for (slot, name) in [
+        (&SERVICE_CLASS_REF, SERVICE_CLASS),
+        (&ACTIVITY_CLASS_REF, ACTIVITY_CLASS),
+    ] {
+        if slot.get().is_none() {
+            match env.find_class(name).and_then(|c| env.new_global_ref(c)) {
+                Ok(global) => {
+                    let _ = slot.set(global);
+                }
+                Err(_) => {
+                    let _ = env.exception_clear();
+                }
+            }
+        }
+    }
+}
+
+/// Best-effort `android.util.Log.e`.
+///
+/// Framework classes resolve from any thread, so bridge failures become
+/// visible in logcat even though the Rust `tracing` subscriber is absent on
+/// release Android builds (where `warn!` goes nowhere).
+#[cfg(target_os = "android")]
+fn logcat_error(tag: &str, msg: &str) {
+    let Some(vm) = cached_vm() else { return };
+    let Ok(mut guard) = vm.attach_current_thread() else {
+        return;
+    };
+    let env: &mut JNIEnv<'_> = &mut guard;
+    if logcat_emit(env, tag, msg).is_err() {
+        let _ = env.exception_clear();
+    }
+}
+
+/// Emit one `android.util.Log.e` line. Called only by [`logcat_error`].
+#[cfg(target_os = "android")]
+fn logcat_emit(env: &mut JNIEnv<'_>, tag: &str, msg: &str) -> jni::errors::Result<()> {
+    let class = env.find_class("android/util/Log")?;
+    let tag = env.new_string(tag)?;
+    let msg = env.new_string(msg)?;
+    env.call_static_method(
+        class,
+        "e",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+        &[JValue::Object(&tag), JValue::Object(&msg)],
+    )?;
+    Ok(())
 }
 
 /// Reconstruct the cached `JavaVM` from the pointer captured in `JNI_OnLoad`.
@@ -186,6 +309,9 @@ fn with_attached_env<T>(f: impl FnOnce(&mut JNIEnv<'_>) -> jni::errors::Result<T
             if guard.exception_check().unwrap_or(false) {
                 let _ = guard.exception_clear();
             }
+            // `tracing` has no subscriber on release Android builds, so mirror
+            // the failure into logcat where it can actually be diagnosed.
+            logcat_error("AuralisBridge", &format!("JNI call failed: {e}"));
             warn!(error = %e, "JNI call failed");
             None
         }
@@ -198,6 +324,10 @@ fn service_context() -> Option<JObject<'static>> {
     let ctx = ndk_context::android_context().context();
     if ctx.is_null() {
         warn!("Android context unavailable; background service bridge disabled");
+        logcat_error(
+            "AuralisBridge",
+            "Android context unavailable; background service bridge disabled",
+        );
         return None;
     }
     // SAFETY: `ctx` is the live global JNI reference seeded by JNI_OnLoad.

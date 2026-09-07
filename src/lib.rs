@@ -446,6 +446,9 @@ pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _reserved: *mut std::ffi::c_v
 
     android_jni::INITIAL_VM.store(vm.get_java_vm_pointer() as *mut c_void, Ordering::SeqCst);
     android_jni::try_seed(&vm);
+    // Cache app class refs while JNI_OnLoad still runs under the app class
+    // loader — best-effort; the classloader fallback covers any misses.
+    crate::infrastructure::media::background_service::precache_classes(&vm);
 
     jni::sys::JNI_VERSION_1_6
 }
