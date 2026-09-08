@@ -107,7 +107,7 @@ pub fn stop_service() {
     #[cfg(target_os = "android")]
     {
         let Some(ctx) = service_context() else { return };
-        with_attached_env(|env| {
+        with_attached_env("svc-stop", |env| {
             let class = app_class(env, &SERVICE_CLASS_REF, SERVICE_CLASS)?;
             env.call_static_method(
                 class,
@@ -126,7 +126,7 @@ pub fn request_notification_permission() {
     #[cfg(target_os = "android")]
     {
         let Some(ctx) = service_context() else { return };
-        with_attached_env(|env| {
+        with_attached_env("perm-request", |env| {
             let class = app_class(env, &ACTIVITY_CLASS_REF, ACTIVITY_CLASS)?;
             // Kotlin `requestRuntimePermissions(context: Any?)` erases to
             // `(Ljava/lang/Object;)V` — NOT `(Landroid/content/Context;)V`.
@@ -145,7 +145,7 @@ pub fn request_notification_permission() {
 #[cfg(target_os = "android")]
 fn notify(track: &Track, position: Duration, is_playing: bool) {
     let Some(ctx) = service_context() else { return };
-    with_attached_env(|env| {
+    with_attached_env("svc-start", |env| {
         let class = app_class(env, &SERVICE_CLASS_REF, SERVICE_CLASS)?;
         let title = env.new_string(track.title.as_str())?;
         let artist = env.new_string(track.artist.clone().unwrap_or_default().as_str())?;
@@ -297,22 +297,26 @@ fn cached_vm() -> Option<&'static JavaVM> {
 /// Attaching an already-attached thread is a no-op per the JNI spec, so this
 /// is safe from both tokio worker threads and the main thread.
 #[cfg(target_os = "android")]
-fn with_attached_env<T>(f: impl FnOnce(&mut JNIEnv<'_>) -> jni::errors::Result<T>) -> Option<T> {
+fn with_attached_env<T>(
+    op: &'static str,
+    f: impl FnOnce(&mut JNIEnv<'_>) -> jni::errors::Result<T>,
+) -> Option<T> {
     let vm = cached_vm()?;
     let mut guard = vm.attach_current_thread().ok()?;
     match f(&mut guard) {
         Ok(v) => Some(v),
         Err(e) => {
-            // Clear any pending JNI exception (e.g. ForegroundServiceStartNotAllowedException
-            // when startForegroundService is throttled in the background) so future JNI
-            // calls are not poisoned.
+            // Dump the full Java stack trace to logcat (tag `System.err`)
+            // BEFORE clearing — the one-line `e` alone cannot identify throws
+            // from inside Kotlin (e.g. which statement in `start()` failed).
             if guard.exception_check().unwrap_or(false) {
+                let _ = guard.exception_describe();
                 let _ = guard.exception_clear();
             }
             // `tracing` has no subscriber on release Android builds, so mirror
             // the failure into logcat where it can actually be diagnosed.
-            logcat_error("AuralisBridge", &format!("JNI call failed: {e}"));
-            warn!(error = %e, "JNI call failed");
+            logcat_error("AuralisBridge", &format!("JNI {op} failed: {e}"));
+            warn!(op, error = %e, "JNI call failed");
             None
         }
     }
