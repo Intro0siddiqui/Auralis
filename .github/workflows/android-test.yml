@@ -104,6 +104,18 @@ jobs:
           cp scripts/android/MediaStoreScanner.kt "$PKG_DIR/MediaStoreScanner.kt"
           echo "Installed MediaPlaybackService.kt, MainActivity.kt, and MediaStoreScanner.kt from repo into $PKG_DIR"
 
+          # Install ProGuard / R8 keep rules to protect JNI reflection targets from minification/stripping
+          if [ -f "scripts/android/proguard-rules.pro" ]; then
+            mkdir -p "gen/android/app"
+            if [ -f "gen/android/app/proguard-rules.pro" ]; then
+              cat scripts/android/proguard-rules.pro >> "gen/android/app/proguard-rules.pro"
+            else
+              cp scripts/android/proguard-rules.pro "gen/android/app/proguard-rules.pro"
+            fi
+            echo "Installed scripts/android/proguard-rules.pro into gen/android/app/proguard-rules.pro:"
+            cat "gen/android/app/proguard-rules.pro"
+          fi
+
       - name: Configure Android SDK versions
         run: |
           for f in $(find gen/android -name "build.gradle*" 2>/dev/null); do

@@ -6,11 +6,14 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import androidx.annotation.Keep
 import org.json.JSONArray
 import org.json.JSONObject
 
+@Keep
 object MediaStoreScanner {
 
+    @Keep
     @JvmStatic
     fun queryAllAudio(context: Context): String {
         val jsonArray = JSONArray()

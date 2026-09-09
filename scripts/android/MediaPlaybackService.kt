@@ -22,6 +22,7 @@ import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import androidx.annotation.Keep
 
 /**
  * JNI bridge into the Rust audio engine (libauralis_lib.so).
@@ -30,11 +31,13 @@ import android.os.PowerManager
  * "previous" / "seek:<seconds>". The Rust side dispatches them to the same
  * playback commands as the UI, so the app and this notification stay in sync.
  */
+@Keep
 object NativeBridge {
     init {
         System.loadLibrary("auralis_lib")
     }
 
+    @Keep
     external fun command(cmd: String): String
 }
 
@@ -49,8 +52,10 @@ object NativeBridge {
  * Started from Rust via `MediaPlaybackService.start(...)` (JNI) whenever
  * playback begins; updated on every state change; stopped when playback ends.
  */
+@Keep
 class MediaPlaybackService : Service() {
 
+    @Keep
     companion object {
         // v2 channel id: v1 shipped with IMPORTANCE_LOW on some installs and
         // Android keeps channel settings sticky across upgrades (create is a
@@ -64,6 +69,7 @@ class MediaPlaybackService : Service() {
         const val ACTION_NEXT = "com.auralis.v2.action.NEXT"
         const val ACTION_PREVIOUS = "com.auralis.v2.action.PREVIOUS"
 
+        @Keep
         @JvmStatic
         fun createNotificationChannel(context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -82,6 +88,7 @@ class MediaPlaybackService : Service() {
         }
 
         /** Start (or refresh) the foreground service with the current track info. */
+        @Keep
         @JvmStatic
         fun start(
             context: Context,
@@ -92,51 +99,83 @@ class MediaPlaybackService : Service() {
             isPlaying: Boolean,
             artPath: String
         ) {
-            createNotificationChannel(context)
-
-            // If notification permission is missing on Android 13+, trigger request
-            if (isPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                if (context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-                    != android.content.pm.PackageManager.PERMISSION_GRANTED
-                ) {
-                    MainActivity.requestRuntimePermissions(context)
-                }
-            }
-
-            val intent = Intent(context, MediaPlaybackService::class.java).apply {
-                putExtra("title", title)
-                putExtra("artist", artist)
-                putExtra("durationSecs", durationSecs)
-                putExtra("positionSecs", positionSecs)
-                putExtra("isPlaying", isPlaying)
-                putExtra("artPath", artPath)
-            }
-
+            // Wrap entire body — createNotificationChannel / permission / Intent /
+            // startForegroundService can all throw (e.g. MIUI HyperOS quirks,
+            // Resources$NotFoundException, SecurityException). Any throw must
+            // still produce a fallback plain notification so the user sees controls.
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
+                try {
+                    createNotificationChannel(context)
+                } catch (e: Throwable) {
+                    Log.e("AuralisMedia", "createNotificationChannel failed", e)
                 }
-            } catch (e: Exception) {
-                Log.e("AuralisMedia", "startForegroundService restricted in background; falling back to direct notification notify", e)
+
+                // If notification permission is missing on Android 13+, trigger request
+                if (isPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    try {
+                        if (context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                            != android.content.pm.PackageManager.PERMISSION_GRANTED
+                        ) {
+                            MainActivity.requestRuntimePermissions(context)
+                        }
+                    } catch (e: Throwable) {
+                        Log.e("AuralisMedia", "permission check/request failed", e)
+                    }
+                }
+
+                val intent = Intent(context, MediaPlaybackService::class.java).apply {
+                    putExtra("title", title)
+                    putExtra("artist", artist)
+                    putExtra("durationSecs", durationSecs)
+                    putExtra("positionSecs", positionSecs)
+                    putExtra("isPlaying", isPlaying)
+                    putExtra("artPath", artPath)
+                }
+
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(intent)
+                    } else {
+                        context.startService(intent)
+                    }
+                    Log.i("AuralisMedia", "start: startForegroundService succeeded isPlaying=$isPlaying title=$title")
+                    return
+                } catch (e: Throwable) {
+                    Log.e("AuralisMedia", "startForegroundService failed; falling back to direct notify", e)
+                }
+
+                // Fallback: post plain media notification directly (works when
+                // background start is blocked on Android 14+ / MIUI HyperOS, or
+                // when startForegroundService threw).
                 try {
                     val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                     val art = loadArtBitmapStatic(context, artPath)
                     val notification = buildNotificationStatic(context, title, artist, isPlaying, art, null)
                     notificationManager?.notify(NOTIFICATION_ID, notification)
-                } catch (fallbackErr: Exception) {
+                    Log.i("AuralisMedia", "start: fallback notify posted isPlaying=$isPlaying")
+                } catch (fallbackErr: Throwable) {
                     Log.e("AuralisMedia", "Fallback notification notify failed", fallbackErr)
                 }
+            } catch (e: Throwable) {
+                // Absolute last resort — ensure no exception propagates to JNI
+                // (which would appear as `Java exception was thrown` with no detail).
+                Log.e("AuralisMedia", "MediaPlaybackService.start outer catch", e)
+                try {
+                    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                    val n = try { buildNotificationStatic(context, title, artist, isPlaying, null, null) } catch (_: Throwable) { null }
+                    if (n != null) nm?.notify(NOTIFICATION_ID, n)
+                } catch (_: Throwable) {}
             }
         }
 
         /** Stop the foreground service (queue exhausted / explicit stop). */
+        @Keep
         @JvmStatic
         fun stop(context: Context) {
             context.stopService(Intent(context, MediaPlaybackService::class.java))
         }
 
+        @Keep
         @JvmStatic
         fun loadArtBitmapStatic(context: Context, path: String): Bitmap? {
             if (path.isEmpty()) return null
@@ -165,6 +204,7 @@ class MediaPlaybackService : Service() {
             }
         }
 
+        @Keep
         @JvmStatic
         fun buildNotificationStatic(
             context: Context,

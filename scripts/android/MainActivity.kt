@@ -8,12 +8,15 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
+import androidx.annotation.Keep
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.lang.ref.WeakReference
 
+@Keep
 class MainActivity : TauriActivity() {
 
+    @Keep
     companion object {
         const val PERMISSION_REQUEST_CODE = 1001
         private var currentActivityRef: WeakReference<MainActivity>? = null
@@ -23,6 +26,7 @@ class MainActivity : TauriActivity() {
         @Volatile
         private var pendingPermissionRequest = false
 
+        @Keep
         @JvmStatic
         @JvmOverloads
         fun requestRuntimePermissions(context: Any? = null) {
