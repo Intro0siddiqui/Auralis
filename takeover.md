@@ -60,24 +60,36 @@ The CI workflow failed, so **no v2.6.36 APK release was ever produced or publish
   4. Replaced transient `finally` button reset with persistent `<i data-lucide="check"></i> Added` button state (`btn-secondary`, disabled) on success and re-enable only on failure.
   5. Scrolled `#downloads-list` into view and surfaced clear toast notifications.
 
+### 5. CI Workflow & Release Pipeline Fixes (v2.6.39)
+- **Root Cause of Missing Release on Manual Dispatch**:
+  - `Generate keystore`, `Sign APK`, and the `release` job previously guarded execution with `if: startsWith(github.ref, 'refs/tags/v')`.
+  - When triggered via manual `workflow_dispatch` on `main`, `github.ref` was `refs/heads/main`, which skipped APK signing and release creation entirely despite building the binaries.
+- **Root Cause of Duplicate x86 Build & Failure in E2E**:
+  - `test-android-e2e` was setting up its own complete Rust/NDK/Tauri build pipeline to recompile `x86_64` APK from scratch instead of reusing the signed `x86_64` APK that `build-android` already produced.
+  - When Android JNI borrow-checker error occurred, both jobs failed redundantly.
+- **Fix**:
+  1. Updated `test-android-e2e` to depend on `build-android` (`needs: [build-android]`) and directly download the signed `release-android` artifact. It extracts the `x86_64` APK and tests the actual production binary on the emulator, eliminating ~180 lines of duplicate toolchain setup and compilation.
+  2. Updated `Generate keystore`, `Sign APK`, and the `release` job to run on both tags and `workflow_dispatch`, dynamically resolving release tag labels (`v${VER}`) when dispatched from `main`.
+  3. Bumped version to `v2.6.39` across `Cargo.toml`, `Cargo.lock`, `tauri.conf.json`, `package.json`.
+
 ## Work State
 
 ### Completed
-- `src/infrastructure/media/background_service.rs` cleaned up and compiles without errors.
-- `@androidx.annotation.Keep` annotations added to all Android JNI classes and methods.
-- `scripts/android/proguard-rules.pro` created and wired into both Android build workflows.
+- `src/infrastructure/media/background_service.rs` JNI lifetime error fixed and verified.
 - `src/infrastructure/media/downloader.rs` recursive chunked range streaming implemented and tested.
 - `ui/js/youtube.js` `clen`/`dur` query fallback and duration propagation implemented.
 - `ui/js/modules/downloads.js` search download button event delegation, fallback resolution, and persistent UI feedback implemented.
-- Version synced to `2.6.38` across `Cargo.toml`, `Cargo.lock`, `tauri.conf.json`, `package.json`.
+- `.github/workflows/build.yml` streamlined: `test-android-e2e` reuses `build-android` APK, manual dispatch properly signs and releases.
+- Version synced to `2.6.39` across `Cargo.toml`, `Cargo.lock`, `tauri.conf.json`, `package.json`.
 
 ### Active
-- Tag and trigger CI release for `v2.6.38`.
-- Install `auralis-v2.6.38-android-arm64.apk` once CI finishes and verify notification appearance and full-length downloads from YouTube search.
+- Tag and trigger CI release for `v2.6.39`.
+- Verify clean CI run and GitHub Release creation for `v2.6.39`.
+- Install `auralis-v2.6.39-android-arm64.apk` on device and verify notification appearance, full-length recursive downloads, and in-app YouTube search downloads.
 
 ## Next Move
-1. Commit and push changes to `main`, push tag `v2.6.38` to trigger release build.
-2. Monitor CI run to ensure `build-android` succeeds and the release APK is uploaded.
+1. Commit and push changes to `main`, push clean tag `v2.6.39` to trigger release build.
+2. Monitor CI run to ensure all jobs succeed and release is published with APKs and desktop artifacts.
 3. On device, install the new APK and verify:
    ```bash
    logcat -c
