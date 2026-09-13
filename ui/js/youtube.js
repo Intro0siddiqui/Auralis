@@ -807,8 +807,26 @@ class YouTubeResolver {
         const ext = this.extFromMime(fmt.mime_type);
         const title = String(bi.title || 'YouTube Audio').trim() || 'YouTube Audio';
         const thumb = this.pickThumb(bi.thumbnail);
-        const totalRaw = fmt.content_length ? Number(fmt.content_length) : NaN;
-        const total = isNaN(totalRaw) ? null : totalRaw;
+        const totalRaw = (fmt.content_length ?? fmt.contentLength) ? Number(fmt.content_length || fmt.contentLength) : NaN;
+        let total = isNaN(totalRaw) ? null : totalRaw;
+        if (!total && streamUrl) {
+            try {
+                const u = new URL(streamUrl);
+                const clen = u.searchParams.get('clen');
+                if (clen && parseInt(clen, 10) > 0) total = parseInt(clen, 10);
+            } catch (_) {}
+        }
+        let durationSecs = Number(bi.duration || bi.lengthSeconds || 0);
+        if (!durationSecs && fmt?.approx_duration_ms) {
+            durationSecs = Math.round(fmt.approx_duration_ms / 1000);
+        }
+        if (!durationSecs && streamUrl) {
+            try {
+                const u = new URL(streamUrl);
+                const dur = u.searchParams.get('dur');
+                if (dur && parseFloat(dur) > 0) durationSecs = Math.round(parseFloat(dur));
+            } catch (_) {}
+        }
 
         // Build headers matched to the InnerTube client that produced the URL
         // — googlevideo validates UA/Referer/Origin against the client context.
@@ -840,6 +858,9 @@ class YouTubeResolver {
             title,
             ext,
             total_bytes: total,
+            duration: durationSecs,
+            duration_secs: durationSecs,
+            expected_duration_secs: durationSecs,
             thumbnail: thumb,
             platform: 'youtube',
             headers,

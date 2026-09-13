@@ -123,6 +123,24 @@ fn sanitize_ext(raw: &str, fallback: &str) -> String {
     }
 }
 
+/// Helper to extract an integer query parameter from a URL (e.g. `clen=15234567`).
+fn extract_url_param_u64(url: &str, param: &str) -> Option<u64> {
+    let key = format!("{param}=");
+    let start = url.find(&key)? + key.len();
+    let val_str = &url[start..];
+    let end = val_str.find('&').unwrap_or(val_str.len());
+    val_str[..end].parse::<u64>().ok()
+}
+
+/// Helper to extract a float query parameter from a URL (e.g. `dur=245.123`).
+fn extract_url_param_f64(url: &str, param: &str) -> Option<f64> {
+    let key = format!("{param}=");
+    let start = url.find(&key)? + key.len();
+    let val_str = &url[start..];
+    let end = val_str.find('&').unwrap_or(val_str.len());
+    val_str[..end].parse::<f64>().ok()
+}
+
 /// Replace filesystem-unsafe characters so titles produce valid filenames.
 /// Strips path separators, control chars, "..", reserved Windows names, and
 /// limits length to 200 chars. Never returns empty or "." / "..".
@@ -532,11 +550,16 @@ impl Downloader {
                 DownloaderError::HttpError(format!("failed to build HTTP client: {e}"))
             })?;
 
-        const MAX_STREAM_RETRIES: usize = 5;
+        const MAX_CONSECUTIVE_ERRORS: usize = 5;
         const MIN_VALID_STREAM_BYTES: u64 = 10 * 1024; // 10KB
 
-        let mut attempt: usize = 0;
-        let mut total_bytes: Option<u64> = job.total_bytes;
+        let mut consecutive_errors: usize = 0;
+        let mut total_bytes: Option<u64> = job
+            .total_bytes
+            .or_else(|| extract_url_param_u64(&job.stream_url, "clen"));
+        let expected_duration_secs: Option<u32> = job
+            .expected_duration_secs
+            .or_else(|| extract_url_param_f64(&job.stream_url, "dur").map(|d| d.round() as u32));
         let mut current_downloaded: u64 = initial_start_byte;
 
         // Check if staging file already exists on disk and has bytes for resuming
@@ -547,18 +570,33 @@ impl Downloader {
         }
 
         let overall_start = Instant::now();
+        let mut chunk_iteration: usize = 0;
 
         loop {
-            attempt += 1;
-            if attempt > 1 {
-                let backoff_ms = 500 * (1 << (attempt - 2).min(5));
+            chunk_iteration += 1;
+
+            // Check if full stream byte length is already reached
+            if let Some(total) = total_bytes {
+                if total > 0 && current_downloaded >= total {
+                    info!(
+                        download_id = %id,
+                        downloaded = current_downloaded,
+                        total = total,
+                        "Full stream byte length reached (downloaded >= total) — proceeding to validation"
+                    );
+                    break;
+                }
+            }
+
+            if consecutive_errors > 0 {
+                let backoff_ms = 500 * (1 << (consecutive_errors - 1).min(5));
                 info!(
                     download_id = %id,
-                    attempt = attempt,
-                    max_attempts = MAX_STREAM_RETRIES,
+                    consecutive_errors = consecutive_errors,
+                    max_consecutive_errors = MAX_CONSECUTIVE_ERRORS,
                     backoff_ms = backoff_ms,
                     downloaded = current_downloaded,
-                    "Stream retry/reconnect attempt with exponential backoff"
+                    "Stream retry after error with exponential backoff"
                 );
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
@@ -594,9 +632,10 @@ impl Downloader {
             info!(
                 download_id = %id,
                 host = %host,
-                attempt = attempt,
+                chunk_iteration = chunk_iteration,
                 start_byte = current_downloaded,
-                "Sending GET for stream"
+                total_bytes = ?total_bytes,
+                "Sending GET for stream range"
             );
 
             let send_res = tokio::time::timeout(Duration::from_secs(30), req.send()).await;
@@ -604,16 +643,18 @@ impl Downloader {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
                     let msg = format!("request failed [{host}] start_byte={current_downloaded}: {e} (url={url_snip})");
-                    warn!(download_id = %id, host = %host, error = %e, attempt = attempt, "Request send error");
-                    if attempt < MAX_STREAM_RETRIES {
+                    warn!(download_id = %id, host = %host, error = %e, consecutive_errors = consecutive_errors, "Request send error");
+                    consecutive_errors += 1;
+                    if consecutive_errors < MAX_CONSECUTIVE_ERRORS {
                         continue;
                     }
                     return Err(DownloaderError::HttpError(msg));
                 }
                 Err(_) => {
                     let msg = format!("request timed out after 30s [{host}] start_byte={current_downloaded} url={url_snip}");
-                    warn!(download_id = %id, host = %host, attempt = attempt, "Request send timed out");
-                    if attempt < MAX_STREAM_RETRIES {
+                    warn!(download_id = %id, host = %host, consecutive_errors = consecutive_errors, "Request send timed out");
+                    consecutive_errors += 1;
+                    if consecutive_errors < MAX_CONSECUTIVE_ERRORS {
                         continue;
                     }
                     return Err(DownloaderError::HttpError(msg));
@@ -642,16 +683,36 @@ impl Downloader {
             }
 
             if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                if current_downloaded >= MIN_VALID_STREAM_BYTES
+                    && validate_audio_file(
+                        &job.staging_path,
+                        expected_duration_secs,
+                        &job.ext,
+                        job.format,
+                    )
+                    .is_ok()
+                {
+                    info!(
+                        download_id = %id,
+                        downloaded = current_downloaded,
+                        "416 Range Not Satisfiable on verified audio file — full stream already downloaded"
+                    );
+                    break;
+                }
                 warn!(
                     download_id = %id,
                     start_byte = current_downloaded,
-                    "416 Range Not Satisfiable — resetting downloaded to 0 and retrying"
+                    "416 Range Not Satisfiable on unverified staging file — resetting downloaded to 0 and retrying"
                 );
                 current_downloaded = 0;
                 let _ = tokio::fs::remove_file(&job.staging_path).await;
-                if attempt < MAX_STREAM_RETRIES {
+                consecutive_errors += 1;
+                if consecutive_errors < MAX_CONSECUTIVE_ERRORS {
                     continue;
                 }
+                return Err(DownloaderError::HttpError(format!(
+                    "HTTP 416 Range Not Satisfiable [{host}]"
+                )));
             }
 
             let ct = res
@@ -667,19 +728,23 @@ impl Downloader {
                 .unwrap_or("-")
                 .to_string();
 
-            let response_total: Option<u64> = if resuming {
-                res.headers()
-                    .get(reqwest::header::CONTENT_RANGE)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.rsplit('/').next())
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-                    .or_else(|| res.content_length().map(|cl| cl + current_downloaded))
-            } else {
-                res.content_length()
-            };
+            let response_total: Option<u64> = res
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.rsplit('/').next())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .or_else(|| {
+                    if resuming {
+                        res.content_length().map(|cl| cl + current_downloaded)
+                    } else {
+                        res.content_length()
+                    }
+                });
 
-            if response_total.is_some() {
-                total_bytes = response_total;
+            // Update total_bytes, but NEVER shrink a larger known total with a partial chunk length
+            if let Some(resp_tot) = response_total {
+                total_bytes = Some(total_bytes.map_or(resp_tot, |cur| cur.max(resp_tot)));
             }
 
             info!(
@@ -723,7 +788,8 @@ impl Downloader {
                     return Err(DownloaderError::HttpError(msg));
                 }
 
-                if attempt < MAX_STREAM_RETRIES {
+                consecutive_errors += 1;
+                if consecutive_errors < MAX_CONSECUTIVE_ERRORS {
                     continue;
                 }
                 return Err(DownloaderError::HttpError(msg));
@@ -740,7 +806,7 @@ impl Downloader {
                 }
             }
 
-            let mut file = if resuming {
+            let mut file = if current_downloaded > 0 {
                 tokio::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -765,6 +831,7 @@ impl Downloader {
 
             let stream_start_instant = Instant::now();
             let mut stream_interrupted = false;
+            let mut bytes_in_this_request: u64 = 0;
 
             loop {
                 let chunk_opt =
@@ -798,7 +865,7 @@ impl Downloader {
                     };
 
                 let Some(chunk) = chunk_opt else {
-                    // Stream reached EOF
+                    // Stream reached EOF for this HTTP response
                     break;
                 };
 
@@ -815,6 +882,7 @@ impl Downloader {
                     )));
                 }
 
+                bytes_in_this_request += chunk.len() as u64;
                 current_downloaded += chunk.len() as u64;
 
                 let elapsed_total = overall_start.elapsed().as_secs_f64();
@@ -829,7 +897,7 @@ impl Downloader {
                     state.downloaded_bytes = current_downloaded;
                     if let Some(t) = total_bytes {
                         if t > 0 {
-                            state.progress = (current_downloaded as f32) / (t as f32);
+                            state.progress = ((current_downloaded as f32) / (t as f32)).min(1.0);
                             let remaining = t.saturating_sub(current_downloaded);
                             state.eta_secs = (remaining as u32).checked_div(speed as u32);
                         }
@@ -841,96 +909,93 @@ impl Downloader {
 
             let _ = file.flush().await;
 
-            if stream_interrupted {
-                if attempt < MAX_STREAM_RETRIES {
-                    continue;
+            if bytes_in_this_request > 0 {
+                consecutive_errors = 0; // Successful progress made!
+            } else if stream_interrupted {
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    return Err(DownloaderError::HttpError(format!(
+                        "Stream interrupted and max consecutive errors ({MAX_CONSECUTIVE_ERRORS}) reached [{host}] ({current_downloaded}/{:?} bytes)",
+                        total_bytes
+                    )));
                 }
-                return Err(DownloaderError::HttpError(format!(
-                    "Stream interrupted and max retries ({MAX_STREAM_RETRIES}) reached [{host}] ({current_downloaded}/{:?} bytes)",
-                    total_bytes
-                )));
+                continue;
             }
 
-            // Strict Stream Completion & Content-Length Verification
+            // Check if full stream has been reached:
             if let Some(total) = total_bytes {
-                if current_downloaded < total {
-                    warn!(
+                if total > 0 && current_downloaded >= total {
+                    info!(
                         download_id = %id,
                         downloaded = current_downloaded,
                         total = total,
-                        attempt = attempt,
-                        "Stream ended prematurely (downloaded < total) — triggering range resume retry"
+                        "Stream finished with all expected bytes ({current_downloaded}/{total}) — proceeding to validation"
                     );
-                    if attempt < MAX_STREAM_RETRIES {
-                        continue;
-                    }
-                    return Err(DownloaderError::DownloadFailed(format!(
-                        "Stream incomplete: downloaded {current_downloaded} of {total} bytes after {MAX_STREAM_RETRIES} attempts"
-                    )));
-                }
-            }
-
-            // Abnormally small stream check (unless expected total size is explicitly smaller)
-            let is_expected_small = total_bytes.is_some_and(|t| t < MIN_VALID_STREAM_BYTES);
-            if current_downloaded < MIN_VALID_STREAM_BYTES && !is_expected_small {
-                warn!(
-                    download_id = %id,
-                    downloaded = current_downloaded,
-                    attempt = attempt,
-                    "Stream ended with abnormally small byte count (< 10KB) — treating as dropped stream"
-                );
-                if attempt < MAX_STREAM_RETRIES {
-                    current_downloaded = 0;
-                    let _ = tokio::fs::remove_file(&job.staging_path).await;
-                    continue;
-                }
-                return Err(DownloaderError::DownloadFailed(format!(
-                    "Stream abnormally small ({current_downloaded} bytes < 10KB) after {MAX_STREAM_RETRIES} attempts"
-                )));
-            }
-
-            // Post-Download Audio Stream Integrity & Duration Validation
-            info!(
-                download_id = %id,
-                staging_path = %job.staging_path.display(),
-                expected_duration = ?job.expected_duration_secs,
-                "Validating audio stream integrity with lofty"
-            );
-
-            match validate_audio_file(
-                &job.staging_path,
-                job.expected_duration_secs,
-                &job.ext,
-                job.format,
-            ) {
-                Ok(decoded_duration) => {
+                    break;
+                } else {
+                    // Googlevideo chunk cutoff — recursively continue range request for the next chunk
                     info!(
                         download_id = %id,
-                        decoded_duration = decoded_duration,
-                        "Audio stream validation succeeded"
+                        downloaded = current_downloaded,
+                        total = total,
+                        "Chunk completed; continuing range request for remaining bytes ({current_downloaded}/{total})"
+                    );
+                    continue;
+                }
+            } else {
+                // total_bytes is unknown
+                if bytes_in_this_request > 0 {
+                    // Try to request next range to see if more bytes exist
+                    info!(
+                        download_id = %id,
+                        downloaded = current_downloaded,
+                        "Chunk completed with unknown total_bytes; probing next range for remaining bytes"
+                    );
+                    continue;
+                } else {
+                    // Zero bytes in this request and clean EOF -> stream is finished!
+                    info!(
+                        download_id = %id,
+                        downloaded = current_downloaded,
+                        "Stream reached clean EOF with no additional bytes — proceeding to validation"
                     );
                     break;
                 }
-                Err(val_err) => {
-                    warn!(
-                        download_id = %id,
-                        error = %val_err,
-                        attempt = attempt,
-                        "Audio stream validation failed on staging file"
-                    );
-                    // Reject-on-zero gate: delete .part staging file immediately and do not
-                    // fall through to atomic rename. Cleanup helper is called on every
-                    // validation failure; on final attempt the outer spawn_stream error
-                    // handler also marks Failed and emits download:failed.
-                    cleanup_staging_file(&job.staging_path).await;
-                    if attempt < MAX_STREAM_RETRIES {
-                        current_downloaded = 0;
-                        continue;
-                    }
-                    return Err(DownloaderError::DownloadFailed(format!(
-                        "Audio stream integrity validation failed: {val_err}"
-                    )));
-                }
+            }
+        }
+
+        // Post-Download Audio Stream Integrity & Duration Validation
+        info!(
+            download_id = %id,
+            staging_path = %job.staging_path.display(),
+            expected_duration = ?expected_duration_secs,
+            downloaded = current_downloaded,
+            "Validating audio stream integrity with lofty"
+        );
+
+        match validate_audio_file(
+            &job.staging_path,
+            expected_duration_secs,
+            &job.ext,
+            job.format,
+        ) {
+            Ok(decoded_duration) => {
+                info!(
+                    download_id = %id,
+                    decoded_duration = decoded_duration,
+                    "Audio stream validation succeeded"
+                );
+            }
+            Err(val_err) => {
+                warn!(
+                    download_id = %id,
+                    error = %val_err,
+                    "Audio stream validation failed on staging file"
+                );
+                cleanup_staging_file(&job.staging_path).await;
+                return Err(DownloaderError::DownloadFailed(format!(
+                    "Audio stream integrity validation failed: {val_err}"
+                )));
             }
         }
 

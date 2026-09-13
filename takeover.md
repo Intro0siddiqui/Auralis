@@ -32,20 +32,51 @@ The CI workflow failed, so **no v2.6.36 APK release was ever produced or publish
    - Fixed the temporary lifetime issue in `with_attached_env` when extracting `exc.toString()`.
    - `cargo check --lib` verified clean on host.
 
+### 4. Downloader Stream Truncation & Search Download Button Fix (v2.6.38)
+
+#### A. Stream Truncation (Recursive Range Downloader)
+- **Root Cause**:
+  1. Googlevideo terminates/closes TCP connections after ~10MB chunks.
+  2. Previously, `downloader.rs` overwrote `total_bytes` with `res.content_length()`, mistaking the 10MB chunk size for the total file length.
+  3. `attempt` was shared across chunk continuations and capped at `MAX_STREAM_RETRIES` (5), aborting any download needing >5 chunks.
+  4. HTTP 416 on resume previously deleted the staging file instead of treating verified audio as a completed download.
+  5. `expected_duration_secs` was missing from `buildDownloadPayload`, leaving `validate_audio_file` with no duration constraint.
+- **Fix**:
+  1. Preserved `total_bytes` using `total.max(resp_tot)` and extracted `clen` and `dur` query parameters from YouTube stream URLs as fallback.
+  2. Separated `consecutive_errors` from successful chunks: receiving bytes resets consecutive errors to 0, allowing unlimited recursive range requests (`Range: bytes={current_downloaded}-`) across chunk boundaries until all bytes are streamed.
+  3. HTTP 416 on verified staging file is recognized as stream completion.
+  4. Extracted and passed `expected_duration_secs` through `youtube.js` and `buildDownloadPayload` so `validate_audio_file` strictly verifies audio integrity against actual track duration.
+
+#### B. Internal YouTube Search Download Button
+- **Root Cause**:
+  1. `downloadSearchResult` was missing `await this.ensureSettings()`, causing PO-tokens and cookies to be absent on fresh start.
+  2. In `finally`, the button immediately reverted to "Download" after `download_audio` queued in background (<50ms), leaving no persistent feedback on mobile while `#downloads-list` was scrolled out of view.
+  3. Mobile touch events on Android WebView (`onclick` vs `ontouchend` and bubbling to `.track-row`) lacked proper event delegation.
+  4. If in-memory `_lastSearchResults` was lost across navigation, the handler silently failed.
+- **Fix**:
+  1. Added resilient fallback item extraction from DOM `data-video-id`, `data-video-url`, and `data-title` attributes on `.download-yt-btn`.
+  2. Added delegated `click` and `touchend` handlers with `touch-action: manipulation` and synchronous debounce guard (`dlBtn.disabled = true;`).
+  3. Loaded settings before resolving (`await this.ensureSettings()`) to ensure PO-tokens and download options are populated.
+  4. Replaced transient `finally` button reset with persistent `<i data-lucide="check"></i> Added` button state (`btn-secondary`, disabled) on success and re-enable only on failure.
+  5. Scrolled `#downloads-list` into view and surfaced clear toast notifications.
+
 ## Work State
 
 ### Completed
 - `src/infrastructure/media/background_service.rs` cleaned up and compiles without errors.
 - `@androidx.annotation.Keep` annotations added to all Android JNI classes and methods.
 - `scripts/android/proguard-rules.pro` created and wired into both Android build workflows.
-- Version synced to `2.6.37` across `Cargo.toml`, `Cargo.lock`, `tauri.conf.json`, `package.json`.
+- `src/infrastructure/media/downloader.rs` recursive chunked range streaming implemented and tested.
+- `ui/js/youtube.js` `clen`/`dur` query fallback and duration propagation implemented.
+- `ui/js/modules/downloads.js` search download button event delegation, fallback resolution, and persistent UI feedback implemented.
+- Version synced to `2.6.38` across `Cargo.toml`, `Cargo.lock`, `tauri.conf.json`, `package.json`.
 
 ### Active
-- Tag and trigger CI release for `v2.6.37`.
-- Install `auralis-v2.6.37-android-arm64.apk` once CI finishes and verify notification appearance.
+- Tag and trigger CI release for `v2.6.38`.
+- Install `auralis-v2.6.38-android-arm64.apk` once CI finishes and verify notification appearance and full-length downloads from YouTube search.
 
 ## Next Move
-1. Commit and push changes to `main`, push tag `v2.6.37` to trigger release build.
+1. Commit and push changes to `main`, push tag `v2.6.38` to trigger release build.
 2. Monitor CI run to ensure `build-android` succeeds and the release APK is uploaded.
 3. On device, install the new APK and verify:
    ```bash

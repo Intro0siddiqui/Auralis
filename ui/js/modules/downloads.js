@@ -159,6 +159,7 @@ export const downloadMethods = {
                 total_bytes: resolved.total_bytes,
                 thumbnail: resolved.thumbnail,
                 headers: resolved.headers || null,
+                expected_duration_secs: resolved.expected_duration_secs || resolved.duration || resolved.duration_secs || null,
             },
         };
     },
@@ -292,6 +293,8 @@ export const downloadMethods = {
                 target.streamYouTubeSearchResult = this.streamYouTubeSearchResult.bind(this);
                 target.downloadSearchResult = this.downloadSearchResult.bind(this);
             }
+            window.Auralis.streamYouTubeSearchResult = this.streamYouTubeSearchResult.bind(this);
+            window.Auralis.downloadSearchResult = this.downloadSearchResult.bind(this);
         }
     },
 
@@ -338,6 +341,10 @@ export const downloadMethods = {
                 return;
             }
             this._lastSearchResults = results;
+            try {
+                window.__auralisLastSearchResults = results;
+                if (window.Auralis?.bridge) window.Auralis.bridge._lastSearchResults = results;
+            } catch (_) {}
             this._bindSearchBridgeMethods();
 
             resultsEl.innerHTML = results.map((r, i) => {
@@ -353,20 +360,20 @@ export const downloadMethods = {
                     : `<i data-lucide="music"></i>`;
 
                 return `
-                    <div class="track-row neu-glass" style="cursor: pointer; display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); margin-bottom: var(--space-2);">
+                    <div class="track-row neu-glass" data-search-index="${i}" data-video-id="${this.escapeHtml(r.id)}" style="cursor: pointer; display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); margin-bottom: var(--space-2); touch-action: manipulation;">
                         <div class="track-row-artwork" style="width: 44px; height: 44px; border-radius: var(--radius-sm); overflow: hidden; flex-shrink: 0; background: var(--glass-weak); display: flex; align-items: center; justify-content: center;">
                             ${thumbContent}
                         </div>
-                        <div class="track-row-info" style="flex: 1; min-width: 0;" onclick="window.Auralis.bridge.streamYouTubeSearchResult(${i})">
+                        <div class="track-row-info" style="flex: 1; min-width: 0;" data-action="stream-search-result" data-index="${i}" onclick="window.Auralis.bridge.streamYouTubeSearchResult(${i})">
                             <div class="track-row-title" style="font-weight: var(--font-medium); font-size: var(--text-sm); color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(r.title)}</div>
                             <div class="track-row-subtitle" style="font-size: var(--text-xs); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(r.channel || 'YouTube')}</div>
                         </div>
                         ${durationPill}
                         <div class="track-row-actions" style="display: flex; align-items: center; gap: var(--space-2); opacity: 1; flex-shrink: 0;">
-                            <button class="btn btn-ghost btn-icon play-yt-btn" title="Stream Now" onclick="event.stopPropagation(); window.Auralis.bridge.streamYouTubeSearchResult(${i})">
+                            <button type="button" class="btn btn-ghost btn-icon play-yt-btn" title="Stream Now" data-action="stream-search-result" data-index="${i}" onclick="event.stopPropagation(); window.Auralis.bridge.streamYouTubeSearchResult(${i})" style="touch-action: manipulation;">
                                 <i data-lucide="play"></i>
                             </button>
-                            <button class="btn btn-primary btn-sm neu download-yt-btn" title="Download Audio" onclick="event.stopPropagation(); window.Auralis.bridge.downloadSearchResult(${i})">
+                            <button type="button" class="btn btn-primary btn-sm neu download-yt-btn" title="Download Audio" data-action="download-search-result" data-index="${i}" data-video-id="${this.escapeHtml(r.id)}" data-video-url="${this.escapeHtml(r.url)}" data-title="${this.escapeHtml(r.title)}" onclick="event.stopPropagation(); window.Auralis.bridge.downloadSearchResult(${i})" style="touch-action: manipulation;">
                                 <i data-lucide="download"></i> Download
                             </button>
                         </div>
@@ -374,6 +381,35 @@ export const downloadMethods = {
                 `;
             }).join('');
             if (window.lucide) window.lucide.createIcons();
+
+            if (!resultsEl.dataset.searchActionsBound) {
+                resultsEl.dataset.searchActionsBound = 'true';
+                const handleAction = (e) => {
+                    const dlBtn = e.target.closest && e.target.closest('[data-action="download-search-result"], .download-yt-btn');
+                    if (dlBtn) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const idx = parseInt(dlBtn.dataset.index, 10);
+                        const fallbackItem = {
+                            id: dlBtn.dataset.videoId,
+                            title: dlBtn.dataset.title,
+                            url: dlBtn.dataset.videoUrl || (dlBtn.dataset.videoId ? `https://www.youtube.com/watch?v=${dlBtn.dataset.videoId}` : null),
+                        };
+                        this.downloadSearchResult(idx, fallbackItem);
+                        return;
+                    }
+                    const streamBtn = e.target.closest && e.target.closest('[data-action="stream-search-result"], .play-yt-btn');
+                    if (streamBtn) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const idx = parseInt(streamBtn.dataset.index, 10);
+                        this.streamYouTubeSearchResult(idx);
+                        return;
+                    }
+                };
+                resultsEl.addEventListener('click', handleAction);
+                resultsEl.addEventListener('touchend', handleAction, { passive: false });
+            }
         } catch (err) {
             if (spinnerEl) spinnerEl.style.display = 'none';
             const msg2 = err && err.message ? err.message : String(err);
@@ -565,39 +601,74 @@ export const downloadMethods = {
         }
     },
 
-    async downloadSearchResult(index) {
-        const results = this._lastSearchResults || [];
-        const item = results[index];
-        if (!item) return;
+    async downloadSearchResult(index, fallbackItem = null) {
+        const results = this._lastSearchResults || window.__auralisLastSearchResults || window.Auralis?.bridge?._lastSearchResults || [];
+        let item = (typeof index === 'number' && !isNaN(index) && results[index]) ? results[index] : fallbackItem;
 
         const rows = document.querySelectorAll('#youtube-search-results .track-row');
-        const row = rows[index];
+        const row = (typeof index === 'number' && !isNaN(index)) ? rows[index] : (item?.id ? document.querySelector(`#youtube-search-results [data-video-id="${item.id}"]`) : null);
         const dlBtn = row ? row.querySelector('.download-yt-btn') : null;
-        const prevContent = dlBtn ? dlBtn.innerHTML : null;
+
+        if (!item && dlBtn) {
+            item = {
+                id: dlBtn.dataset.videoId,
+                title: dlBtn.dataset.title,
+                url: dlBtn.dataset.videoUrl || (dlBtn.dataset.videoId ? `https://www.youtube.com/watch?v=${dlBtn.dataset.videoId}` : null),
+            };
+        }
+
+        if (dlBtn && dlBtn.disabled) return;
         if (dlBtn) {
             dlBtn.disabled = true;
             dlBtn.innerHTML = '<i data-lucide="loader-2" class="spin"></i> Starting…';
             if (window.lucide) window.lucide.createIcons();
         }
 
+        if (!item || (!item.url && !item.id)) {
+            if (dlBtn) dlBtn.disabled = false;
+            return;
+        }
+
+        const urlToResolve = item.url || (item.id ? `https://www.youtube.com/watch?v=${item.id}` : null);
+        if (!urlToResolve) {
+            if (dlBtn) dlBtn.disabled = false;
+            return;
+        }
+
         const form = document.getElementById('download-form');
-        const opts = this.getDownloadOptions(form);
-        this.showToast('Resolving track…', 'info');
+        this.showToast(`Resolving “${item.title || 'audio'}”…`, 'info');
         try {
+            if (!window.AuralisYouTube) throw new Error('YouTube resolver unavailable');
+            await this.ensureSettings();
+            const opts = this.getDownloadOptions(form);
             this._ensureDownloadRetryListener();
-            const resolved = await window.AuralisYouTube.resolve(item.url, opts);
-            if (resolved.kind !== 'track') throw new Error('Not a track');
-            const result = await this.downloadResolvedTrack(resolved, 'm4a', opts, item.url);
-            if (result) this.showToast('Download started!', 'success');
+            const resolved = await window.AuralisYouTube.resolve(urlToResolve, opts);
+            if (!resolved || resolved.kind !== 'track') throw new Error('Not a playable track');
+            const format = (opts && opts.container && opts.container !== 'auto') ? opts.container : (resolved.ext || 'm4a');
+            const result = await this.downloadResolvedTrack(resolved, format, opts, urlToResolve);
+            if (result) {
+                this.showToast(`Download queued: “${resolved.title || item.title}”`, 'success');
+                if (dlBtn) {
+                    dlBtn.innerHTML = '<i data-lucide="check"></i> Added';
+                    dlBtn.classList.remove('btn-primary');
+                    dlBtn.classList.add('btn-secondary');
+                    dlBtn.disabled = true;
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            } else {
+                if (dlBtn) {
+                    dlBtn.disabled = false;
+                    dlBtn.innerHTML = '<i data-lucide="download"></i> Download';
+                    if (window.lucide) window.lucide.createIcons();
+                }
+            }
         } catch (err) {
             const m = err && err.message ? err.message : String(err);
             console.error('DIAGNOSTIC downloadSearchResult failed', { item, error: m, stack: err && err.stack });
-            console.error(err);
-            this.showToast(`Resolve failed: ${m}`, 'error', 6000);
-        } finally {
-            if (dlBtn && prevContent) {
+            this.showToast(`Download failed: ${m}`, 'error', 6000);
+            if (dlBtn) {
                 dlBtn.disabled = false;
-                dlBtn.innerHTML = prevContent;
+                dlBtn.innerHTML = '<i data-lucide="download"></i> Download';
                 if (window.lucide) window.lucide.createIcons();
             }
         }
