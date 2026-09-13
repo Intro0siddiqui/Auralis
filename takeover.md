@@ -1,608 +1,175 @@
+# Handover — Auralis v2 Notification + Opus Playback
+
+## Objective
+- Fix missing Android foreground notification / MediaSession and audio-focus (YouTube keeps playing, Auralis talks over others). Verify on-device via `logcat`/`dumpsys` and ship working release.
+
+## Root Cause Analysis & Resolution (v2.6.36)
+
+### 1. Root Cause of Missing Notification (`NoSuchMethodError`)
+The v2.6.35 diagnostic logs captured on device revealed:
+```text
+W System.err: java.lang.NoSuchMethodError: no static method "Lcom/auralis/v2/MediaPlaybackService;.start(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;IIZLjava/lang/String;)V"
+E AuralisBridge: JNI svc-start failed: Java exception was thrown
+W System.err: java.lang.NoSuchMethodError: no static method "Lcom/auralis/v2/MainActivity;.requestRuntimePermissions(Ljava/lang/Object;)V"
+E AuralisBridge: JNI perm-request failed: Java exception was thrown
+```
+By downloading and parsing `classes.dex` from `auralis-v2.6.35-android-arm64.apk`, we confirmed that **Android's R8 / ProGuard code shrinker stripped all companion static methods** (`MediaPlaybackService.start`, `stop`, `MainActivity.requestRuntimePermissions`, and `MediaStoreScanner.queryAllAudio`) because they were only invoked dynamically from Rust via JNI reflection.
+
+### 2. Why the Previous Attempt Failed to Release
+Commit `149b989` added `@Keep` annotations and `proguard-rules.pro`, but also introduced invalid Rust code in `src/infrastructure/media/background_service.rs` (a redundant `svc-start-fallback` block and a temporary lifetime borrow error in `with_attached_env`). Because of this, the Android compilation failed in CI with:
+- `error[E0277]: the trait bound GlobalRef: Desc<'_, JClass<'_>> is not satisfied`
+- `error[E0308]: ? operator has incompatible types`
+- `error[E0515]: cannot return value referencing temporary value`
+The CI workflow failed, so **no v2.6.36 APK release was ever produced or published**, leaving the device running the broken v2.6.35 binary.
+
+### 3. Resolution Applied
+1. **R8 / ProGuard Protection**:
+   - Added `@androidx.annotation.Keep` to `MediaPlaybackService` class & companion methods (`start`, `stop`, `createNotificationChannel`, `loadArtBitmapStatic`, `buildNotificationStatic`), `NativeBridge`, `MainActivity` & `requestRuntimePermissions`, and `MediaStoreScanner`.
+   - Created `scripts/android/proguard-rules.pro` with explicit `-keep` rules for all JNI target classes and companion objects.
+   - Updated `.github/workflows/build.yml` and `.github/workflows/android-test.yml` to install `proguard-rules.pro` into `gen/android/app/proguard-rules.pro`.
+2. **Rust JNI Fix**:
+   - Removed the broken redundant `svc-start-fallback` block from `background_service.rs:notify` (the fallback is already executed safely inside Kotlin's `MediaPlaybackService.start()` method).
+   - Fixed the temporary lifetime issue in `with_attached_env` when extracting `exc.toString()`.
+   - `cargo check --lib` verified clean on host.
+
+## Work State
+
+### Completed
+- `src/infrastructure/media/background_service.rs` cleaned up and compiles without errors.
+- `@androidx.annotation.Keep` annotations added to all Android JNI classes and methods.
+- `scripts/android/proguard-rules.pro` created and wired into both Android build workflows.
+- Version synced to `2.6.37` across `Cargo.toml`, `Cargo.lock`, `tauri.conf.json`, `package.json`.
+
+### Active
+- Tag and trigger CI release for `v2.6.37`.
+- Install `auralis-v2.6.37-android-arm64.apk` once CI finishes and verify notification appearance.
+
+## Next Move
+1. Commit and push changes to `main`, push tag `v2.6.37` to trigger release build.
+2. Monitor CI run to ensure `build-android` succeeds and the release APK is uploaded.
+3. On device, install the new APK and verify:
+   ```bash
+   logcat -c
+   # play a track in Auralis
+   logcat -d -s AuralisBridge,AuralisMedia,System.err
+   dumpsys activity services com.auralis.v2 | grep -i MediaPlayback
+   dumpsys notification | grep -i -A8 "auralis"
+   ```
+
+## Relevant Files
+- `src/infrastructure/media/background_service.rs` — JNI bridge into Kotlin service
+- `scripts/android/MediaPlaybackService.kt` — Foreground media service & notification manager
+- `scripts/android/MainActivity.kt` — Activity lifecycle & permission dispatcher
+- `scripts/android/proguard-rules.pro` — ProGuard/R8 keep rules
+- `.github/workflows/build.yml` — Android release CI workflow
+- `.github/workflows/android-test.yml` — Android test CI workflow
+
+## Raw Logs (verbatim)
+
+### 2026-09-09 20:36 IST (Xiaomi Pad 7, failed attempt before v2.6.36 fix)
+```
 $ logcat -c
 
-$ echo "=== LOGS ==="; logcat -d -s AuralisBridge, AuralisMedia, System.err; echo "=== SERVICE ==="; dumpsys activity services com.auralis.v2 | grep -i MediaPlayback; echo "=== NOTIFICATION ==="; dumpsys notification | grep -i -A8 "auralis"
-=== LOGS ===
---------- beginning of main
-09-08 16:43:36.610 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:43:36.610 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:36.610 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:36.610 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:36.610 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:36.610 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:36.610 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:36.610 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:36.610 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:36.610 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:36.610 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:36.610 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:36.610 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:36.610 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:36.610 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:36.610 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:36.610 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:36.610 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:36.610 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:36.610 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:36.655 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:43:36.655 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:36.655 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:36.655 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:36.655 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:36.655 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:36.655 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:36.655 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:36.655 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:36.655 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:36.655 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:36.655 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:36.655 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:36.655 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:36.655 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:36.655 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:36.655 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:36.655 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:36.655 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:36.655 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:36.660 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:43:36.660 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:36.660 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:36.660 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:36.660 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:36.660 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:36.660 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:36.660 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:36.660 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:36.660 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:36.660 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:36.660 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:36.660 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:36.660 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:36.660 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:36.660 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:36.660 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:36.660 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:36.660 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:36.660 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:36.682 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:43:36.682 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:36.682 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:36.682 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:36.682 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:36.682 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:36.682 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:36.682 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:36.682 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:36.682 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:36.682 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:36.682 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:36.682 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:36.682 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:36.682 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:36.682 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:36.682 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:36.682 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:36.682 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:36.682 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:40.282 21632 21799 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:43:40.282 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:40.282 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:40.282 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:40.282 21632 21799 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:40.282 21632 21799 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:40.282 21632 21799 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:40.282 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:40.282 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:40.282 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:40.282 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:40.282 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:40.282 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:40.282 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:40.282 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:40.282 21632 21799 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:40.282 21632 21799 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:40.282 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:40.282 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:40.282 21632 21799 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:40.309 21632 21799 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:43:40.309 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:40.309 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:40.309 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:40.309 21632 21799 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:40.309 21632 21799 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:40.309 21632 21799 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:40.309 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:40.309 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:40.309 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:40.309 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:40.309 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:40.309 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:40.309 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:40.309 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:40.309 21632 21799 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:40.309 21632 21799 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:40.309 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:40.309 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:40.309 21632 21799 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:40.313 21632 21799 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:43:40.313 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:40.313 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:40.313 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:40.313 21632 21799 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:40.313 21632 21799 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:40.313 21632 21799 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:40.313 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:40.313 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:40.313 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:40.313 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:40.313 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:40.313 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:40.313 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:40.313 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:40.313 21632 21799 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:40.313 21632 21799 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:40.313 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:40.313 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:40.313 21632 21799 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:40.334 21632 21799 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:43:40.334 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:40.334 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:40.334 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:40.334 21632 21799 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:40.334 21632 21799 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:40.334 21632 21799 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:40.334 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:40.334 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:40.334 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:40.334 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:40.334 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:40.334 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:40.334 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:40.334 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:40.334 21632 21799 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:40.334 21632 21799 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:40.334 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:40.334 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:40.334 21632 21799 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:49.310 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:43:49.310 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:49.310 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:49.310 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:49.310 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:49.310 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:49.310 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:49.310 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:49.310 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:49.310 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:49.310 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:49.310 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:49.310 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:49.310 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:49.310 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:49.310 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:49.310 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:49.310 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:49.310 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:49.310 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:49.368 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:43:49.368 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:49.368 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:49.368 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:49.368 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:49.368 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:49.368 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:49.368 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:49.368 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:49.368 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:49.368 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:49.368 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:49.368 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:49.368 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:49.368 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:49.368 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:49.368 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:49.368 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:49.368 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:49.368 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:49.374 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:43:49.374 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:49.374 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:49.374 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:49.374 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:49.374 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:49.374 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:49.374 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:49.374 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:49.374 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:49.374 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:49.374 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:49.374 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:49.374 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:49.374 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:49.374 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:49.374 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:49.374 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:49.374 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:49.374 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:49.397 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:43:49.398 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:49.398 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:49.398 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:49.398 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:49.398 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:49.398 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:49.398 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:49.398 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:49.398 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:49.398 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:49.398 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:49.398 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:49.398 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:49.398 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:49.398 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:49.398 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:49.398 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:49.398 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:49.398 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:55.944 21632 21818 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:43:55.944 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:55.944 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:55.944 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:55.944 21632 21818 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:55.944 21632 21818 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:55.944 21632 21818 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:55.944 21632 21818 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:55.944 21632 21818 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:55.944 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:55.944 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:55.944 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:55.944 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:55.944 21632 21818 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:55.944 21632 21818 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:55.944 21632 21818 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:55.944 21632 21818 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:55.944 21632 21818 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:55.944 21632 21818 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:55.944 21632 21818 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:55.963 21632 21818 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:43:55.963 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:55.963 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:55.963 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:55.963 21632 21818 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:55.963 21632 21818 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:55.963 21632 21818 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:55.963 21632 21818 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:55.963 21632 21818 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:55.963 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:55.963 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:55.963 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:55.963 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:55.963 21632 21818 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:55.963 21632 21818 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:55.963 21632 21818 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:55.963 21632 21818 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:55.963 21632 21818 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:55.963 21632 21818 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:55.963 21632 21818 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:55.967 21632 21818 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:43:55.968 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:55.968 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:55.968 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:55.968 21632 21818 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:55.968 21632 21818 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:55.968 21632 21818 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:55.968 21632 21818 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:55.968 21632 21818 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:55.968 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:55.968 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:55.968 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:55.968 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:55.968 21632 21818 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:55.968 21632 21818 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:55.968 21632 21818 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:55.968 21632 21818 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:55.968 21632 21818 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:55.968 21632 21818 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:55.968 21632 21818 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:55.987 21632 21818 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:43:55.987 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:43:55.987 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:43:55.987 21632 21818 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:43:55.987 21632 21818 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:43:55.987 21632 21818 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:43:55.987 21632 21818 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:43:55.987 21632 21818 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:43:55.987 21632 21818 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:43:55.987 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:43:55.987 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:43:55.987 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:43:55.987 21632 21818 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:43:55.987 21632 21818 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:43:55.987 21632 21818 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:43:55.987 21632 21818 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:43:55.987 21632 21818 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:43:55.987 21632 21818 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:43:55.987 21632 21818 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:43:55.987 21632 21818 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:43:57.769  8547  8720 W System.err: java.lang.NoSuchMethodError: no static method "Lcom/auralis/v2/MediaPlaybackService;.start(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;IIZLjava/lang/String;)V"
-09-08 16:43:57.769  8547  8720 E AuralisBridge: JNI svc-start failed: Java exception was thrown
-09-08 16:43:57.769  8547  8720 W System.err: java.lang.NoSuchMethodError: no static method "Lcom/auralis/v2/MainActivity;.requestRuntimePermissions(Ljava/lang/Object;)V"
-09-08 16:43:57.769  8547  8720 E AuralisBridge: JNI perm-request failed: Java exception was thrown
-09-08 16:44:08.647  8547  8718 W System.err: java.lang.NoSuchMethodError: no static method "Lcom/auralis/v2/MediaPlaybackService;.start(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;IIZLjava/lang/String;)V"
-09-08 16:44:08.647  8547  8718 E AuralisBridge: JNI svc-start failed: Java exception was thrown
-09-08 16:44:10.843 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:44:10.843 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:10.843 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:10.843 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:10.843 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:10.843 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:10.843 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:10.843 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:10.843 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:10.843 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:10.843 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:10.843 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:10.843 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:10.843 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:10.843 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:10.843 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:10.843 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:10.843 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:10.843 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:10.843 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:10.860 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:44:10.860 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:10.860 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:10.860 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:10.860 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:10.860 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:10.860 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:10.860 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:10.860 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:10.860 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:10.860 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:10.860 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:10.860 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:10.860 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:10.860 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:10.860 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:10.860 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:10.860 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:10.860 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:10.860 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:10.864 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:44:10.864 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:10.864 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:10.864 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:10.864 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:10.864 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:10.864 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:10.864 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:10.864 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:10.864 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:10.864 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:10.864 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:10.864 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:10.864 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:10.864 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:10.864 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:10.864 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:10.864 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:10.864 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:10.864 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:10.883 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:44:10.883 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:10.883 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:10.883 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:10.883 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:10.883 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:10.883 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:10.883 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:10.883 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:10.883 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:10.883 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:10.883 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:10.883 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:10.883 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:10.883 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:10.883 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:10.883 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:10.883 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:10.883 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:10.883 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:37.166  9026  9068 W System.err: SLF4J: A number (42) of logging calls during the initialization phase have been intercepted and are
-09-08 16:44:37.166  9026  9068 W System.err: SLF4J: now being replayed. These are subject to the filtering rules of the underlying logging system.
-09-08 16:44:37.166  9026  9068 W System.err: SLF4J: See also http://www.slf4j.org/codes.html#replay
-09-08 16:44:38.105 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:44:38.105 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:38.105 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:38.105 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:38.105 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:38.105 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:38.105 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:38.105 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:38.105 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:38.105 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:38.105 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:38.105 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:38.105 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:38.105 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:38.105 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:38.105 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:38.105 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:38.105 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:38.105 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:38.105 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:38.140 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:44:38.140 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:38.140 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:38.140 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:38.140 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:38.140 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:38.140 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:38.140 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:38.140 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:38.140 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:38.141 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:38.141 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:38.141 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:38.141 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:38.141 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:38.141 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:38.141 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:38.141 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:38.141 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:38.141 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:38.146 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:44:38.146 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:38.146 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:38.146 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:38.146 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:38.146 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:38.146 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:38.146 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:38.146 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:38.146 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:38.146 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:38.146 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:38.146 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:38.146 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:38.146 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:38.146 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:38.146 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:38.146 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:38.146 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:38.146 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:38.166 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:44:38.166 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:38.166 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:38.166 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:38.166 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:38.166 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:38.166 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:38.166 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:38.166 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:38.166 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:38.166 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:38.166 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:38.166 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:38.166 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:38.166 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:38.166 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:38.166 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:38.166 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:38.166 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:38.166 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:46.389 21632 21799 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:44:46.389 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:46.389 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:46.389 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:46.389 21632 21799 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:46.389 21632 21799 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:46.389 21632 21799 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:46.389 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:46.389 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:46.389 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:46.389 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:46.389 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:46.389 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:46.389 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:46.389 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:46.389 21632 21799 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:46.389 21632 21799 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:46.389 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:46.389 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:46.389 21632 21799 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:46.459 21632 21799 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:44:46.459 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:46.459 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:46.459 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:46.459 21632 21799 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:46.459 21632 21799 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:46.459 21632 21799 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:46.459 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:46.459 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:46.459 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:46.459 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:46.459 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:46.459 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:46.459 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:46.459 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:46.459 21632 21799 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:46.459 21632 21799 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:46.459 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:46.459 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:46.459 21632 21799 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:46.485 21632 21799 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
-09-08 16:44:46.485 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:46.485 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:46.485 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:46.485 21632 21799 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:46.485 21632 21799 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:46.485 21632 21799 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:46.485 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:46.485 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:46.485 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:46.485 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:46.485 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:46.485 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:46.485 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:46.485 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:46.485 21632 21799 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:46.485 21632 21799 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:46.485 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:46.485 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:46.485 21632 21799 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-09-08 16:44:46.564 21632 21799 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
-09-08 16:44:46.564 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
-09-08 16:44:46.564 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
-09-08 16:44:46.564 21632 21799 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
-09-08 16:44:46.564 21632 21799 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
-09-08 16:44:46.564 21632 21799 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
-09-08 16:44:46.564 21632 21799 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
-09-08 16:44:46.564 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
-09-08 16:44:46.564 21632 21799 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
-09-08 16:44:46.564 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
-09-08 16:44:46.564 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
-09-08 16:44:46.564 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
-09-08 16:44:46.564 21632 21799 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
-09-08 16:44:46.564 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
-09-08 16:44:46.564 21632 21799 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
-09-08 16:44:46.564 21632 21799 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
-09-08 16:44:46.564 21632 21799 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
-09-08 16:44:46.564 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
-09-08 16:44:46.564 21632 21799 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
-09-08 16:44:46.564 21632 21799 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
-=== SERVICE ===
-=== NOTIFICATION ===
-      AppSettings: com.auralis.v2 (10417) importance=DEFAULT userSet=true
-        NotificationChannel{mId='auralis_playback_channel_v2', mName=Aud..., mDescription=hasDescription , mImportance=3, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=null, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedDefaultApp=false, mOriginalImp=3, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0}
-      AppSettings: com.qualcomm.qti.workloadclassifier (10263)
-      AppSettings: com.google.android.syncadapters.calendar (10179)
-      AppSettings: com.miui.core (10213) importance=NONE userSet=false
-        NotificationChannel{mId='auto_install_progress_notification', mName=aut..., mDescription=hasDescription , mImportance=2, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=null, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=false, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800 tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedDefaultApp=false, mOriginalImp=2, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0}
-        NotificationChannel{mId='auto_install_notification', mName=aut..., mDescription=hasDescription , mImportance=4, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=null, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=false, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800 tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedDefaultApp=false, mOriginalImp=4, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0}
-      AppSettings: com.xiaomi.xmsf (10211) importance=DEFAULT userSet=false
-        NotificationChannel{mId='com.xiaomi.xmsf', mName=Not..., mDescription=, mImportance=4, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=content://settings/system/notification_sound, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800 tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedDefaultApp=false, mOriginalImp=4, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0}
-      AppSettings: com.chess (10242) importance=NONE userSet=true
---
-    2026-09-07T16:21:49.737961 - config: com.auralis.v2|removeAutomaticZenRules (ORIGIN_SYSTEM) no changes
-    2026-09-07T16:21:49.738087 - set_zen_mode: off,com.auralis.v2|removeAutomaticZenRules
-    2026-09-07T16:21:49.738106 - set_zen_mode: off,updated setting
-    2026-09-07T17:49:04.399580 - config: setAzrState: f615511757e24e7d93f14d755e33bea0 (ORIGIN_APP) no changes
-    2026-09-07T17:49:04.400008 - set_zen_mode: off,setAzrState: f615511757e24e7d93f14d755e33bea0
-    2026-09-07T17:49:04.400100 - set_zen_mode: off,updated setting
-    2026-09-08T15:13:10.405754 - config: setAzrState: f615511757e24e7d93f14d755e33bea0 (ORIGIN_APP) no changes
-    2026-09-08T15:13:10.405918 - set_zen_mode: off,setAzrState: f615511757e24e7d93f14d755e33bea0
-    2026-09-08T15:13:10.405949 - set_zen_mode: off,updated setting
-    2026-09-08T15:13:10.613118 - config: setAzrState: f615511757e24e7d93f14d755e33bea0 (ORIGIN_APP) no changes
---
-    2026-09-08T16:36:21.843430 - config: com.auralis.v2|removeAutomaticZenRules (ORIGIN_SYSTEM) no changes
-    2026-09-08T16:36:21.849090 - set_zen_mode: off,com.auralis.v2|removeAutomaticZenRules
-    2026-09-08T16:36:21.849142 - set_zen_mode: off,updated setting
+$ logcat -d-s AuralisBridge, System.err
+size/num main               system             crash              kernel             Total
+Total    32101725324/23896121110622140330/6690244583846/172          0/0                42723949500/305863828
+Now      3346019/25606      1153057/6388       0/0                0/0                4499076/31994
+Logspan  55.659             55.596                                                   55.659
+Overhead 1005130            656624                                                   1682498
 
-  Condition providers:
-    Allowed condition providers:
-      com.google.android.apps.wellbeing:com.google.android.gms (user: 0 isPrimary: true)
-      com.google.android.ext.services:com.xiaomi.barrage (user: 0 isPrimary: false)
-    Has user set:
-      userId=0 value={com.google.android.ext.services, com.xiaomi.barrage, com.google.android.apps.wellbeing, com.google.android.gms, com.google.android.ext.services/android.ext.services.notification.Assistant}
+Chattiest UIDs in main log buffer:                           Size   +/-  Pruned
+UID   PACKAGE                                               BYTES           NUM
+10161 com.miui.home                                       1505254
+1000  system                                              1256150
+  PID/UID   COMMAND LINE                                       "
+   2279/1000  /system/bin/surfaceflinger                     417784
+    4333/1000  com.android.systemui                           331354
+     2056/1000 ...vendor.qti.hardware.display.composer-service 259058
+      2443/1000  system_server                                  159237
+       2087/1000 ...endor.qti.hardware.servicetrackeraidl-service 24878
+       1041  audioserver                                          370709
+       10183 com.google.android.inputmethod.latin                  69727
+       10173 com.google.android.googlequicksearchbox               50549
+
+
+       Chattiest UIDs in system log buffer:                         Size   +/-  Pruned
+       UID   PACKAGE                                               BYTES           NUM
+       1000  system                                              1015920
+         PID/UID   COMMAND LINE                                       "
+          2443/1000  system_server                                  658490
+           4333/1000  com.android.systemui                           355719
+           10414 in.hridayan.ashell                                    57165
+           10161 com.miui.home                                         36752
+           10173 com.google.android.googlequicksearchbox               20636
+           10183 com.google.android.inputmethod.latin                  11510
+           10417 com.auralis.v2                                        10422
+
+
+           $ logcat -d | grep -iE "System\.err|AuralisBridge | AuralisMedia|svc-start | NoSuchMethod | ClassNot Found | Foreground ServiceStartNotAllowed | Bad notification | RemoteServiceException" | head -n 60
+           09-09 20:36:32.003 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
+           09-09 20:36:32.003 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+           09-09 20:36:32.003 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
+           09-09 20:36:32.047 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: android.display
+           09-09 20:36:32.048 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+           09-09 20:36:32.048 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
+           09-09 20:36:32.067 21632 21817 W System.err: android.content.pm.PackageManager$NameNotFoundException: com.termux.api
+           09-09 20:36:32.067 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfoAsUser(ApplicationPackageManager.java:283)
+           09-09 20:36:32.067 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:243)
+           09-09 20:36:32.067 21632 21817 W System.err: 	at android.app.ApplicationPackageManager.getPackageInfo(ApplicationPackageManager.java:237)
+           09-09 20:36:32.067 21632 21817 W System.err: 	at android.util.MiuiMultiWindowAdapter.calFreeformSuggestionList(MiuiMultiWindowAdapter.java:1207)
+           09-09 20:36:32.067 21632 21817 W System.err: 	at android.util.MiuiMultiWindowUtils.getFreeformSuggestionList(MiuiMultiWindowUtils.java:3291)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at java.lang.reflect.Method.invoke(Native Method)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.invokeObject(ReflectUtils.java:116)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at com.miui.launcher.utils.ReflectUtils.callStaticMethod(ReflectUtils.java:76)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.getSuggestionList(RecentsAndFSGestureUtils.java:320)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.lambda$updateFreeformSuggestionList$1(RecentsAndFSGestureUtils.java:303)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils.$r8$lambda$LZin6DRXj7G-7_LtcHxGXZMOL58(RecentsAndFSGestureUtils.java:0)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at com.miui.home.launcher.RecentsAndFSGestureUtils$$ExternalSyntheticLambda0.apply(R8$$SyntheticClass:0)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:138)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at com.miui.home.library.utils.AsyncTaskExecutorHelper$4.doInBackground(AsyncTaskExecutorHelper.java:133)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at android.os.AsyncTask$3.call(AsyncTask.java:397)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at java.util.concurrent.FutureTask.run(FutureTask.java:328)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+           09-09 20:36:32.068 21632 21817 W System.err: 	at java.lang.Thread.run(Thread.java:1572)
+
+           $ dumpsys activity services com.auralis.v2 | grep -i MediaPlayback
+
+           $ dumpsys notification | grep -i -A8 "auralis" | head -n 30
+                 AppSettings: com.auralis.v2 (10417) importance=DEFAULT userSet=true
+                         NotificationChannel{mId='auralis_playback_channel_v2', mName=Aud..., mDescription=hasDescription , mImportance=3, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=null, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedDefaultApp=false, mOriginalImp=3, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0}
+```

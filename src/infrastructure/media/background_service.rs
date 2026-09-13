@@ -145,7 +145,7 @@ pub fn request_notification_permission() {
 #[cfg(target_os = "android")]
 fn notify(track: &Track, position: Duration, is_playing: bool) {
     let Some(ctx) = service_context() else { return };
-    let ok = with_attached_env("svc-start", |env| {
+    with_attached_env("svc-start", |env| {
         let class = app_class(env, &SERVICE_CLASS_REF, SERVICE_CLASS)?;
         let title = env.new_string(track.title.as_str())?;
         let artist = env.new_string(track.artist.clone().unwrap_or_default().as_str())?;
@@ -166,63 +166,7 @@ fn notify(track: &Track, position: Duration, is_playing: bool) {
         )?;
         Ok(())
     });
-    if ok.is_some() {
-        debug!(track_id = %track.id, ?position, is_playing, "Background service notified");
-        return;
-    }
-    // JNI `start` threw (common on HyperOS background restricts) — fall back to
-    // posting the notification directly from Rust via the same
-    // `buildNotificationStatic` + `NotificationManager.notify` that the Kotlin
-    // fallback uses. This avoids a second round-trip through `start`.
-    let fallback_ok = with_attached_env("svc-start-fallback", |env| {
-        let svc_class = app_class(env, &SERVICE_CLASS_REF, SERVICE_CLASS)?;
-        let title = env.new_string(track.title.as_str())?;
-        let artist = env.new_string(track.artist.clone().unwrap_or_default().as_str())?;
-        let art_path = env.new_string(track.album_art_path.clone().unwrap_or_default().as_str())?;
-        let art_obj = env
-            .call_static_method(
-                svc_class.clone(),
-                "loadArtBitmapStatic",
-                "(Landroid/content/Context;Ljava/lang/String;)Landroid/graphics/Bitmap;",
-                &[JValue::Object(&ctx), JValue::Object(&art_path)],
-            )?
-            .l()?;
-        let notif = env
-            .call_static_method(
-                svc_class,
-                "buildNotificationStatic",
-                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;ZLandroid/graphics/Bitmap;Landroid/media/session/MediaSession$Token;)Landroid/app/Notification;",
-                &[
-                    JValue::Object(&ctx),
-                    JValue::Object(&title),
-                    JValue::Object(&artist),
-                    JValue::Bool(is_playing as u8),
-                    JValue::Object(&art_obj),
-                    JValue::Object(&JObject::null()),
-                ],
-            )?
-            .l()?;
-        let nm = env
-            .call_method(
-                &ctx,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[JValue::Object(&env.new_string("notification")?)],
-            )?
-            .l()?;
-        env.call_method(
-            &nm,
-            "notify",
-            "(ILandroid/app/Notification;)V",
-            &[JValue::Int(101), JValue::Object(&notif)],
-        )?;
-        Ok(())
-    });
-    if fallback_ok.is_some() {
-        debug!(track_id = %track.id, ?position, is_playing, "Background service fallback notify succeeded");
-    } else {
-        debug!(track_id = %track.id, ?position, is_playing, "Background service fallback notify failed");
-    }
+    debug!(track_id = %track.id, ?position, is_playing, "Background service notified");
 }
 
 /// Resolve an app class to a cached global ref, from any thread.
@@ -369,13 +313,16 @@ fn with_attached_env<T>(
             if guard.exception_check().unwrap_or(false) {
                 if let Ok(exc) = guard.exception_occurred() {
                     // Best-effort `exc.toString()` — never throws
-                    let msg = guard
-                        .call_method(&exc, "toString", "()Ljava/lang/String;", &[])
-                        .and_then(|v| v.l())
-                        .and_then(|obj| guard.get_string(&obj.into()))
-                        .map(|s| String::from(s))
-                        .unwrap_or_else(|_| "<toString failed>".to_string());
-                    detail = format!(": {msg}");
+                    if let Ok(str_val) =
+                        guard.call_method(&exc, "toString", "()Ljava/lang/String;", &[])
+                    {
+                        if let Ok(str_obj) = str_val.l() {
+                            let jstr = JString::from(str_obj);
+                            if let Ok(s) = guard.get_string(&jstr) {
+                                detail = format!(": {}", s.to_str().unwrap_or_default());
+                            }
+                        }
+                    }
                 }
                 let _ = guard.exception_describe();
                 let _ = guard.exception_clear();
