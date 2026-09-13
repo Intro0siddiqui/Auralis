@@ -317,9 +317,12 @@ fn with_attached_env<T>(
                         guard.call_method(&exc, "toString", "()Ljava/lang/String;", &[])
                     {
                         if let Ok(str_obj) = str_val.l() {
-                            let jstr = JString::from(str_obj);
-                            if let Ok(s) = guard.get_string(&jstr) {
-                                detail = format!(": {}", s.to_str().unwrap_or_default());
+                            let exc_str: Option<String> = guard
+                                .get_string(&JString::from(str_obj))
+                                .map(|s| s.into())
+                                .ok();
+                            if let Some(msg) = exc_str {
+                                detail = format!(": {msg}");
                             }
                         }
                     }
