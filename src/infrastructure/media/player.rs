@@ -4,7 +4,7 @@
 
 use rodio::{mixer::Mixer, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -805,63 +805,159 @@ impl Source for DecodedAudioSource {
     }
 }
 
-/// Helper to construct an audio decoder with extension hinting, Rodio fallback, and native Opus/WebM decoding.
-fn create_decoder(mut file: File, path: &str) -> Result<DecodedAudioSource, PlayerError> {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_lowercase();
+/// Context passed to decoder strategies containing file metadata and container sniffing state.
+struct DecoderContext<'a> {
+    file: &'a mut File,
+    path: &'a str,
+    ext: String,
+    is_ebml: bool,
+}
 
-    // 1. Sniff first 4 bytes for EBML container (WebM/Matroska containing Opus)
-    let mut header = [0u8; 4];
-    use std::io::Read;
-    let is_ebml = file.read(&mut header).unwrap_or(0) == 4 && &header == b"\x1a\x45\xdf\xa3";
-    let _ = file.seek(SeekFrom::Start(0));
+impl<'a> DecoderContext<'a> {
+    fn new(file: &'a mut File, path: &'a str) -> Self {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
 
-    if is_ebml || ext == "webm" || ext == "opus" {
-        if let Ok(cloned_file) = file.try_clone() {
-            if let Ok(opus_src) = OpusSource::new(cloned_file, path) {
-                return Ok(DecodedAudioSource::Opus(Box::new(opus_src)));
-            }
+        let mut header = [0u8; 4];
+        let is_ebml = file.read(&mut header).unwrap_or(0) == 4 && &header == b"\x1a\x45\xdf\xa3";
+        let _ = file.seek(SeekFrom::Start(0));
+
+        Self {
+            file,
+            path,
+            ext,
+            is_ebml,
         }
     }
+}
 
-    // 2. Try rodio's standard extension-hinted decoder
-    if !ext.is_empty() {
-        if let Ok(cloned_file) = file.try_clone() {
-            let reader = BufReader::with_capacity(64 * 1024, cloned_file);
-            match Decoder::builder().with_data(reader).with_hint(&ext).build() {
-                Ok(decoder) => return Ok(DecodedAudioSource::Rodio(decoder)),
-                Err(e) => {
-                    warn!(
-                        path = %path,
-                        ext = %ext,
-                        error = %e,
-                        "Extension-hinted decoder build failed; attempting default Decoder::new"
-                    );
+/// A strategy for constructing an audio decoder.
+trait DecoderStrategy {
+    fn try_decode(
+        &self,
+        ctx: &mut DecoderContext,
+    ) -> Result<Option<DecodedAudioSource>, PlayerError>;
+}
+
+/// Fast-path decoder strategy for WebM/Opus container streams (EBML header or .webm/.opus extension).
+struct OpusContainerStrategy;
+
+impl DecoderStrategy for OpusContainerStrategy {
+    fn try_decode(
+        &self,
+        ctx: &mut DecoderContext,
+    ) -> Result<Option<DecodedAudioSource>, PlayerError> {
+        if ctx.is_ebml || ctx.ext == "webm" || ctx.ext == "opus" {
+            if let Ok(cloned_file) = ctx.file.try_clone() {
+                if let Ok(opus_src) = OpusSource::new(cloned_file, ctx.path) {
+                    return Ok(Some(DecodedAudioSource::Opus(Box::new(opus_src))));
                 }
             }
         }
+        Ok(None)
     }
+}
 
-    // 3. Try default rodio Decoder::new
-    let _ = file.seek(SeekFrom::Start(0));
-    if let Ok(cloned_file) = file.try_clone() {
-        let reader = BufReader::with_capacity(64 * 1024, cloned_file);
-        if let Ok(decoder) = Decoder::new(reader) {
-            return Ok(DecodedAudioSource::Rodio(decoder));
+/// Decoder strategy using Rodio with format extension hinting.
+struct RodioHintedStrategy;
+
+impl DecoderStrategy for RodioHintedStrategy {
+    fn try_decode(
+        &self,
+        ctx: &mut DecoderContext,
+    ) -> Result<Option<DecodedAudioSource>, PlayerError> {
+        if !ctx.ext.is_empty() {
+            if let Ok(cloned_file) = ctx.file.try_clone() {
+                let reader = BufReader::with_capacity(64 * 1024, cloned_file);
+                match Decoder::builder()
+                    .with_data(reader)
+                    .with_hint(&ctx.ext)
+                    .build()
+                {
+                    Ok(decoder) => return Ok(Some(DecodedAudioSource::Rodio(decoder))),
+                    Err(e) => {
+                        warn!(
+                            path = %ctx.path,
+                            ext = %ctx.ext,
+                            error = %e,
+                            "Extension-hinted decoder build failed; attempting default Decoder::new"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Decoder strategy using default unhinted Rodio format probing.
+struct RodioDefaultStrategy;
+
+impl DecoderStrategy for RodioDefaultStrategy {
+    fn try_decode(
+        &self,
+        ctx: &mut DecoderContext,
+    ) -> Result<Option<DecodedAudioSource>, PlayerError> {
+        let _ = ctx.file.seek(SeekFrom::Start(0));
+        if let Ok(cloned_file) = ctx.file.try_clone() {
+            let reader = BufReader::with_capacity(64 * 1024, cloned_file);
+            if let Ok(decoder) = Decoder::new(reader) {
+                return Ok(Some(DecodedAudioSource::Rodio(decoder)));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Fallback decoder strategy for Opus streams (handles WebM/Opus mislabeled with other extensions like .m4a/.mp3).
+struct OpusFallbackStrategy;
+
+impl DecoderStrategy for OpusFallbackStrategy {
+    fn try_decode(
+        &self,
+        ctx: &mut DecoderContext,
+    ) -> Result<Option<DecodedAudioSource>, PlayerError> {
+        let _ = ctx.file.seek(SeekFrom::Start(0));
+        if let Ok(cloned_file) = ctx.file.try_clone() {
+            match OpusSource::new(cloned_file, ctx.path) {
+                Ok(opus_src) => Ok(Some(DecodedAudioSource::Opus(Box::new(opus_src)))),
+                Err(e) => Err(PlayerError::DecodeError(format!(
+                    "Failed to decode audio file {}: {e}",
+                    ctx.path
+                ))),
+            }
+        } else {
+            Err(PlayerError::DecodeError(format!(
+                "Failed to decode audio file {}: failed to clone file handle",
+                ctx.path
+            )))
+        }
+    }
+}
+
+/// Helper to construct an audio decoder with extension hinting, Rodio fallback, and native Opus/WebM decoding.
+fn create_decoder(mut file: File, path: &str) -> Result<DecodedAudioSource, PlayerError> {
+    let mut ctx = DecoderContext::new(&mut file, path);
+
+    let strategies: &[&dyn DecoderStrategy] = &[
+        &OpusContainerStrategy,
+        &RodioHintedStrategy,
+        &RodioDefaultStrategy,
+        &OpusFallbackStrategy,
+    ];
+
+    for strategy in strategies {
+        if let Some(source) = strategy.try_decode(&mut ctx)? {
+            return Ok(source);
         }
     }
 
-    // 4. Fallback: try OpusSource (handles WebM/Opus files, including misnamed .m4a/.mp3)
-    let _ = file.seek(SeekFrom::Start(0));
-    match OpusSource::new(file, path) {
-        Ok(opus_src) => Ok(DecodedAudioSource::Opus(Box::new(opus_src))),
-        Err(e) => Err(PlayerError::DecodeError(format!(
-            "Failed to decode audio file {path}: {e}"
-        ))),
-    }
+    Err(PlayerError::DecodeError(format!(
+        "Failed to decode audio file {path}: no decoder strategy succeeded"
+    )))
 }
 
 #[derive(Debug, thiserror::Error)]
