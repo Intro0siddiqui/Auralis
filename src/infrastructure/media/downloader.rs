@@ -359,6 +359,25 @@ pub fn validate_audio_file(
     Ok(duration_secs)
 }
 
+/// Asynchronously validate downloaded audio file integrity offloaded to tokio::task::spawn_blocking.
+///
+/// Prevents synchronous file I/O, lofty probe, and rodio decoder probing from blocking
+/// Tokio executor worker threads.
+pub async fn validate_audio_file_async(
+    path: &Path,
+    expected_duration_secs: Option<u32>,
+    ext: &str,
+    format: AudioFormat,
+) -> Result<u32, String> {
+    let path_buf = path.to_path_buf();
+    let ext_owned = ext.to_string();
+    tokio::task::spawn_blocking(move || {
+        validate_audio_file(&path_buf, expected_duration_secs, &ext_owned, format)
+    })
+    .await
+    .map_err(|e| format!("Task join error for validate_audio_file: {e}"))?
+}
+
 impl Downloader {
     /// Create a new downloader that writes files into `output_dir`.
     pub fn new(output_dir: PathBuf) -> Self {
@@ -684,12 +703,13 @@ impl Downloader {
 
             if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
                 if current_downloaded >= MIN_VALID_STREAM_BYTES
-                    && validate_audio_file(
+                    && validate_audio_file_async(
                         &job.staging_path,
                         expected_duration_secs,
                         &job.ext,
                         job.format,
                     )
+                    .await
                     .is_ok()
                 {
                     info!(
@@ -973,12 +993,14 @@ impl Downloader {
             "Validating audio stream integrity with lofty"
         );
 
-        match validate_audio_file(
+        match validate_audio_file_async(
             &job.staging_path,
             expected_duration_secs,
             &job.ext,
             job.format,
-        ) {
+        )
+        .await
+        {
             Ok(decoded_duration) => {
                 info!(
                     download_id = %id,
@@ -1449,5 +1471,50 @@ mod tests {
             res
         );
         assert!(res.unwrap() > 0, "Duration should be non-zero");
+    }
+
+    #[tokio::test]
+    async fn test_validate_audio_file_async_performance_baseline() {
+        let dir = std::env::temp_dir().join(format!("auralis_perf_test_{}", Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let wav_path = dir.join("test.part");
+
+        // 1s 8000Hz 8-bit mono WAV = 8044 bytes
+        let sample_rate: u32 = 8000;
+        let num_samples: u32 = 8000;
+        let mut data = Vec::with_capacity(44 + num_samples as usize);
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36 + num_samples).to_le_bytes());
+        data.extend_from_slice(b"WAVEfmt ");
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        data.extend_from_slice(&1u16.to_le_bytes()); // Mono
+        data.extend_from_slice(&sample_rate.to_le_bytes());
+        data.extend_from_slice(&sample_rate.to_le_bytes()); // Byte rate
+        data.extend_from_slice(&1u16.to_le_bytes()); // Block align
+        data.extend_from_slice(&8u16.to_le_bytes()); // Bits per sample
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&num_samples.to_le_bytes());
+        data.resize(44 + num_samples as usize, 0x80);
+
+        std::fs::write(&wav_path, &data).unwrap();
+
+        let start_sync = std::time::Instant::now();
+        let sync_res = validate_audio_file(&wav_path, Some(1), "wav", AudioFormat::Wav);
+        let sync_elapsed = start_sync.elapsed();
+        assert!(sync_res.is_ok());
+
+        let start_async = std::time::Instant::now();
+        let async_res =
+            validate_audio_file_async(&wav_path, Some(1), "wav", AudioFormat::Wav).await;
+        let async_elapsed = start_async.elapsed();
+        assert!(async_res.is_ok());
+
+        println!(
+            "validate_audio_file sync time: {:?}, async spawn_blocking time: {:?}",
+            sync_elapsed, async_elapsed
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
