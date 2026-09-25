@@ -770,6 +770,78 @@ describe('YouTube Search & Streaming Integration', () => {
         );
     });
 
+    it('downloads.js only rotates to a client the report proves can serve audio', async () => {
+        // Real per-client report from the device (v2.6.43, track BElct8HWkp8):
+        // only IOS and ANDROID_VR handed out audio urls; ANDROID was SABR-only
+        // and MWEB/TV/WEB came back UNPLAYABLE. Rotating into any of those just
+        // burns a download (the SABR-only one ends on a 403 for muxed itag 18).
+        const report = [
+            { client: 'IOS', status: 'OK', audioWithUrl: 2, adaptiveWithUrl: 20 },
+            { client: 'ANDROID', status: 'OK', audioWithUrl: 0, adaptiveWithUrl: 0, sabrStreamingUrl: true },
+            { client: 'ANDROID_VR', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 22 },
+            { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0 },
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0 },
+            { client: 'WEB', status: 'UNPLAYABLE', audioWithUrl: 0 },
+        ];
+        const ordered = ['MWEB', 'ANDROID', 'IOS', 'TV', 'ANDROID_VR', 'WEB'];
+        const truncated = 'Truncated download: only 99s of 287s of audio is actually present (>66% missing).';
+
+        const makeCtx = (tried) => {
+            const calls = [];
+            const obj = {
+                ...downloadMethods,
+                _pendingDownloadContexts: new Map(),
+                extractErrorMessage: (p) => p.error || '',
+                showToast: () => {},
+                getDownloadOptions: () => ({}),
+                downloadResolvedTrack: async (r, f, o) => { calls.push({ client: r.client, opts: o }); return { id: 'next' }; },
+            };
+            obj._autoRetryBudget = new Map([['BElct8HWkp8', { attempts: tried.length ? 1 : 0, triedClients: tried.slice() }]]);
+            obj._pendingDownloadContexts.set('dl1', {
+                key: 'BElct8HWkp8',
+                resolved: { client: tried.length ? 'ANDROID_VR' : 'IOS', orderedClients: ordered, retryClients: tried.length ? ['WEB'] : ['TV', 'ANDROID_VR', 'WEB'], client_report: report },
+                opts: {}, originalUrl: 'https://youtu.be/BElct8HWkp8', format: 'm4a', _retrying: false,
+            });
+            return { obj, calls };
+        };
+
+        // Attempt 1: IOS truncated -> rotate to the only other client that can
+        // actually serve audio (ANDROID_VR), skipping UNPLAYABLE TV.
+        let { obj, calls } = makeCtx([]);
+        global.window = global.window || {};
+        global.window.AuralisYouTube = { resolve: async (_u, o) => ({ kind: 'track', stream_url: 'https://x/', client: o.forceClient, client_report: report }) };
+        await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: truncated });
+        assert.equal(calls.length, 1, 'exactly one retry expected');
+        assert.equal(calls[0].client, 'ANDROID_VR', 'must retry with a client that handed out audio urls');
+
+        // Attempt 2: ANDROID_VR truncated as well and only WEB is left, which the
+        // report shows as UNPLAYABLE -> stop instead of burning another download.
+        ({ obj, calls } = makeCtx(['IOS', 'ANDROID_VR']));
+        await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: truncated });
+        assert.equal(calls.length, 0, 'must not rotate into a client the report proves cannot serve audio');
+    });
+
+    it('downloader tops a windowed (SABR) partial download up with explicit ranges', () => {
+        const base = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../src/infrastructure/media');
+        const dsrc = fs.readFileSync(path.join(base, 'downloader.rs'), 'utf8');
+        const rsrc = fs.readFileSync(path.join(base, 'range_topup.rs'), 'utf8');
+        // The decoded-length gate is the only place that can see this failure
+        // (all advertised bytes arrive, the media is still short), so the top-up
+        // must hang off it rather than off the byte accounting gate.
+        assert.ok(dsrc.includes('range_topup::top_up'), 'downloader must be able to request the bytes after a short file');
+        assert.ok(
+            /verify_decoded_duration\([\s\S]{0,2000}range_topup::top_up/.test(dsrc),
+            'the range top-up must be triggered by the decoded-duration verdict'
+        );
+        assert.ok(dsrc.includes('itag='), 'the truncation error must report the itag/host/clen for diagnosis');
+        // The top-up must try the mechanisms a googlevideo edge may honour, and
+        // must name the status codes it got so a refusal is explainable in-app.
+        assert.ok(rsrc.includes('TOPUP_CHUNK_BYTES') && rsrc.includes('MAX_TOPUP_ROUNDS'), 'top-up sizes must be named constants');
+        assert.ok(rsrc.includes('with_range_param'), 'top-up must use the googlevideo range parameter');
+        assert.ok(rsrc.includes('url+header') && rsrc.includes('"header"') && rsrc.includes('"url"'), 'all three range request shapes must be tried');
+        assert.ok(rsrc.includes('RANGE'), 'the HTTP Range header must be used as well as the query param');
+    });
+
     it('youtube.js flags the SABR-only legacy progressive fallback as partial-prone', () => {
         const src = fs.readFileSync(ytPath, 'utf8');
         assert.ok(src.includes('used_legacy_progressive'), 'must track legacy-progressive fallback usage');

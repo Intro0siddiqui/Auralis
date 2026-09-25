@@ -190,19 +190,40 @@ export const downloadMethods = {
             const failed = resolved.client || resolved.winningClient;
             if (failed && !tried.includes(failed)) tried.push(failed);
         }
-        const nextClient = (is403 || isTruncated)
-            ? ((resolved.retryClients || []).find(c => !tried.includes(c))
-                || (() => {
-                    const oc = resolved.orderedClients || [];
-                    const idx = oc.indexOf(resolved.client || resolved.winningClient);
-                    return idx >= 0 && idx + 1 < oc.length ? oc[idx + 1] : null;
-                })())
-            : null;
+        // A client whose own reaction record shows it cannot serve a real audio
+        // URL is a dead end: SABR-only responses expose no adaptive url (so the
+        // resolver falls back to the muxed itag 18, which the CDN then 403s), and
+        // UNPLAYABLE clients returned nothing at all. Rotating into one of those
+        // only burns a download, so prefer an untried client that demonstrably
+        // handed out audio urls.
+        const reportByClient = new Map();
+        for (const e of (resolved.client_report || [])) {
+            if (e && e.client && !reportByClient.has(e.client)) reportByClient.set(e.client, e);
+        }
+        const canServeAudio = (c) => {
+            const e = reportByClient.get(c);
+            if (!e) return true; // no evidence either way — let it try
+            if (e.status && e.status !== 'OK') return false;
+            return (e.audioWithUrl || 0) > 0;
+        };
+        const rotate = (is403 || isTruncated);
+        // Candidates: the clients after the winner first, then the rest, minus
+        // everything already tried for this track.
+        const ordered = resolved.orderedClients || [];
+        const winIdx = ordered.indexOf(resolved.client || resolved.winningClient);
+        const rotated = winIdx >= 0
+            ? ordered.slice(winIdx + 1).concat(ordered.slice(0, winIdx))
+            : ordered.slice();
+        const fromRetry = (resolved.retryClients || []).filter(c => !tried.includes(c));
+        const candidates = fromRetry.length ? fromRetry : rotated.filter(c => !tried.includes(c));
+        const nextClient = rotate ? (candidates.find(canServeAudio) || null) : null;
+        // Every remaining client is known to be unable to hand out an audio url.
+        const deadEnd = rotate && candidates.length > 0 && !candidates.some(canServeAudio);
         const allClients = resolved.orderedClients || [];
         // Never exclude every client — that leaves the resolver nothing to try.
         const excludeClients = (tried.length > 0 && tried.length < allClients.length) ? tried.slice() : [];
-        if ((is403 || isTruncated) && !nextClient && !excludeClients.length) {
-            console.warn(`[Downloads] 403/truncation auto-retry: no client left to try for ${p.id} (winning=${resolved.client})`);
+        if (rotate && (!nextClient || deadEnd)) {
+            console.warn(`[Downloads] 403/truncation auto-retry: no client left worth trying for ${p.id} (winning=${resolved.client}, deadEnd=${deadEnd})`);
             map.delete(p.id);
             return;
         }

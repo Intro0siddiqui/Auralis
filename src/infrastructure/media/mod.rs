@@ -8,6 +8,7 @@ pub mod completeness;
 pub mod downloader;
 pub mod opus;
 pub mod player;
+pub mod range_topup;
 
 pub use downloader::Downloader;
 pub use opus::{extract_opus_metadata, OpusSource};

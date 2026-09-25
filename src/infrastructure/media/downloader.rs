@@ -194,7 +194,7 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
 /// Apply the headers googlevideo validates (`Referer`/`Origin`/`Accept`) plus any
 /// client-matched headers produced by the frontend resolver. The User-Agent is
 /// configured on the `reqwest` client itself, so it is skipped here.
-fn inject_stream_headers(
+pub(crate) fn inject_stream_headers(
     mut req: reqwest::RequestBuilder,
     job_headers: Option<&HashMap<String, String>>,
 ) -> reqwest::RequestBuilder {
@@ -1247,17 +1247,92 @@ impl Downloader {
             &job.ext,
             expected_duration_secs,
         ) {
-            error!(
-                download_id = %id,
-                error = %truncation,
-                expected_duration = ?expected_duration_secs,
-                downloaded = staged_bytes,
-                total = ?total_bytes,
-                end_reason = %end_reason,
-                "Refusing to save a decoded-truncated download"
-            );
-            cleanup_staging_file(&job.staging_path).await;
-            return Err(DownloaderError::DownloadFailed(truncation));
+            // Every advertised byte arrived, yet the decoder only finds part of
+            // the audio: the edge served a *windowed* resource whose container
+            // header lies about the length. Asking explicitly for the bytes after
+            // what we already hold is the only remaining way to complete such a
+            // file - and when that is refused, the status codes it produced are
+            // the proof that no client-side resume can help.
+            use super::range_topup::{url_param_str, MAX_TOPUP_ROUNDS, TOPUP_CHUNK_BYTES};
+            let mut topup_log: Vec<String> = Vec::new();
+            let mut last_topup_error: Option<String> = None;
+            let mut have = staged_bytes;
+            let mut recovered_secs: Option<u64> = None;
+            for round in 1..=MAX_TOPUP_ROUNDS {
+                match super::range_topup::top_up(
+                    &client,
+                    job.headers.as_ref(),
+                    &request_url,
+                    &job.staging_path,
+                    have,
+                    TOPUP_CHUNK_BYTES,
+                )
+                .await
+                {
+                    Ok(added) => {
+                        have += added;
+                        topup_log.push(format!("round {round}: +{added} bytes (file now {have})"));
+                        match super::completeness::verify_decoded_duration(
+                            &job.staging_path,
+                            &job.ext,
+                            expected_duration_secs,
+                        ) {
+                            Ok(secs) => {
+                                recovered_secs = secs;
+                                break;
+                            }
+                            Err(still_short) => {
+                                topup_log
+                                    .push(format!("round {round}: still short: {still_short}"));
+                            }
+                        }
+                    }
+                    Err(why) => {
+                        last_topup_error = Some(why);
+                        break;
+                    }
+                }
+            }
+            let have_now = tokio::fs::metadata(&job.staging_path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(have);
+            if let Some(secs) = recovered_secs {
+                warn!(
+                    download_id = %id,
+                    decoded_secs = secs,
+                    bytes = have_now,
+                    host = %host,
+                    "Range top-up recovered a windowed (SABR-style) partial download"
+                );
+            } else {
+                error!(
+                    download_id = %id,
+                    error = %truncation,
+                    downloaded = have_now,
+                    total = ?total_bytes,
+                    expected_duration = ?expected_duration_secs,
+                    end_reason = %end_reason,
+                    host = %host,
+                    "Refusing to save a decoded-truncated download"
+                );
+                let itag = url_param_str(&request_url, "itag").unwrap_or_else(|| "?".to_string());
+                let clen = extract_url_param_u64(&request_url, "clen").unwrap_or(0);
+                let topup_summary = if let Some(why) = last_topup_error {
+                    why
+                } else if topup_log.is_empty() {
+                    "no range top-up was attempted".to_string()
+                } else {
+                    topup_log.join(" | ")
+                };
+                cleanup_staging_file(&job.staging_path).await;
+                return Err(DownloaderError::DownloadFailed(format!(
+                    "{truncation} [received {have_now} bytes of {clen} advertised \
+                     (itag={itag}, host={host}, end_reason={end_reason}); the server served a \
+                     windowed/SABR-style resource and the bytes after it are not retrievable: \
+                     {topup_summary}]"
+                )));
+            }
         }
 
         // All validation passed! Now perform atomic rename to destination
