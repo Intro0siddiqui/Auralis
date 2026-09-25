@@ -264,18 +264,21 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
             assert.ok(src.includes(`'${c}'`), `Expected client '${c}' in youtube.js`);
         }
-        // orderedClients must be defined (TV/ANDROID_VR-first when no poToken)
+        // orderedClients must be defined (PO-token-aware, Sept 2026 client reality)
         assert.ok(src.includes('orderedClients'), 'Expected orderedClients PO-token-aware ordering');
         assert.ok(src.includes("TV") && src.includes("ANDROID_VR"), 'orderedClients must mention TV/ANDROID_VR');
-        // PO-aware order: when poToken empty => TV, ANDROID_VR, MWEB first; when token => IOS, ANDROID first
+        // PO-aware order (Sept 2026): with a Web/BotGuard PO token => MWEB first
+        // (accepts a web-family token and still serves plain CDN urls);
+        // without a token => TV first (needs none). ANDROID_VR is last resort
+        // because in 2026 it returns only muxed itag 18 and 403s past ~60s.
         const m = src.match(/(?:const|let)\s+orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
         assert.ok(m, 'orderedClients ternary not found or malformed');
         const withToken = m[1];
         const withoutToken = m[2];
-        assert.ok(withToken.includes("'IOS'") && withToken.includes("'ANDROID'") && withToken.indexOf("'IOS'") < withToken.indexOf("'ANDROID'"), 'with poToken order should start IOS, ANDROID');
-        assert.ok(withToken.indexOf("'IOS'") < withToken.indexOf("'TV'"), 'with poToken IOS must come before TV');
-        assert.equal(withToken.replace(/\s/g, ''), "'IOS','ANDROID','ANDROID_VR','TV','MWEB','WEB'", 'with poToken branch exact order');
-        assert.equal(withoutToken.replace(/\s/g, ''), "'TV','ANDROID_VR','MWEB','WEB','IOS','ANDROID'", 'without poToken branch exact order: TV, ANDROID_VR, MWEB first');
+        assert.ok(withToken.indexOf("'MWEB'") === 0 || withToken.replace(/\s/g, '').startsWith("'MWEB'"), 'with poToken order should start MWEB');
+        assert.ok(withoutToken.replace(/\s/g, '').startsWith("'TV'"), 'without poToken order should start TV');
+        assert.equal(withToken.replace(/\s/g, ''), "'MWEB','ANDROID','IOS','TV','ANDROID_VR','WEB'", 'with poToken branch exact order');
+        assert.equal(withoutToken.replace(/\s/g, ''), "'TV','MWEB','ANDROID','IOS','ANDROID_VR','WEB'", 'without poToken branch exact order: TV, MWEB, ANDROID first');
     });
 
     it('getInfo fallback tries 6 clients', () => {
@@ -311,10 +314,40 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         assert.ok(src.includes('hasLegacyProgressiveFallback'), 'youtube.js missing hasLegacyProgressiveFallback helper');
         assert.ok(src.includes('SABR-only'), 'youtube.js missing SABR-only fallback comment/marker');
         assert.ok(src.includes('formats') && src.includes('signature_cipher'), 'fallback must handle signature_cipher for progressive');
-        // TV/ANDROID_VR-first ordering must remain (orderedClients ternary)
+        // Client order (Sept 2026 evidence, see AGENTS.md): MWEB first when a PO
+        // token exists (it is the client that accepts a Web/BotGuard token AND
+        // still returns plain CDN urls), ANDROID_VR demoted to last resort (in
+        // 2026 it returns only muxed itag 18 and 403s past ~60s), WEB last
+        // (SABR-only). Without a token, TV is tried first (it needs none).
         const m = src.match(/(?:const|let)\s+orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
-        assert.ok(m, 'orderedClients must still be TV-first when no poToken');
-        assert.equal(m[2].replace(/\s/g, ''), "'TV','ANDROID_VR','MWEB','WEB','IOS','ANDROID'", 'TV/ANDROID_VR-first ordering must be preserved');
+        assert.ok(m, 'orderedClients ternary not found');
+        assert.equal(m[1].replace(/\s/g, ''), "'MWEB','ANDROID','IOS','TV','ANDROID_VR','WEB'", 'with poToken MWEB must be first');
+        assert.equal(m[2].replace(/\s/g, ''), "'TV','MWEB','ANDROID','IOS','ANDROID_VR','WEB'", 'without poToken TV must be first');
+        assert.ok(m[1].lastIndexOf("'ANDROID_VR'") > m[1].indexOf("'MWEB'"), 'ANDROID_VR must be demoted below MWEB');
+    });
+
+    it('resolver records a per-client reaction report (SABR/403/format counts)', () => {
+        // Release builds write nothing to logcat, so every attempted client must
+        // leave a structured record: playability status, format counts, whether
+        // adaptive formats carried urls, and whether a SABR streaming url was
+        // present. The report is surfaced in the download row + "Copy report".
+        assert.ok(src.includes('clientReport'), 'youtube.js must build a clientReport array');
+        assert.ok(src.includes('sabrStreamingUrl'), 'report must record serverAbrStreamingUrl presence');
+        assert.ok(src.includes('adaptiveWithUrl'), 'report must count adaptive formats carrying urls');
+        assert.ok(src.includes('audioWithUrl'), 'report must count audio formats carrying urls');
+        assert.ok(src.includes('formatClientReport'), 'youtube.js must format the report for display');
+        assert.ok(src.includes('client_report_text'), 'resolved track must expose client_report_text');
+        assert.ok(src.includes('entry.chosen = true') || src.includes('chosen: false'), 'report must mark the winning client');
+        assert.ok(src.includes("reason = 'sabr-only'") || src.includes("'sabr-only'"), 'sabr-only clients must be labelled');
+    });
+
+    it('downloads.js surfaces the per-client report with a copy action', () => {
+        const dpath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/modules/downloads.js');
+        const dsrc = fs.readFileSync(dpath, 'utf8');
+        assert.ok(dsrc.includes('client_report'), 'downloads.js must read resolved.client_report');
+        assert.ok(dsrc.includes('copy-client-report'), 'downloads.js must offer a Copy report action');
+        assert.ok(dsrc.includes('_buildClientReportText'), 'downloads.js must build a copyable report');
+        assert.ok(dsrc.includes('avoidLegacyProgressive'), 'retry must still refuse the SABR legacy path');
     });
 });
 

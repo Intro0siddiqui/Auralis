@@ -26,6 +26,69 @@ export const downloadMethods = {
         return this._autoRetryBudget;
     },
 
+    /**
+     * Per-client reaction reports from the resolver, kept in a bounded global
+     * archive. Release builds write nothing to logcat, so the archive + the
+     * "Copy report" button are the only way to see how each InnerTube client
+     * behaved (SABR-only / 403 / missing adaptive urls) on this device/network.
+     */
+    _ensureClientReports() {
+        if (!this._clientReports) {
+            this._clientReports = [];
+            try { window.__auralisClientReports = this._clientReports; } catch (_) {}
+        }
+        return this._clientReports;
+    },
+
+    _recordClientReport(resolved, context = {}) {
+        try {
+            const list = this._ensureClientReports();
+            const entry = {
+                at: new Date().toISOString(),
+                title: resolved?.title || '',
+                videoId: resolved?.videoId || '',
+                client: resolved?.client || resolved?.winningClient || null,
+                sabrFallback: Boolean(resolved?.sabrFallback),
+                selection: resolved?.selection || null,
+                report: Array.isArray(resolved?.client_report) ? resolved.client_report : [],
+                text: resolved?.client_report_text || '',
+                context,
+            };
+            list.push(entry);
+            while (list.length > 20) list.shift();
+            return entry;
+        } catch (_) { return null; }
+    },
+
+    /** Human-readable, copyable dump of the most recent client reports. */
+    _buildClientReportText() {
+        const list = this._ensureClientReports().slice(-5);
+        if (!list.length) return 'No InnerTube client report recorded yet.';
+        return list.map((e, i) => {
+            const sel = e.selection
+                ? ` itag=${e.selection.itag} ext=${e.selection.ext} audioOnly=${e.selection.audioOnly ? 'yes' : 'no'}${e.selection.legacyProgressive ? ' legacy' : ''}`
+                : '';
+            const per = Array.isArray(e.report) && e.report.length
+                ? e.report.map((r) => {
+                    const bits = [
+                        r.chosen ? 'CHOSEN' : null,
+                        r.status || r.reason || 'fail',
+                        `phase=${r.phase}`,
+                        `adaptive=${r.adaptive}`,
+                        `progressive=${r.progressive}`,
+                        `adaptiveWithUrl=${r.adaptiveWithUrl}`,
+                        `audioWithUrl=${r.audioWithUrl}`,
+                        `sabr=${r.sabrStreamingUrl ? 'yes' : 'no'}`,
+                        r.ms ? `${r.ms}ms` : null,
+                        r.error ? `err=${String(r.error).slice(0, 120)}` : null,
+                    ].filter(Boolean).join(' ');
+                    return `  - ${r.client}: ${bits}`;
+                }).join('\n')
+                : '  - (no per-client detail)';
+            return `#${i + 1} ${e.at} "${e.title}" videoId=${e.videoId} client=${e.client} sabrFallback=${e.sabrFallback}${sel}\n${per}`;
+        }).join('\n\n');
+    },
+
     _ensureDownloadRetryListener() {
         if (this._downloadRetryListenerBound) return;
         this._downloadRetryListenerBound = true;
@@ -173,6 +236,15 @@ export const downloadMethods = {
             const msg = e?.message || String(e);
             console.error(`[Downloads] auto-retry re-resolve failed for ${p.id}:`, msg);
             this.showToast(`Retry failed: ${msg}`, 'error', 6000);
+            try {
+                if (e && e.client_report) {
+                    this._recordClientReport({
+                        title: '', videoId: '', client: null,
+                        client_report: e.client_report,
+                        client_report_text: e.client_report_text || '',
+                    }, { phase: 'auto_retry_resolve_failed', key, attempt: budget.attempts, triedClients: tried.slice() });
+                }
+            } catch (_) {}
             map.delete(p.id);
             // Drop the budget so a later manual re-download starts fresh.
             budgetMap.delete(key);
@@ -245,6 +317,17 @@ export const downloadMethods = {
                         key,
                         retryCount: 0,
                         _retrying: false,
+                    });
+                    // Keep the per-client reaction report for this attempt so the
+                    // download row can show it and "Copy report" can hand it over.
+                    this._recordClientReport(resolved, {
+                        phase: 'download_audio',
+                        id: result.id,
+                        key,
+                        retry: Boolean(ctxOpts && ctxOpts.forceClient),
+                        forceClient: ctxOpts?.forceClient || null,
+                        excludeClients: ctxOpts?.excludeClients || null,
+                        avoidLegacyProgressive: Boolean(ctxOpts?.avoidLegacyProgressive),
                     });
                     // Also store reverse lookup by stream_url in case completed payload uses different id? not needed
                 } catch (_) {}
@@ -326,7 +409,18 @@ export const downloadMethods = {
             console.error('DIAGNOSTIC resolve_failed', { url, opts, error: msg, stack: err && err.stack });
             console.error(err);
             console.groupEnd();
-            try { window.__auralisDownloadDiagnostics = window.__auralisDownloadDiagnostics || []; window.__auralisDownloadDiagnostics.push({ at: new Date().toISOString(), kind: 'resolve_failed', url, error: msg }); } catch (_) {}
+            // Resolver failures carry the per-client reaction report — archive it
+            // so "Copy report" still works when nothing was ever downloaded.
+            try {
+                if (err && err.client_report) {
+                    this._recordClientReport({
+                        title: '', videoId: '', client: null,
+                        client_report: err.client_report,
+                        client_report_text: err.client_report_text || '',
+                    }, { phase: 'resolve_failed', url });
+                }
+            } catch (_) {}
+            try { window.__auralisDownloadDiagnostics = window.__auralisDownloadDiagnostics || []; window.__auralisDownloadDiagnostics.push({ at: new Date().toISOString(), kind: 'resolve_failed', url, error: msg, clientReport: err?.client_report_text || null }); } catch (_) {}
             this.showToast(`Resolve failed: ${msg}`, 'error', 6000);
         }
     },
@@ -878,6 +972,16 @@ export const downloadMethods = {
         if (!list.dataset.copyBound) {
             list.dataset.copyBound = 'true';
             list.addEventListener('click', (e) => {
+                const reportBtn = e.target.closest && e.target.closest('[data-action="copy-client-report"]');
+                if (reportBtn) {
+                    const text = this._buildClientReportText();
+                    if (navigator.clipboard) {
+                        navigator.clipboard.writeText(text)
+                            .then(() => this.showToast('Copied client report to clipboard', 'success'))
+                            .catch(() => this.showToast('Copy failed', 'error'));
+                    }
+                    return;
+                }
                 const btn = e.target.closest && e.target.closest('[data-action="copy-download-error"]');
                 if (!btn) return;
                 const errText = btn.dataset.error || '';
@@ -920,17 +1024,36 @@ export const downloadMethods = {
             ? `<div style="margin-top:6px;padding:8px 10px;background:rgba(255,77,79,0.08);border:1px solid rgba(255,77,79,0.25);border-radius:8px;font-family:monospace;font-size:11px;line-height:1.4;white-space:pre-wrap;word-break:break-all;user-select:text;max-height:120px;overflow:auto;color:var(--text-2)">${this.escapeHtml(errRaw)}</div>
                <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                  <button type="button" class="btn btn-secondary btn-sm" data-action="copy-download-error" data-error="${this.escapeHtml(errRaw)}" title="Copy full error (for bug report)">Copy error</button>
-                  <span style="font-size:11px;color:var(--text-3)">${errRaw.includes('403') ? '403 [rr1---sn-gwpa-cived] Jio now gates TV too — auto-retrying with ANDROID+pot / WEB_SAFARI; if still fails set youtube_po_token via BgUtils mint or Settings cookie.' : errRaw.includes('timeout') || errRaw.includes('stalled') ? 'Network timeout — retry on stable connection.' : errRaw.includes('404') ? 'URL expired — resolve again.' : 'Tap Copy and include in bug report; also check adb logcat chromium.'}</span>
+                  <span style="font-size:11px;color:var(--text-3)">${errRaw.includes('403') ? '403 from the googlevideo host — auto-retrying with a different InnerTube client; if it keeps failing set youtube_po_token via BgUtil mint or a youtube_cookie in Settings.' : errRaw.includes('Truncated download') ? 'Transfer finished but the file holds only part of the audio (SABR-style partial stream) — re-resolving via another client.' : errRaw.includes('timeout') || errRaw.includes('stalled') ? 'Network timeout — retry on stable connection.' : errRaw.includes('404') ? 'URL expired — resolve again.' : 'Use Copy error and Copy report (per-client InnerTube reactions) in a bug report.'}</span>
                </div>`
             : '';
         const pctBar = isFailed
             ? `<div class="progress-track neu-inset" style="width:120px;height:6px;opacity:0.5"><div class="progress-fill" style="width:${pct}%;background:#ff4d4f;height:100%"></div></div>`
             : `<div class="progress-track neu-inset" style="width: 120px; height: 6px;"><div class="progress-fill" style="width: ${pct}%; background: var(--accent); height: 100%;"></div></div>`;
+        // Per-client reaction line: which Innertube client won, what the others
+        // answered (SABR-only / 403 / no adaptive urls). Release builds log
+        // nothing, so this row + "Copy report" is the only device-visible proof.
+        const reportSrc = (() => {
+            try {
+                const m = this._ensurePendingMap();
+                const ctx = m.get(progress.id);
+                if (ctx && ctx.resolved) return ctx.resolved;
+            } catch (_) {}
+            const list = this._ensureClientReports();
+            return list.length ? list[list.length - 1] : null;
+        })();
+        const reportText = (reportSrc && (reportSrc.client_report_text || reportSrc.text)) || '';
+        const selInfo = (reportSrc && reportSrc.selection) || null;
+        const clientBlock = reportText
+            ? `<div style="margin-top:6px;font-size:11px;line-height:1.45;color:var(--text-3);font-family:monospace;word-break:break-word;user-select:text">clients: ${this.escapeHtml(reportText)}${selInfo ? `<br>picked: itag=${this.escapeHtml(String(selInfo.itag))} ${this.escapeHtml(String(selInfo.ext))}${selInfo.audioOnly ? ' audio-only' : ' MUXED video+audio'}${selInfo.legacyProgressive ? ' — legacy progressive (SABR)' : ''}` : ''}
+                   <button type="button" class="btn btn-secondary btn-sm" data-action="copy-client-report" title="Copy how every InnerTube client answered (SABR / 403 / format counts)">Copy report</button></div>`
+            : '';
         row.innerHTML = `
             <div class="track-row-info" style="min-width:0;flex:1">
                 <div class="track-row-title" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${this.escapeHtml(progress.title || progress.url || 'Downloading...')}</div>
                 <div class="track-row-subtitle">${subtitle}</div>
                 ${errBlock}
+                ${clientBlock}
             </div>
             ${pctBar}
         `;

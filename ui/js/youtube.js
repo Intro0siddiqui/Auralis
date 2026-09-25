@@ -108,10 +108,42 @@ function scoreFormat(fmt) {
     return 1;
 }
 
+/**
+ * Compact one-line-per-client summary of how each InnerTube client reacted.
+ *
+ * Release builds emit nothing to logcat, so this string is the only
+ * device-visible evidence of what each client returned — it is embedded in
+ * resolve failure messages, rendered in the download row and copied by the
+ * "Copy report" action.
+ *
+ * Example: `MWEB ok/audio-url a3/3 aurl 2 sabr0 431ms* | ANDROID 403 55ms | TV sabr-only a6/0 aurl 0 sabr1`
+ * (`*` marks the client whose formats were actually used)
+ */
+function formatClientReport(report) {
+    if (!Array.isArray(report) || !report.length) return 'no client attempts recorded';
+    return report
+        .map((e) => {
+            const mark = e.chosen ? '*' : ' ';
+            const head = e.chosen ? 'ok' : e.status || e.reason || 'fail';
+            const nums = `a${e.adaptive ?? 0}/p${e.progressive ?? 0} aurl${e.adaptiveWithUrl ?? 0} audio${e.audioWithUrl ?? 0}${e.sabrStreamingUrl ? ' sabr1' : ''}`;
+            const extra = [];
+            if (e.legacyProgressive) extra.push('legacy');
+            if (e.ms) extra.push(`${e.ms}ms`);
+            if (e.error) extra.push(String(e.error).slice(0, 60));
+            return `${mark}${e.client} ${head} ${nums}${extra.length ? ' ' + extra.join(' ') : ''}`;
+        })
+        .join(' | ');
+}
+
 class YouTubeResolver {
     constructor() {
         this._modulePromise = null;
         this._clients = {};
+    }
+
+    /** Exposed so the downloads UI can render/copy the same report. */
+    static formatClientReport(report) {
+        return formatClientReport(report);
     }
 
     async _loadModule() {
@@ -316,6 +348,14 @@ class YouTubeResolver {
         let info = null;
         let winningClient = null;
         let lastErr = null;
+        // Per-client reaction log. Every attempted InnerTube client records what
+        // it answered with (playability status, format counts, whether adaptive
+        // formats carried real urls, whether a SABR `serverAbrStreamingUrl` was
+        // present, and how long it took). Release builds write nothing to
+        // logcat, so this is the only way to see how SABR/403 gating behaves
+        // per client on the user's own network — it is surfaced in the download
+        // row and copied by the "Copy report" action.
+        const clientReport = [];
 
         const isAudioFormat = (f) => {
             if (!f) return false;
@@ -437,9 +477,18 @@ class YouTubeResolver {
         };
 
         // 1. First attempt: Direct raw player API query.
-        // 2026 PO-token enforcement: IOS/ANDROID require poToken for GVS (403 otherwise, empty body),
-        // while TV / ANDROID_VR do not (see yt-dlp PO Token Guide). Prefer no-token clients when opts.poToken missing.
-        const orderedClients = opts.poToken ? ['IOS','ANDROID','ANDROID_VR','TV','MWEB','WEB'] : ['TV','ANDROID_VR','MWEB','WEB','IOS','ANDROID'];
+        // 2026 client reality (checked Sept 2026 against yt-dlp / cobalt reports):
+        //  - `web` is SABR-ONLY (adaptiveFormats have no url, only
+        //    serverAbrStreamingUrl) -> those streams are routinely partial.
+        //  - `android_vr` in 2026 often returns ONLY itag 18 (muxed 360p) and
+        //    GVS 403s for ranges past the first ~60s -> last resort only.
+        //  - `android` bypasses SABR (plain CDN urls, full downloads) but needs a
+        //    DroidGuard PO token; `ios` needs an iOSGuard one. We mint a
+        //    BotGuard/WEB token, which is only valid for web-family clients, so
+        //    `mweb` is the client most likely to succeed end to end.
+        const orderedClients = opts.poToken
+            ? ['MWEB', 'ANDROID', 'IOS', 'TV', 'ANDROID_VR', 'WEB']
+            : ['TV', 'MWEB', 'ANDROID', 'IOS', 'ANDROID_VR', 'WEB'];
         // 2026 Jio sn-gwpa-cived gates TV too — caller may exclude TV on 403 retry (ANDROID+pot or WEB_SAFARI).
         // Keep const orderedClients for test regex; apply caller overrides via effective list.
         let effectiveOrderedClients = [...orderedClients];
@@ -464,12 +513,44 @@ class YouTubeResolver {
         if (client.actions?.execute && effectiveOrderedClients.length > 0) {
             try {
                 const executeClient = async (cl) => {
+                    const t0 = Date.now();
+                    const entry = {
+                        client: cl,
+                        phase: 'actions.execute',
+                        chosen: false,
+                        ok: false,
+                        legacyProgressive: false,
+                        status: null,
+                        reason: null,
+                        adaptive: 0,
+                        progressive: 0,
+                        adaptiveWithUrl: 0,
+                        audioWithUrl: 0,
+                        sabrStreamingUrl: false,
+                        ms: 0,
+                    };
+                    clientReport.push(entry);
                     try {
                         const raw = await client.actions.execute('/player', { videoId, client: cl });
                         const st = raw?.data?.playabilityStatus?.status;
                         const sd = raw?.data?.streamingData;
                         const totalFormats = (sd?.adaptiveFormats?.length || 0) + (sd?.formats?.length || 0);
-                        console.log(`[YouTubeResolver] actions.execute('${cl}') -> status: ${st}, formats: ${totalFormats}`);
+                        const rawAdapt = sd?.adaptiveFormats || [];
+                        const urlOf = (f) => Boolean(f && (f.url || f.signatureCipher || f.cipher));
+                        entry.status = st ?? null;
+                        entry.adaptive = rawAdapt.length;
+                        entry.progressive = (sd?.formats?.length || 0);
+                        entry.adaptiveWithUrl = rawAdapt.filter(urlOf).length;
+                        entry.audioWithUrl = rawAdapt.filter((f) => String(f.mimeType || '').startsWith('audio/') && urlOf(f)).length;
+                        entry.sabrStreamingUrl = Boolean(sd?.serverAbrStreamingUrl);
+                        // A client that answered but exposed only SABR metadata is
+                        // materially different from one that returned real CDN urls.
+                        if (entry.sabrStreamingUrl && entry.audioWithUrl === 0) {
+                            entry.reason = 'sabr-only';
+                        } else if (entry.adaptive > 0 && entry.adaptiveWithUrl === 0) {
+                            entry.reason = 'adaptive-urls-missing';
+                        }
+                        console.log(`[YouTubeResolver] actions.execute('${cl}') -> status: ${st}, formats: ${totalFormats}, adaptiveWithUrl: ${entry.adaptiveWithUrl}, audioWithUrl: ${entry.audioWithUrl}, sabr: ${entry.sabrStreamingUrl}`);
                         if (sd && (sd.adaptiveFormats?.length || sd.formats?.length)) {
                             const adapt = (sd.adaptiveFormats || []).map((f) => ({
                                 ...f,
@@ -509,20 +590,30 @@ class YouTubeResolver {
                                 },
                             };
                             if (hasDirectOrDecipherableAudio(parsed)) {
-                                return { info: parsed, winningClient: cl };
+                                entry.ok = true;
+                                entry.reason = entry.reason || 'audio-url';
+                                return { info: parsed, winningClient: cl, report: entry };
                             }
                             // SABR-only fallback: allow legacy progressive formats[18] even
                             // when adaptive_formats URLs are missing (FreeTube#6977).
                             // WEB 2026 often returns only serverAbrStreamingUrl for DASH,
                             // but formats still contains 360p progressive with url/cipher.
                             if (hasLegacyProgressiveFallback(parsed)) {
+                                entry.ok = true;
+                                entry.legacyProgressive = true;
+                                entry.reason = 'legacy-progressive';
                                 console.log(`[YouTubeResolver] actions.execute('${cl}') SABR-only fallback: using legacy progressive formats`);
-                                return { info: parsed, winningClient: cl };
+                                return { info: parsed, winningClient: cl, report: entry };
                             }
+                            entry.reason = entry.reason || 'no-usable-audio';
                         }
                     } catch (e) {
+                        entry.error = e?.message || String(e);
+                        entry.reason = entry.reason || 'error';
                         console.error(`[YouTubeResolver] actions.execute('${cl}') error:`, e.message);
                         lastErr = e;
+                    } finally {
+                        entry.ms = Date.now() - t0;
                     }
                     throw new Error(`Client '${cl}' produced no usable stream`);
                 };
@@ -530,6 +621,7 @@ class YouTubeResolver {
                 const res = await Promise.any(effectiveOrderedClients.map((cl) => executeClient(cl)));
                 info = res.info;
                 winningClient = res.winningClient;
+                if (res.report) res.report.chosen = true;
             } catch (e) {
                 lastErr = e;
             }
@@ -540,24 +632,61 @@ class YouTubeResolver {
             const clientNames = effectiveOrderedClients;
             try {
                 const getInfoClient = async (cl) => {
+                    const t0 = Date.now();
+                    const entry = {
+                        client: cl,
+                        phase: 'getInfo',
+                        chosen: false,
+                        ok: false,
+                        legacyProgressive: false,
+                        status: null,
+                        reason: null,
+                        adaptive: 0,
+                        progressive: 0,
+                        adaptiveWithUrl: 0,
+                        audioWithUrl: 0,
+                        sabrStreamingUrl: false,
+                        ms: 0,
+                    };
+                    clientReport.push(entry);
                     try {
                         const res = await client.getInfo(videoId, { client: cl });
                         if (res && res.streaming_data) {
                             const sd = res.streaming_data;
-                            const candidates = [...(sd.adaptive_formats || []), ...(sd.formats || [])];
+                            const adapt = sd.adaptive_formats || [];
+                            const candidates = [...adapt, ...(sd.formats || [])];
+                            const urlOf = (f) => Boolean(f && (f.url || f.signature_cipher || f.cipher));
+                            entry.adaptive = adapt.length;
+                            entry.progressive = (sd.formats || []).length;
+                            entry.adaptiveWithUrl = adapt.filter(urlOf).length;
+                            entry.audioWithUrl = adapt.filter((f) => isAudioFormat(f) && urlOf(f)).length;
                             if (candidates.length > 0) {
                                 if (hasDirectOrDecipherableAudio(res)) {
-                                    return { info: res, winningClient: cl };
+                                    entry.ok = true;
+                                    entry.reason = 'audio-url';
+                                    return { info: res, winningClient: cl, report: entry };
                                 }
                                 // SABR-only fallback for getInfo path too (FreeTube#6977)
                                 if (hasLegacyProgressiveFallback(res)) {
+                                    entry.ok = true;
+                                    entry.legacyProgressive = true;
+                                    entry.reason = 'legacy-progressive';
                                     console.log(`[YouTubeResolver] getInfo('${cl}') SABR-only fallback: using legacy progressive formats`);
-                                    return { info: res, winningClient: cl };
+                                    return { info: res, winningClient: cl, report: entry };
                                 }
+                                entry.reason = 'no-usable-audio';
+                            } else {
+                                entry.reason = 'no-formats';
                             }
+                        } else {
+                            entry.reason = 'no-streaming-data';
                         }
                     } catch (e) {
+                        entry.error = e?.message || String(e);
+                        entry.reason = entry.reason || 'error';
                         lastErr = e;
+                    } finally {
+                        entry.ms = Date.now() - t0;
                     }
                     throw new Error(`getInfo('${cl}') produced no usable stream`);
                 };
@@ -565,6 +694,7 @@ class YouTubeResolver {
                 const res = await Promise.any(clientNames.map((cl) => getInfoClient(cl)));
                 info = res.info;
                 winningClient = res.winningClient;
+                if (res.report) res.report.chosen = true;
             } catch (e) {
                 lastErr = e;
             }
@@ -580,7 +710,7 @@ class YouTubeResolver {
         }
 
         if (!info) {
-            const msg = `Failed to retrieve video stream: ${lastErr?.message || 'Video unavailable'} (videoId=${videoId}, tried 6 InnerTube clients; last status was checked via actions.execute/getInfo — check log above for per-client status, and ensure device has network + valid YouTube cookie/PO token if age-restricted)`;
+            const msg = `Failed to retrieve video stream: ${lastErr?.message || 'Video unavailable'} (videoId=${videoId}, tried 6 InnerTube clients; last status was checked via actions.execute/getInfo — client report: ${formatClientReport(clientReport)}; ensure device has network + valid YouTube cookie/PO token if age-restricted)`;
             console.error(`DIAGNOSTIC youtube_resolve_failed videoId=${videoId} error=${msg} lastErr=${lastErr?.message || lastErr}`);
             console.error(lastErr);
             throw new Error(msg);
@@ -638,9 +768,12 @@ class YouTubeResolver {
             const legacy = pickLegacyProgressive(sd.formats);
             if (legacy && isDecipherable(legacy)) {
                 if (!allow_legacy_progressive) {
-                    const diag = `Refusing SABR-only legacy progressive (itag=${legacy.itag}) for ${videoId}: a previous attempt already produced a short stream from it. Retry with another Innertube client or set youtube_po_token/cookie in Settings.`;
+                    const diag = `Refusing SABR-only legacy progressive (itag=${legacy.itag}) for ${videoId}: a previous attempt already produced a short stream from it. Retry with another Innertube client or set youtube_po_token/cookie in Settings. Client report: ${formatClientReport(clientReport)}`;
                     console.error(`DIAGNOSTIC legacy_progressive_refused videoId=${videoId} itag=${legacy.itag}`);
-                    throw new Error(diag);
+                    const err = new Error(diag);
+                    err.client_report = clientReport;
+                    err.client_report_text = formatClientReport(clientReport);
+                    throw err;
                 }
                 const isMuxed = Boolean(legacy.has_video);
                 used_legacy_progressive = true;
@@ -654,9 +787,12 @@ class YouTubeResolver {
         }
 
         if (!fmt) {
-            const diag = `No audio stream found for ${videoId}: all=${allCandidates.length} audioCandidates=${audioCandidates.length} streaming_data keys=${Object.keys(sd||{}).join(',')} (winningClient=${winningClient || 'none'}). This usually means YouTube returned no adaptive_formats — video may be private/age-restricted/region-blocked or Innertube throttling LOGIN_REQUIRED. Try another client or set youtube_cookie/po_token in Settings.`;
+            const diag = `No audio stream found for ${videoId}: all=${allCandidates.length} audioCandidates=${audioCandidates.length} streaming_data keys=${Object.keys(sd||{}).join(',')} (winningClient=${winningClient || 'none'}). This usually means YouTube returned no adaptive_formats — video may be private/age-restricted/region-blocked or Innertube throttling LOGIN_REQUIRED. Try another client or set youtube_cookie/po_token in Settings. Client report: ${formatClientReport(clientReport)}`;
             console.error(`DIAGNOSTIC no_audio_stream ${diag}`);
-            throw new Error(diag);
+            const err = new Error(diag);
+            err.client_report = clientReport;
+            err.client_report_text = formatClientReport(clientReport);
+            throw err;
         }
 
         let streamUrl = fmt.url;
@@ -896,6 +1032,17 @@ class YouTubeResolver {
             // path — such streams are routinely partial even though the
             // container header advertises the full length.
             sabrFallback: used_legacy_progressive,
+            // What we actually picked, and how every client reacted.
+            selection: {
+                itag: fmt?.itag ?? null,
+                mime: fmt?.mime_type ?? fmt?.mimeType ?? null,
+                ext,
+                hasVideo: Boolean(fmt?.has_video),
+                audioOnly: Boolean(isAudioFormat(fmt) && !fmt?.has_video),
+                legacyProgressive: used_legacy_progressive,
+            },
+            client_report: clientReport,
+            client_report_text: formatClientReport(clientReport),
             videoId,
             originalUrl: url,
             resolveOpts: { ...opts },

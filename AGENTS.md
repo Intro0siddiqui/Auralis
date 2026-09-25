@@ -198,6 +198,24 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 ```
 (Note: this dev machine is **Void Linux (aarch64) under proot in Termux** — `cargo check --lib` works, but linking fails: `cargo build` hits the missing `webkit2gtk-4.1`, and test binaries fail with a `__stack_chk_guard` DSO error from ring (proot loader layout). Use CI for builds/tests; locally only `cargo check` is practical.)
 
+### 4.6 YouTube resolver — client strategy + per-client diagnostics (v2.6.43)
+
+**Truncated-download root cause (Sept 2026).** A transfer can finish at 100 % of the advertised bytes and still hold only part of the audio. This is *not* a dropped connection and resume cannot help. Evidence gathered Sept 2026:
+
+| Source | Finding |
+|---|---|
+| yt-dlp #12551, #12218 | "incomplete download of audio (no error indicated)" — 100 % bytes, audio stops mid-file |
+| LuanRT/GoogleVideo #52 | The ~60 s SABR cutoff is a *client library* limit, not a YouTube limit — SABR is a stateful sequential protocol |
+| cobalt discussion #1374 | *"no exact plan on how to handle SABR… we're using youtube clients that don't have it enforced, but we have no clue for how long this will last"* |
+| yt-dlp #16150 / #17348 | `android_vr` in 2026 often returns **only muxed itag 18** and 403s for ranges past ~60 s |
+| yt-dlp PO-Token Guide | `web` is **SABR-only**; a PO token is **platform-bound** (a Web/BotGuard token is invalid on `android`/`ios`) |
+
+**Client order** (`ui/js/youtube.js` `orderedClients`, v2.6.43): with a PO token → `MWEB, ANDROID, IOS, TV, ANDROID_VR, WEB`; without → `TV, MWEB, ANDROID, IOS, ANDROID_VR, WEB`. `mweb` is first because it is the only client that accepts our **Web/BotGuard** token *and* still returns plain CDN URLs; `android_vr` is demoted to last resort; `web` (SABR-only) is last. Muxed `itag 18` is only accepted as a last resort — `avoidLegacyProgressive` makes a retry refuse it outright.
+
+**Per-client reaction report** (v2.6.43). Release builds write nothing to logcat, so the resolver records one entry per attempted client in `clientReport` (`ui/js/youtube.js`): `phase` (`actions.execute` / `getInfo`), `status` (playability), `adaptive` / `progressive` counts, `adaptiveWithUrl`, `audioWithUrl`, `sabrStreamingUrl`, `reason` (`sabr-only`, `adaptive-urls-missing`, `legacy-progressive`, `no-usable-audio`, `error`, …), `ms`, and `chosen`. It is exposed on the resolved track as `client_report` / `client_report_text` / `selection`, archived in `window.__auralisClientReports` (last 20) by `downloads.js` `_recordClientReport`, rendered as a `clients: …` line in the download row, and copyable via the **Copy report** button. Resolve failures carry `err.client_report`, so a report exists even when nothing was downloaded.
+
+**Safety nets (keep all three):** byte accounting in `run_stream` (`downloader.rs`), decoded-duration verification (`completeness.rs` `verify_decoded_duration`, 90 % / 2 s slack), and the JS retry that rotates clients on `Truncated download`.
+
 ---
 
 ## 5. Testing
