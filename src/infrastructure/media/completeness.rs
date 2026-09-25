@@ -30,7 +30,7 @@
 //! rejected) so that container-level rounding differences between
 //! `mdhd`-derived and sample-derived lengths never produce false failures.
 
-use rodio::Decoder;
+use rodio::{Decoder, Source};
 use std::io::BufReader;
 use std::path::Path;
 
