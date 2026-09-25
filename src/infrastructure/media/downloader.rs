@@ -569,12 +569,8 @@ impl Downloader {
         let staging_path = tmp_dir.join(format!("{}.part", id));
         let _ = tokio::fs::create_dir_all(&tmp_dir).await;
 
-        let mut progress = DownloadProgress::with_id(
-            id,
-            req.stream_url.clone(),
-            req.title.clone(),
-            req.format,
-        );
+        let mut progress =
+            DownloadProgress::with_id(id, req.stream_url.clone(), req.title.clone(), req.format);
         progress.platform = req.platform.clone();
         progress.total_bytes = req.total_bytes;
         progress.expected_duration_secs = req.expected_duration_secs;
