@@ -96,30 +96,19 @@ export const coreMethods = {
                         this.scanLibrary();
                     } else if (p && p.status === 'failed') {
                         const rawErr = this.extractErrorMessage(p, 'Stream error');
-                        // 403 auto-retry: if downloads.js has pending context with retryClients, suppress immediate failure toast
-                        // (downloads.js listener already emitted via this.emit above and will re-resolve with next orderedClient TV→ANDROID+pot→WEB_SAFARI)
-                        const is403 = rawErr.includes('403') || rawErr.includes('Forbidden') || rawErr.includes('HTTP 403');
-                        if (is403) {
-                            try {
-                                const map = this._pendingDownloadContexts || window.__auralisPendingDownloadContexts;
-                                const retrySet = window.__auralisDownloadRetryingIds;
-                                const ctx = map ? map.get(p.id) : null;
-                                const hasRetry = ctx && ctx.retryCount < 1 && (ctx.resolved?.retryClients?.length || ctx.resolved?.orderedClients?.length);
-                                const isRetrying = retrySet ? retrySet.has(p.id) : false;
-                                if (hasRetry || isRetrying) {
-                                    // Defer failure toast: retry is in progress (downloads.js will toast retrying)
-                                    console.warn(`[core] 403 for ${p.id} — suppressing failure toast, auto-retry in progress (hasRetry=${hasRetry}, isRetrying=${isRetrying})`);
-                                    // Still update UI to show retrying state
-                                    if (p) this.updateDownloadProgressUI(p);
-                                    return;
-                                }
-                                // Fallback: if no context but error is 403, attempt direct retry via downloads.js helper if available
-                                if (typeof this._handle403AutoRetry === 'function') {
-                                    // Let the downloads.js handler (already fired via emit) attempt; if it returns without retry, fall through to toast
-                                    // No-op here — handler already ran synchronously via emit
-                                }
-                            } catch (_) {}
-                        }
+                        // Auto-retry (403 client rotation / truncated-stream re-resolve):
+                        // downloads.js runs first via this.emit and synchronously marks
+                        // the id as "retrying" only when it really starts another attempt.
+                        // Suppress the failure toast on that basis alone — keying off
+                        // "a context exists" silently swallowed the final failure.
+                        try {
+                            const retrySet = window.__auralisDownloadRetryingIds;
+                            if (retrySet && retrySet.has(p.id)) {
+                                console.warn(`[core] ${p.id} failed but an auto-retry is in progress — suppressing failure toast`);
+                                if (p) this.updateDownloadProgressUI(p);
+                                return;
+                            }
+                        } catch (_) {}
                         // Fix: backend field is `error`, not `error_message` — support both.
                         // Truncate for toast but keep full error in console/UI.
                         const toastMsg = rawErr.length > 180 ? rawErr.slice(0, 180) + '…' : rawErr;

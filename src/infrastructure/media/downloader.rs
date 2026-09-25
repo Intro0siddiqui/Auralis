@@ -132,6 +132,127 @@ fn extract_url_param_u64(url: &str, param: &str) -> Option<u64> {
     val_str[..end].parse::<u64>().ok()
 }
 
+/// Slack allowed when comparing received bytes against the advertised object
+/// size. A few tens of KiB absorbs container/manifest rounding differences
+/// between what the resolver reports and what the edge serves.
+const COMPLETE_TOLERANCE_BYTES: u64 = 64 * 1024;
+
+/// Minimum plausible audio bitrate (≈64 kbps) used to sanity-check an
+/// advertised object size against the known track duration. A 4-minute track
+/// that "totals" 1 MB is a truncated response window, not a 1-minute song.
+const MIN_PLAUSIBLE_BYTES_PER_SEC: u64 = 8_000;
+
+/// Tracks shorter than this are exempt from the bitrate plausibility check
+/// (very short clips legitimately have tiny byte counts and rounding noise).
+const MIN_DURATION_FOR_BITRATE_CHECK: u32 = 20;
+
+/// Bytes/second floor used **only** when neither the resolver nor the server
+/// gave a size: ≈32 kbps. Used to catch "the stream just stopped" truncations.
+const MIN_BYTES_PER_SEC_FALLBACK: u64 = 4_000;
+
+/// Remove query parameters that cap the response window (`range`, `range2`).
+///
+/// Throttled googlevideo URLs can carry `&range=0-1048575`. The edge then serves
+/// only that window and reports it as the whole object, so a partial download
+/// is indistinguishable from a complete one. Dropping the parameter makes the
+/// server return the full resource.
+fn strip_response_range_params(url: &str) -> String {
+    let mut removed: Vec<String> = Vec::new();
+    let filtered = url
+        .split('&')
+        .filter(|part| {
+            let key = part.split('=').next().unwrap_or("");
+            let is_cap = key.eq_ignore_ascii_case("range") || key.eq_ignore_ascii_case("range2");
+            if is_cap {
+                removed.push(key.to_string());
+            }
+            !is_cap
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    if removed.is_empty() {
+        return url.to_string();
+    }
+    info!(
+        removed = ?removed,
+        "Stripped response-capping parameter(s) from stream URL"
+    );
+    filtered
+}
+
+/// Parse the total object length from a `Content-Range` header
+/// (`bytes 0-99/1234` or the unsatisfied form `bytes */1234`).
+/// Returns `None` when the total is `*` or unparsable.
+fn parse_content_range_total(value: &str) -> Option<u64> {
+    let total = value.rsplit('/').next()?.trim();
+    if total.is_empty() || total == "*" {
+        return None;
+    }
+    total.parse::<u64>().ok()
+}
+
+/// Apply the headers googlevideo validates (`Referer`/`Origin`/`Accept`) plus any
+/// client-matched headers produced by the frontend resolver. The User-Agent is
+/// configured on the `reqwest` client itself, so it is skipped here.
+fn inject_stream_headers(
+    mut req: reqwest::RequestBuilder,
+    job_headers: Option<&HashMap<String, String>>,
+) -> reqwest::RequestBuilder {
+    let mut injected: HashMap<String, String> = HashMap::new();
+    injected.insert(
+        "Referer".to_string(),
+        "https://www.youtube.com/".to_string(),
+    );
+    injected.insert("Origin".to_string(), "https://www.youtube.com".to_string());
+    injected.insert("Accept".to_string(), "*/*".to_string());
+    injected.insert("Accept-Language".to_string(), "en-US,en;q=0.9".to_string());
+    injected.insert("Sec-Fetch-Mode".to_string(), "no-cors".to_string());
+    injected.insert("Connection".to_string(), "keep-alive".to_string());
+    if let Some(h) = job_headers {
+        for (k, v) in h {
+            if k.eq_ignore_ascii_case("user-agent") {
+                continue;
+            }
+            injected.insert(k.clone(), v.clone());
+        }
+    }
+    for (k, v) in injected {
+        req = req.header(k, v);
+    }
+    req
+}
+
+/// Ask the server for the authoritative object size with a 1-byte ranged GET.
+///
+/// `Content-Range: bytes 0-0/TOTAL` (or a full `Content-Length` when the server
+/// ignores `Range`) yields the real size. This is the number completeness is
+/// judged against when the resolver-advertised size looks implausible, which is
+/// the failure mode where a half file used to pass validation and be renamed.
+async fn probe_total_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    job_headers: Option<&HashMap<String, String>>,
+) -> Option<u64> {
+    let req = inject_stream_headers(client.get(url), job_headers).header("Range", "bytes=0-0");
+    let res = match tokio::time::timeout(Duration::from_secs(15), req.send()).await {
+        Ok(Ok(r)) => r,
+        _ => return None,
+    };
+    if let Some(cr) = res
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(total) = parse_content_range_total(cr) {
+            return Some(total);
+        }
+    }
+    if res.status().is_success() {
+        return res.content_length().filter(|c| *c > 0);
+    }
+    None
+}
+
 /// Helper to extract a float query parameter from a URL (e.g. `dur=245.123`).
 fn extract_url_param_f64(url: &str, param: &str) -> Option<f64> {
     let key = format!("{param}=");
@@ -448,8 +569,12 @@ impl Downloader {
         let staging_path = tmp_dir.join(format!("{}.part", id));
         let _ = tokio::fs::create_dir_all(&tmp_dir).await;
 
-        let mut progress =
-            DownloadProgress::new(req.stream_url.clone(), req.title.clone(), req.format);
+        let mut progress = DownloadProgress::with_id(
+            id,
+            req.stream_url.clone(),
+            req.title.clone(),
+            req.format,
+        );
         progress.platform = req.platform.clone();
         progress.total_bytes = req.total_bytes;
         progress.expected_duration_secs = req.expected_duration_secs;
@@ -570,12 +695,21 @@ impl Downloader {
             })?;
 
         const MAX_CONSECUTIVE_ERRORS: usize = 5;
-        const MIN_VALID_STREAM_BYTES: u64 = 10 * 1024; // 10KB
+
+        // A resolved googlevideo URL can still carry a `range=start-end` window.
+        // Request the full object so the byte accounting below is judged against
+        // the real file size instead of a capped window.
+        let request_url = strip_response_range_params(&job.stream_url);
+
+        // Why the stream loop stopped. Surfaced in failure messages so a
+        // truncated download is explainable from the app UI alone (Android
+        // release builds do not reach logcat).
+        let mut end_reason = "unknown";
 
         let mut consecutive_errors: usize = 0;
         let mut total_bytes: Option<u64> = job
             .total_bytes
-            .or_else(|| extract_url_param_u64(&job.stream_url, "clen"));
+            .or_else(|| extract_url_param_u64(&request_url, "clen"));
         let expected_duration_secs: Option<u32> = job
             .expected_duration_secs
             .or_else(|| extract_url_param_f64(&job.stream_url, "dur").map(|d| d.round() as u32));
@@ -603,6 +737,7 @@ impl Downloader {
                         total = total,
                         "Full stream byte length reached (downloaded >= total) — proceeding to validation"
                     );
+                    end_reason = "all-advertised-bytes-received";
                     break;
                 }
             }
@@ -620,29 +755,8 @@ impl Downloader {
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
 
-            let mut req = client.get(&job.stream_url);
             // Inject headers that googlevideo validates: Referer/Origin/Accept.
-            let mut injected: HashMap<String, String> = HashMap::new();
-            injected.insert(
-                "Referer".to_string(),
-                "https://www.youtube.com/".to_string(),
-            );
-            injected.insert("Origin".to_string(), "https://www.youtube.com".to_string());
-            injected.insert("Accept".to_string(), "*/*".to_string());
-            injected.insert("Accept-Language".to_string(), "en-US,en;q=0.9".to_string());
-            injected.insert("Sec-Fetch-Mode".to_string(), "no-cors".to_string());
-            injected.insert("Connection".to_string(), "keep-alive".to_string());
-            if let Some(h) = &job.headers {
-                for (k, v) in h {
-                    if k.eq_ignore_ascii_case("user-agent") {
-                        continue;
-                    }
-                    injected.insert(k.clone(), v.clone());
-                }
-            }
-            for (k, v) in injected {
-                req = req.header(k, v);
-            }
+            let mut req = inject_stream_headers(client.get(&request_url), job.headers.as_ref());
 
             if current_downloaded > 0 {
                 req = req.header("Range", format!("bytes={}-", current_downloaded));
@@ -702,28 +816,40 @@ impl Downloader {
             }
 
             if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-                if current_downloaded >= MIN_VALID_STREAM_BYTES
-                    && validate_audio_file_async(
-                        &job.staging_path,
-                        expected_duration_secs,
-                        &job.ext,
-                        job.format,
-                    )
-                    .await
-                    .is_ok()
+                // A 416 normally carries `Content-Range: bytes */TOTAL`, which is
+                // the authoritative object size. Treat it as "finished" ONLY when
+                // our byte count actually reached that total: a decodable
+                // container header is NOT evidence that the audio bytes arrived.
+                if let Some(cr) = res
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
                 {
+                    if let Some(server_total) = parse_content_range_total(cr) {
+                        total_bytes =
+                            Some(total_bytes.map_or(server_total, |cur| cur.max(server_total)));
+                    }
+                }
+                let reached_total = total_bytes
+                    .is_some_and(|t| t > 0 && current_downloaded + COMPLETE_TOLERANCE_BYTES >= t);
+                if reached_total {
                     info!(
                         download_id = %id,
                         downloaded = current_downloaded,
-                        "416 Range Not Satisfiable on verified audio file — full stream already downloaded"
+                        total = ?total_bytes,
+                        "416 Range Not Satisfiable but all advertised bytes are present — stream complete"
                     );
+                    end_reason = "416-all-advertised-bytes-present";
                     break;
                 }
                 warn!(
                     download_id = %id,
                     start_byte = current_downloaded,
-                    "416 Range Not Satisfiable on unverified staging file — resetting downloaded to 0 and retrying"
+                    total = ?total_bytes,
+                    "416 Range Not Satisfiable with bytes still missing — discarding staging file and restarting from 0"
                 );
+                end_reason = "416-bytes-missing-restart";
+                let bytes_before_reset = current_downloaded;
                 current_downloaded = 0;
                 let _ = tokio::fs::remove_file(&job.staging_path).await;
                 consecutive_errors += 1;
@@ -731,7 +857,8 @@ impl Downloader {
                     continue;
                 }
                 return Err(DownloaderError::HttpError(format!(
-                    "HTTP 416 Range Not Satisfiable [{host}]"
+                    "HTTP 416 Range Not Satisfiable [{host}] — received {bytes_before_reset} of {:?} bytes after {MAX_CONSECUTIVE_ERRORS} attempts",
+                    total_bytes
                 )));
             }
 
@@ -813,6 +940,30 @@ impl Downloader {
                     continue;
                 }
                 return Err(DownloaderError::HttpError(msg));
+            }
+
+            // Sanity-check the advertised size against the known track duration.
+            // A 4-minute song that "totals" 1 MB is a truncated response window
+            // (e.g. a URL still carrying a `range=` cap), not a 1-minute track —
+            // re-ask the server for the real object size so completeness is
+            // judged against the truth.
+            if let (Some(total), Some(dur)) = (total_bytes, expected_duration_secs) {
+                let min_plausible = (dur as u64).saturating_mul(MIN_PLAUSIBLE_BYTES_PER_SEC);
+                if dur >= MIN_DURATION_FOR_BITRATE_CHECK && total < min_plausible {
+                    warn!(
+                        download_id = %id,
+                        advertised_total = total,
+                        expected_duration = dur,
+                        min_plausible = min_plausible,
+                        "Advertised object size is implausibly small for the track duration — probing server for the real size"
+                    );
+                    if let Some(probed) =
+                        probe_total_bytes(&client, &request_url, job.headers.as_ref()).await
+                    {
+                        info!(download_id = %id, probed_total = probed, "Probed authoritative object size");
+                        total_bytes = Some(total_bytes.map_or(probed, |cur| cur.max(probed)));
+                    }
+                }
             }
 
             {
@@ -940,6 +1091,25 @@ impl Downloader {
                     )));
                 }
                 continue;
+            } else if total_bytes.is_some_and(|t| t > current_downloaded) {
+                // The server closed the connection cleanly but still owes us
+                // bytes. That is NOT the end of the stream — resume via Range
+                // until the retry budget is spent, then fail honestly.
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    return Err(DownloaderError::DownloadFailed(format!(
+                        "Incomplete download: server ended the stream at {current_downloaded} of {} bytes after {MAX_CONSECUTIVE_ERRORS} resume attempts (end_reason={end_reason}, host={host}) — file not saved",
+                        total_bytes.unwrap_or(0)
+                    )));
+                }
+                warn!(
+                    download_id = %id,
+                    downloaded = current_downloaded,
+                    total = ?total_bytes,
+                    consecutive_errors = consecutive_errors,
+                    "Stream ended early with bytes still outstanding — resuming via Range"
+                );
+                continue;
             }
 
             // Check if full stream has been reached:
@@ -951,6 +1121,7 @@ impl Downloader {
                         total = total,
                         "Stream finished with all expected bytes ({current_downloaded}/{total}) — proceeding to validation"
                     );
+                    end_reason = "all-advertised-bytes-received";
                     break;
                 } else {
                     // Googlevideo chunk cutoff — recursively continue range request for the next chunk
@@ -979,17 +1150,65 @@ impl Downloader {
                         downloaded = current_downloaded,
                         "Stream reached clean EOF with no additional bytes — proceeding to validation"
                     );
+                    end_reason = "clean-eof-size-unknown";
                     break;
                 }
             }
         }
+
+        // ---- Completeness gate -------------------------------------------------
+        // A decodable container header is NOT proof that the audio bytes
+        // arrived: YouTube's m4a carries the full duration in its front `moov`
+        // atom, so a half-downloaded file still "validates" and used to be
+        // renamed + reported as completed (and played as silence afterwards).
+        // Decide completeness from the byte count, never from metadata alone.
+        let staged_bytes = tokio::fs::metadata(&job.staging_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let short_by_advertised =
+            total_bytes.is_some_and(|t| t > 0 && staged_bytes + COMPLETE_TOLERANCE_BYTES < t);
+        let short_by_duration = match (total_bytes, expected_duration_secs) {
+            // No size from resolver or server: fall back to a conservative
+            // bytes-per-second floor so "it just stopped" is still caught.
+            (None, Some(dur)) if dur >= MIN_DURATION_FOR_BITRATE_CHECK => {
+                staged_bytes < (dur as u64).saturating_mul(MIN_BYTES_PER_SEC_FALLBACK)
+            }
+            _ => false,
+        };
+        if short_by_advertised || short_by_duration {
+            let msg = format!(
+                "Incomplete download: received {staged_bytes} bytes of {} expected \
+                 (track duration {expected_duration_secs:?}s, end_reason={end_reason}, host={host}). \
+                 The file was NOT saved — retrying will resume from byte {staged_bytes}.",
+                total_bytes.unwrap_or(0)
+            );
+            error!(
+                download_id = %id,
+                downloaded = staged_bytes,
+                total = ?total_bytes,
+                expected_duration = ?expected_duration_secs,
+                end_reason = %end_reason,
+                "Refusing to mark a truncated download as complete"
+            );
+            cleanup_staging_file(&job.staging_path).await;
+            return Err(DownloaderError::DownloadFailed(msg));
+        }
+        info!(
+            download_id = %id,
+            downloaded = staged_bytes,
+            total = ?total_bytes,
+            end_reason = %end_reason,
+            "Byte accounting complete — proceeding to audio validation"
+        );
 
         // Post-Download Audio Stream Integrity & Duration Validation
         info!(
             download_id = %id,
             staging_path = %job.staging_path.display(),
             expected_duration = ?expected_duration_secs,
-            downloaded = current_downloaded,
+            downloaded = staged_bytes,
+            end_reason = %end_reason,
             "Validating audio stream integrity with lofty"
         );
 

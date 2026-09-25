@@ -116,11 +116,19 @@ pub struct DownloadProgress {
 }
 
 impl DownloadProgress {
-    /// Create a new download progress tracker
+    /// Create a new download progress tracker with a generated identifier.
     pub fn new(url: String, title: String, format: AudioFormat) -> Self {
+        Self::with_id(Uuid::new_v4(), url, title, format)
+    }
+
+    /// Create a new download progress tracker with a caller-supplied identifier.
+    ///
+    /// The downloader uses this form so the serialized progress ID is exactly
+    /// the ID used as the key for its job/task maps.
+    pub fn with_id(id: Uuid, url: String, title: String, format: AudioFormat) -> Self {
         let now = Utc::now();
         Self {
-            id: Uuid::new_v4(),
+            id,
             url: url.clone(),
             platform: Self::detect_platform(&url),
             title,

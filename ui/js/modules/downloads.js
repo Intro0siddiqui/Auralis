@@ -4,8 +4,13 @@
  */
 
 export const downloadMethods = {
-    // Pending download contexts for 403 auto-retry (id -> { resolved, opts, originalUrl, format, retryCount })
+    // Pending download contexts for auto-retry (id -> { resolved, opts, originalUrl, format, key, retryCount, _retrying })
     _pendingDownloadContexts: null,
+    // Per-track retry budget (videoId/url -> { attempts, triedClients }).
+    // A retry starts a NEW download id, so the "retry once" guard on the id
+    // alone is not enough — without this budget a permanently blocked stream
+    // would spawn an endless chain of re-resolves.
+    _autoRetryBudget: null,
     _downloadRetryListenerBound: false,
     _downloadSubmitListenersBound: false,
 
@@ -14,6 +19,11 @@ export const downloadMethods = {
         // expose globally so core.js can read same map (both run on same Bridge instance)
         try { window.__auralisPendingDownloadContexts = this._pendingDownloadContexts; } catch (_) {}
         return this._pendingDownloadContexts;
+    },
+
+    _ensureRetryBudget() {
+        if (!this._autoRetryBudget) this._autoRetryBudget = new Map();
+        return this._autoRetryBudget;
     },
 
     _ensureDownloadRetryListener() {
@@ -29,7 +39,12 @@ export const downloadMethods = {
                 }
                 const map = this._ensurePendingMap();
                 if (p.status === 'completed' || p.status === 'cancelled') {
+                    const done = map.get(p.id);
                     map.delete(p.id);
+                    // Track succeeded/cancelled — the retry chain is over.
+                    if (done && done.key) {
+                        try { this._ensureRetryBudget().delete(done.key); } catch (_) {}
+                    }
                     try { if (window.__auralisDownloadRetryingIds) window.__auralisDownloadRetryingIds.delete(p.id); } catch (_) {}
                     return;
                 }
@@ -64,64 +79,93 @@ export const downloadMethods = {
         });
     },
 
+    // Auto-retry a failed download once per budgeted attempt.
+    //  - HTTP 403: rotate to the next InnerTube client (the URL is bound to the
+    //    client that produced it, and 2026 Jio/Google edges reject some clients).
+    //  - Truncated / interrupted / timed-out streams: re-resolve for a fresh URL.
+    //    The Rust layer no longer accepts a partial file as "complete", so this
+    //    is the path that turns a half song into a whole one.
+    // The budget is keyed per track (videoId/URL), not per download id, because
+    // every retry creates a new id.
     async _handle403AutoRetry(p) {
         if (!p || p.status !== 'failed') return;
         const map = this._ensurePendingMap();
         const errRaw = typeof this.extractErrorMessage === 'function'
             ? this.extractErrorMessage(p, '')
             : (p.error || p.error_message || '');
-        if (!errRaw.includes('403') && !errRaw.includes('Forbidden') && !errRaw.includes('HTTP 403')) {
+        const is403 = errRaw.includes('403') || errRaw.includes('Forbidden');
+        const isResumable = /Incomplete download|Stream interrupted|timed out|timeout|stalled|ECONNRESET|connection reset|HTTP 5\d\d/i.test(errRaw);
+        if (!is403 && !isResumable) {
             map.delete(p.id);
             return;
         }
         const ctx = map.get(p.id);
-        if (!ctx) return;
-        if (ctx.retryCount >= 1 || ctx._retrying) return; // auto-retry once only & guard concurrent calls
-        const resolved = ctx.resolved;
-        const nextClient = resolved?.retryClients?.[0]
-            || (() => {
-                const oc = resolved?.orderedClients || [];
-                const idx = oc.indexOf(resolved?.client || resolved?.winningClient);
-                return idx >= 0 && idx + 1 < oc.length ? oc[idx + 1] : null;
-            })();
-        if (!nextClient) {
-            console.warn(`[Downloads] 403 auto-retry no next client for ${p.id} winningClient=${resolved?.client}`);
+        if (!ctx || ctx._retrying) return;
+
+        const key = ctx.key || p.id;
+        const budgetMap = this._ensureRetryBudget();
+        let budget = budgetMap.get(key);
+        if (!budget) { budget = { attempts: 0, triedClients: [] }; budgetMap.set(key, budget); }
+        const MAX_AUTO_RETRIES = 3;
+        if (budget.attempts >= MAX_AUTO_RETRIES) {
+            budgetMap.delete(key);
+            map.delete(p.id);
+            console.warn(`[Downloads] auto-retry budget exhausted for ${key} (${MAX_AUTO_RETRIES} attempts) — surfacing the failure to the user`);
             return;
         }
-        // Mark retrying to suppress duplicate toast in core.js
-        ctx.retryCount += 1;
+
+        const resolved = ctx.resolved || {};
+        const tried = budget.triedClients;
+        // Record the client that just failed so it is excluded from the next race.
+        if (is403) {
+            const failed = resolved.client || resolved.winningClient;
+            if (failed && !tried.includes(failed)) tried.push(failed);
+        }
+        const nextClient = is403
+            ? ((resolved.retryClients || []).find(c => !tried.includes(c))
+                || (() => {
+                    const oc = resolved.orderedClients || [];
+                    const idx = oc.indexOf(resolved.client || resolved.winningClient);
+                    return idx >= 0 && idx + 1 < oc.length ? oc[idx + 1] : null;
+                })())
+            : null;
+        const allClients = resolved.orderedClients || [];
+        // Never exclude every client — that leaves the resolver nothing to try.
+        const excludeClients = (tried.length > 0 && tried.length < allClients.length) ? tried.slice() : [];
+        if (is403 && !nextClient && !excludeClients.length) {
+            console.warn(`[Downloads] 403 auto-retry: no client left to try for ${p.id} (winning=${resolved.client})`);
+            map.delete(p.id);
+            return;
+        }
+
+        budget.attempts += 1;
         ctx._retrying = true;
         try { window.__auralisDownloadRetryingIds = window.__auralisDownloadRetryingIds || new Set(); window.__auralisDownloadRetryingIds.add(p.id); } catch (_) {}
-        console.warn(`[Downloads] DIAGNOSTIC 403 auto-retry id=${p.id} ${resolved?.client} → ${nextClient} (retry ${ctx.retryCount}/1)`);
-        this.showToast(`403 on ${resolved?.client || 'TV'} (rr1---sn-gwpa-cived), retrying with ${nextClient}…`, 'info', 5000);
+        const shortfall = (errRaw.match(/received \d+ bytes of \d+/) || [errRaw.split('\n')[0].slice(0, 80)])[0];
+        const label = is403
+            ? `403 on ${resolved.client || 'TV'} (rr1---sn-gwpa-cived), retrying with ${nextClient}`
+            : `Download incomplete (${shortfall}), retrying`;
+        this.showToast(`${label}… (attempt ${budget.attempts}/${MAX_AUTO_RETRIES})`, 'info', 5000);
+        console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} nextClient=${nextClient} exclude=${JSON.stringify(excludeClients)}`);
         try {
-            // Build opts for re-resolve: exclude the failing client, force next
             const baseOpts = ctx.opts || this.getDownloadOptions(document.getElementById('download-form')) || {};
-            // Ensure we keep cookie/poToken from settings but allow minting
-            const retryOpts = {
-                ...baseOpts,
-                forceClient: nextClient,
-                excludeClient: resolved?.client || resolved?.winningClient,
-                // Keep original orderedClients hint so youtube.js can rotate correctly
-                // Also ensure poToken is considered (youtube.js will mint if needed)
-            };
-            // If retrying toward ANDROID/IOS, ensure poToken mint path is taken (youtube.js does it)
-            if (!retryOpts.poToken && (nextClient === 'ANDROID' || nextClient === 'IOS')) {
-                // Trigger poToken mint via youtube.js internal logic (it will import po_token.js)
-                // No extra action needed; youtube.js will attempt generatePoTokenForVideo
-            }
-            const originalUrl = ctx.originalUrl || ctx.resolved?.originalUrl || p.url;
+            const retryOpts = { ...baseOpts };
+            if (nextClient) retryOpts.forceClient = nextClient;
+            if (excludeClients.length) retryOpts.excludeClients = excludeClients;
+            const originalUrl = ctx.originalUrl || resolved.originalUrl || p.url;
             if (!originalUrl || !window.AuralisYouTube) throw new Error('No original URL/client for retry');
             const reResolved = await window.AuralisYouTube.resolve(originalUrl, retryOpts);
             if (!reResolved || reResolved.kind !== 'track') throw new Error('Re-resolve did not return track');
-            console.log(`[Downloads] 403 retry re-resolved ${originalUrl} via ${nextClient} -> ${reResolved.stream_url?.slice(0,80)}`);
-            // Re-invoke download with new URL; this creates a new download id and new pending entry
+            console.log(`[Downloads] retry re-resolved ${originalUrl} via ${reResolved.client} -> ${(reResolved.stream_url || '').slice(0, 80)}`);
             await this.downloadResolvedTrack(reResolved, ctx.format || 'm4a', retryOpts, originalUrl);
         } catch (e) {
             const msg = e?.message || String(e);
-            console.error(`[Downloads] 403 auto-retry re-resolve failed for ${p.id}:`, msg);
-            this.showToast(`Retry with ${nextClient} failed: ${msg}`, 'error', 6000);
+            console.error(`[Downloads] auto-retry re-resolve failed for ${p.id}:`, msg);
+            this.showToast(`Retry failed: ${msg}`, 'error', 6000);
             map.delete(p.id);
+            // Drop the budget so a later manual re-download starts fresh.
+            budgetMap.delete(key);
+            try { if (window.__auralisDownloadRetryingIds) window.__auralisDownloadRetryingIds.delete(p.id); } catch (_) {}
         } finally {
             ctx._retrying = false;
         }
@@ -179,11 +223,15 @@ export const downloadMethods = {
                     const map = this._ensurePendingMap();
                     const ctxOpts = opts || this.getDownloadOptions(document.getElementById('download-form')) || resolved.resolveOpts || {};
                     const ctxUrl = originalUrl || resolved.originalUrl || resolved.stream_url;
+                    // Budget key: the track identity, so every retry attempt of
+                    // the same song shares one retry budget.
+                    const key = String(resolved.videoId || ctxUrl || result.id);
                     map.set(result.id, {
                         resolved: { ...resolved },
                         opts: { ...ctxOpts },
                         originalUrl: ctxUrl,
                         format,
+                        key,
                         retryCount: 0,
                         _retrying: false,
                     });
