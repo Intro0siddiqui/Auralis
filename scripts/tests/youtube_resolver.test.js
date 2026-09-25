@@ -717,6 +717,36 @@ describe('YouTube Search & Streaming Integration', () => {
         assert.ok(src.includes('new Audio'), 'must instantiate Audio element for streaming');
     });
 
+    it('downloads.js auto-retries truncated streams by rotating InnerTube client', () => {
+        // The backend rejects a file whose DECODED audio is short
+        // ("Truncated download: only 99s of 287s ..."). That is not a dropped
+        // connection — the transfer finished at 100% of the advertised bytes —
+        // so resuming cannot help; a new url from another client must be tried.
+        const src = fs.readFileSync(dlsModulePath, 'utf8');
+        assert.ok(
+            /isTruncated\s*=\s*\/Truncated download\/i\.test\(errRaw\)/.test(src),
+            'auto-retry must detect the backend "Truncated download" verdict (it previously only matched "Incomplete download", so retries never fired)'
+        );
+        assert.ok(
+            src.includes('avoidLegacyProgressive'),
+            'a truncated retry must refuse the SABR-only legacy progressive fallback'
+        );
+        assert.ok(
+            /MAX_AUTO_RETRIES\s*=\s*3/.test(src),
+            'auto-retry must be budgeted per track to avoid an endless retry chain'
+        );
+    });
+
+    it('youtube.js flags the SABR-only legacy progressive fallback as partial-prone', () => {
+        const src = fs.readFileSync(ytPath, 'utf8');
+        assert.ok(src.includes('used_legacy_progressive'), 'must track legacy-progressive fallback usage');
+        assert.ok(src.includes('sabrFallback: used_legacy_progressive'), 'resolved object must expose sabrFallback so retries can escalate');
+        assert.ok(
+            src.includes('allow_legacy_progressive') && src.includes('avoidLegacyProgressive'),
+            'opts.avoidLegacyProgressive must be able to reject the legacy-progressive fallback'
+        );
+    });
+
     it('ui/js/player.js coordinates smoothly with streaming audio element', () => {
         const src = fs.readFileSync(playerJsPath, 'utf8');
         assert.ok(src.includes('window._auralisStreamAudio'), 'player.js must check window._auralisStreamAudio');

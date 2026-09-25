@@ -595,6 +595,18 @@ class YouTubeResolver {
         const container = opts.container === 'mp4' || opts.container === 'webm' ? opts.container : null;
         const quality = opts.quality || 'best';
         let fmt = null;
+        // True when we had to fall back to the SABR-only legacy progressive
+        // (muxed 360p itag 18). Those URLs are served by the SABR endpoint,
+        // which routinely returns a *partial* media resource whose container
+        // header still advertises the full track length — the download then
+        // completes at 100% of the advertised bytes while holding only part of
+        // the audio. Callers retry truncated downloads with
+        // `avoidLegacyProgressive` so a different client must produce a real
+        // audio-only stream.
+        let used_legacy_progressive = false;
+        // A retry that already got a short legacy stream refuses the fallback
+        // entirely: better to fail loudly than to re-download the same 99s.
+        const allow_legacy_progressive = !opts.avoidLegacyProgressive;
 
         if (typeof info.chooseFormat === 'function') {
             // rodio 0.22.2 lacks opus — prefer m4a/mp4 (itag 140) over webm/opus to avoid DecodeError
@@ -625,9 +637,15 @@ class YouTubeResolver {
         if ((!fmt || (!fmt.url && !fmt.signature_cipher && !fmt.cipher && typeof fmt.decipher !== 'function')) && sd.formats && sd.formats.length) {
             const legacy = pickLegacyProgressive(sd.formats);
             if (legacy && isDecipherable(legacy)) {
+                if (!allow_legacy_progressive) {
+                    const diag = `Refusing SABR-only legacy progressive (itag=${legacy.itag}) for ${videoId}: a previous attempt already produced a short stream from it. Retry with another Innertube client or set youtube_po_token/cookie in Settings.`;
+                    console.error(`DIAGNOSTIC legacy_progressive_refused videoId=${videoId} itag=${legacy.itag}`);
+                    throw new Error(diag);
+                }
                 const isMuxed = Boolean(legacy.has_video);
+                used_legacy_progressive = true;
                 if (isMuxed) {
-                    console.warn(`[YouTubeResolver] SABR-only final fallback: using MUXED progressive itag=${legacy.itag} mime=${legacy.mime_type} (video+audio 360p remux — wasteful, ext will be mp4)`);
+                    console.warn(`[YouTubeResolver] SABR-only final fallback: using MUXED progressive itag=${legacy.itag} mime=${legacy.mime_type} (video+audio 360p remux — wasteful, ext will be mp4). SABR streams are often PARTIAL: the file can finish at 100% of the advertised bytes while holding only part of the audio.`);
                 } else {
                     console.log(`[YouTubeResolver] SABR-only final fallback: using legacy progressive itag=${legacy.itag} mime=${legacy.mime_type}`);
                 }
@@ -692,6 +710,12 @@ class YouTubeResolver {
             for (const candidate of orderedLegacy) {
                 if (!candidate) continue;
                 const isMuxed = Boolean(candidate.has_video);
+                if (!allow_legacy_progressive) {
+                    const diag = `Refusing SABR-only legacy progressive (itag=${candidate.itag}) for ${videoId}: a previous attempt already produced a short stream from it. Retry with another Innertube client or set youtube_po_token/cookie in Settings.`;
+                    console.error(`DIAGNOSTIC legacy_progressive_refused videoId=${videoId} itag=${candidate.itag}`);
+                    throw new Error(diag);
+                }
+                used_legacy_progressive = true;
                 if (candidate.url) {
                     if (isMuxed) console.warn(`[YouTubeResolver] SABR-only streamUrl fallback: using MUXED progressive url itag=${candidate.itag} mime=${candidate.mime_type} (video+audio, ext mp4 — wasteful)`);
                     else console.log(`[YouTubeResolver] SABR-only streamUrl fallback: using legacy progressive url itag=${candidate.itag}`);
@@ -868,6 +892,10 @@ class YouTubeResolver {
             winningClient,
             orderedClients: [..._ord],
             retryClients,
+            // True when the URL came from the SABR-only legacy progressive
+            // path — such streams are routinely partial even though the
+            // container header advertises the full length.
+            sabrFallback: used_legacy_progressive,
             videoId,
             originalUrl: url,
             resolveOpts: { ...opts },

@@ -94,8 +94,12 @@ export const downloadMethods = {
             ? this.extractErrorMessage(p, '')
             : (p.error || p.error_message || '');
         const is403 = errRaw.includes('403') || errRaw.includes('Forbidden');
+        // "Truncated download" is the backend's decoded-length verdict: the
+        // transfer finished at 100% of the advertised bytes but the file only
+        // holds part of the audio, so this needs a NEW url, not a resume.
+        const isTruncated = /Truncated download/i.test(errRaw);
         const isResumable = /Incomplete download|Stream interrupted|timed out|timeout|stalled|ECONNRESET|connection reset|HTTP 5\d\d/i.test(errRaw);
-        if (!is403 && !isResumable) {
+        if (!is403 && !isTruncated && !isResumable) {
             map.delete(p.id);
             return;
         }
@@ -116,12 +120,14 @@ export const downloadMethods = {
 
         const resolved = ctx.resolved || {};
         const tried = budget.triedClients;
-        // Record the client that just failed so it is excluded from the next race.
-        if (is403) {
+        // Rotate the InnerTube client for both 403 and truncation: the stream
+        // URL is bound to the client that produced it, and a truncated SABR
+        // stream from one client often comes back complete from another.
+        if (is403 || isTruncated) {
             const failed = resolved.client || resolved.winningClient;
             if (failed && !tried.includes(failed)) tried.push(failed);
         }
-        const nextClient = is403
+        const nextClient = (is403 || isTruncated)
             ? ((resolved.retryClients || []).find(c => !tried.includes(c))
                 || (() => {
                     const oc = resolved.orderedClients || [];
@@ -132,8 +138,8 @@ export const downloadMethods = {
         const allClients = resolved.orderedClients || [];
         // Never exclude every client — that leaves the resolver nothing to try.
         const excludeClients = (tried.length > 0 && tried.length < allClients.length) ? tried.slice() : [];
-        if (is403 && !nextClient && !excludeClients.length) {
-            console.warn(`[Downloads] 403 auto-retry: no client left to try for ${p.id} (winning=${resolved.client})`);
+        if ((is403 || isTruncated) && !nextClient && !excludeClients.length) {
+            console.warn(`[Downloads] 403/truncation auto-retry: no client left to try for ${p.id} (winning=${resolved.client})`);
             map.delete(p.id);
             return;
         }
@@ -141,17 +147,22 @@ export const downloadMethods = {
         budget.attempts += 1;
         ctx._retrying = true;
         try { window.__auralisDownloadRetryingIds = window.__auralisDownloadRetryingIds || new Set(); window.__auralisDownloadRetryingIds.add(p.id); } catch (_) {}
-        const shortfall = (errRaw.match(/received \d+ bytes of \d+/) || [errRaw.split('\n')[0].slice(0, 80)])[0];
-        const label = is403
-            ? `403 on ${resolved.client || 'TV'} (rr1---sn-gwpa-cived), retrying with ${nextClient}`
-            : `Download incomplete (${shortfall}), retrying`;
+        const shortfall = (errRaw.match(/only \d+s of \d+s|received \d+ bytes of \d+/) || [errRaw.split('\n')[0].slice(0, 80)])[0];
+        const label = isTruncated
+            ? `Truncated stream (${shortfall}), re-resolving via ${nextClient || 'another client'}`
+            : is403
+                ? `403 on ${resolved.client || 'TV'} (rr1---sn-gwpa-cived), retrying with ${nextClient}`
+                : `Download incomplete (${shortfall}), retrying`;
         this.showToast(`${label}… (attempt ${budget.attempts}/${MAX_AUTO_RETRIES})`, 'info', 5000);
-        console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} nextClient=${nextClient} exclude=${JSON.stringify(excludeClients)}`);
+        console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} truncated=${isTruncated} sabr=${!!resolved.sabrFallback} nextClient=${nextClient} exclude=${JSON.stringify(excludeClients)}`);
         try {
             const baseOpts = ctx.opts || this.getDownloadOptions(document.getElementById('download-form')) || {};
             const retryOpts = { ...baseOpts };
             if (nextClient) retryOpts.forceClient = nextClient;
             if (excludeClients.length) retryOpts.excludeClients = excludeClients;
+            // A previous attempt already came back short from the SABR-only
+            // legacy progressive path; refuse to reuse it.
+            if (isTruncated) retryOpts.avoidLegacyProgressive = true;
             const originalUrl = ctx.originalUrl || resolved.originalUrl || p.url;
             if (!originalUrl || !window.AuralisYouTube) throw new Error('No original URL/client for retry');
             const reResolved = await window.AuralisYouTube.resolve(originalUrl, retryOpts);
