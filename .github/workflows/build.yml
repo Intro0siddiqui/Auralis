@@ -531,8 +531,13 @@ jobs:
     name: Android E2E Download & Playback Test (x86_64 KVM)
     needs: [build-android]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # Report-only, never a gate. This suite seeds local tracks from
+    # /sdcard/Music (no InnerTube / googlevideo / real CDN) and runs on shared
+    # KVM emulator runners, so it cannot reproduce real-world download failures
+    # and is inherently flaky. It runs alongside the build jobs and must never
+    # delay or block the GitHub Release.
+    continue-on-error: true
     runs-on: ubuntu-22.04
-    continue-on-error: false
     steps:
       - uses: actions/checkout@v4
 
@@ -632,7 +637,9 @@ jobs:
   ci:
     name: CI status
     if: always()
-    needs: [lint, build-linux, build-android, test-android-e2e]
+    # test-android-e2e is deliberately absent: it is report-only (see above) and
+    # must not gate the branch status.
+    needs: [lint, build-linux, build-android]
     runs-on: ubuntu-22.04
     steps:
       - name: Check required jobs

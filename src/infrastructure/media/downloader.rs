@@ -1236,6 +1236,30 @@ impl Downloader {
             }
         }
 
+        // Decoded-length gate. `lofty` reads the container header, which for a
+        // YouTube MP4 advertises the FULL track length from the front `moov`
+        // atom even when the media data stops early — so the check above passes
+        // a file that only holds the first minute. The decoder's own duration
+        // counts the samples that are really present (the same number the
+        // player shows), and is the only trustworthy completeness signal.
+        if let Err(truncation) = super::completeness::verify_decoded_duration(
+            &job.staging_path,
+            &job.ext,
+            expected_duration_secs,
+        ) {
+            error!(
+                download_id = %id,
+                error = %truncation,
+                expected_duration = ?expected_duration_secs,
+                downloaded = staged_bytes,
+                total = ?total_bytes,
+                end_reason = %end_reason,
+                "Refusing to save a decoded-truncated download"
+            );
+            cleanup_staging_file(&job.staging_path).await;
+            return Err(DownloaderError::DownloadFailed(truncation));
+        }
+
         // All validation passed! Now perform atomic rename to destination
         info!(
             download_id = %id,
