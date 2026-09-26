@@ -23,6 +23,13 @@ pub struct DownloadRequest {
     pub url: String,
     /// Display title.
     pub title: String,
+    /// Optional artist, written into the downloaded file's tags so the library
+    /// scanner does not report `Unknown Artist`.
+    #[serde(default)]
+    pub artist: Option<String>,
+    /// Optional album, written into the downloaded file's tags.
+    #[serde(default)]
+    pub album: Option<String>,
     /// Source platform label (e.g. `youtube`, `direct`).
     pub platform: Option<String>,
     /// Container/format metadata (display only).
@@ -75,6 +82,8 @@ pub async fn download_audio(
     let stream = StreamDownload {
         stream_url: request.url.clone(),
         title: request.title.clone(),
+        artist: request.artist.clone(),
+        album: request.album.clone(),
         platform: request
             .platform
             .clone()
@@ -182,6 +191,8 @@ pub async fn download_playlist(
         let stream = StreamDownload {
             stream_url: item.url.clone(),
             title: item.title.clone(),
+            artist: item.artist,
+            album: item.album,
             platform: item
                 .platform
                 .clone()

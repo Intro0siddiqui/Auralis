@@ -394,7 +394,16 @@ fn dispatch(command: &str) {
     tauri::async_runtime::spawn(async move {
         match command.as_str() {
             "play" => {
-                let _ = player.resume().await;
+                // `resume` deliberately reports an error when there is nothing
+                // to resume (no sink, or a drained one). The notification's play
+                // button used to discard that, so it silently did nothing after
+                // a stop or at the end of a track - the same dead end the in-app
+                // play button had. Replay the current track instead.
+                if player.resume().await.is_err() {
+                    if let Some(track) = player.get_current_track().await {
+                        let _ = player.play_track(track).await;
+                    }
+                }
             }
             "pause" => {
                 let _ = player.pause().await;

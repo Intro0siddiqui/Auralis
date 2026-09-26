@@ -11,6 +11,11 @@ class PlayerController {
         this.shuffle = false;
         this.progressInterval = null;
         this.isSeeking = false;
+        // How long a `resume` gets to be proven by a real playback event before
+        // we assume it did nothing and replay the track instead.
+        this.RESUME_VERIFY_MS = 700;
+        // Pending "did playback actually start?" check; see awaitPlaybackStart.
+        this._resumeWatch = null;
         this.init();
     }
 
@@ -31,6 +36,9 @@ class PlayerController {
 
         window.Auralis.bridge.on('playback:state', (state) => {
             this.isPlaying = state.is_playing;
+            // The backend telling us it is playing is the only proof that a
+            // `resume` did something — a successful `resume` reply is not.
+            if (state.is_playing) this.settleResumeWatch(true);
             if (state.position_secs !== undefined && !state.is_playing) {
                 this.progress = state.position_secs;
                 this.updateProgressUI();
@@ -65,6 +73,9 @@ class PlayerController {
         });
 
         window.Auralis.bridge.on('playback:progress', (data) => {
+            // The Rust watcher only emits progress while the sink is running, so
+            // a tick is proof of life for a pending resume check as well.
+            this.settleResumeWatch(true);
             if (this.isSeeking || !data) return;
             this.progress = data.position_secs !== undefined ? data.position_secs : (data.position || 0);
             this.duration = data.duration_secs !== undefined ? data.duration_secs : (data.duration || 0);
@@ -542,7 +553,7 @@ class PlayerController {
             });
             try { navigator.mediaSession.setActionHandler('seekbackward', (details) => { const off = (details && details.seekOffset) || 10; this.seekRelative(-off); }); } catch (_) {}
             try { navigator.mediaSession.setActionHandler('seekforward', (details) => { const off = (details && details.seekOffset) || 10; this.seekRelative(off); }); } catch (_) {}
-            try { navigator.mediaSession.setActionHandler('stop', () => { if (window.Auralis && window.Auralis.bridge) window.Auralis.bridge.invoke('stop').catch(()=>{}); this.isPlaying = false; this.updatePlayButton(); }); } catch (_) {}
+            try { navigator.mediaSession.setActionHandler('stop', () => { this.settleResumeWatch(false); if (window.Auralis && window.Auralis.bridge) window.Auralis.bridge.invoke('stop').catch(()=>{}); this.isPlaying = false; this.updatePlayButton(); }); } catch (_) {}
         } catch (err) {
             console.warn('MediaSession handler error:', err);
         }
@@ -571,19 +582,33 @@ class PlayerController {
         if (!window.Auralis || !window.Auralis.bridge) return;
         // If we have a current track, resume is correct — it preserves position.
         if (this.currentTrack && this.currentTrack.id) {
+            const resumeTrackId = this.currentTrack.id;
+            // Arm the proof-of-life check *before* the invoke: the `resume`
+            // command emits `playback:state_changed` from inside Rust, so that
+            // event can arrive before the invoke's reply does.
+            const started = this.awaitPlaybackStart(resumeTrackId, this.RESUME_VERIFY_MS);
             try {
                 await window.Auralis.bridge.invoke('resume');
             } catch (err) {
+                this.settleResumeWatch(false);
                 const msg = String(err || 'resume failed');
                 console.warn('Resume failed:', msg);
                 window.Auralis.bridge.showToast(`Resume failed: ${msg} — retrying track`, 'error', 6000);
                 // fallback: replay the current track from start
-                window.Auralis.bridge.playTrack(this.currentTrack.id);
+                window.Auralis.bridge.playTrack(resumeTrackId);
+                return;
             }
+            // The invoke round-trip above consumed part of the window, so top it
+            // back up to a full budget measured from here.
+            this.renewResumeWatch(this.RESUME_VERIFY_MS);
+            // Resolves true when playback is confirmed; false means nothing
+            // started and the track has already been replayed for us.
+            await started;
             return;
         }
-        // No track loaded (fresh start / "No track playing") — resume is a no-op in Rust
-        // (sink is None → Ok(())). Play the last queued track or the first library track.
+        // No track loaded (fresh start / "No track playing") — resume has nothing
+        // to work with, and Rust now reports that as an error anyway. Play the
+        // last queued track or the first library track.
         try {
             const q = await window.Auralis.bridge.invoke('get_queue');
             if (q && q.tracks && q.tracks.length > 0) {
@@ -609,7 +634,99 @@ class PlayerController {
         }
     }
 
+    /**
+     * Arm a one-shot check that `trackId` really started playing.
+     *
+     * A resolved `invoke('resume')` only means the Rust command did not throw.
+     * `AudioPlayer::resume` used to answer `Ok(())` when the sink was missing
+     * (after `stop()`) or drained, so the UI drew a pause button over silence
+     * and every later press took the same dead path until an app restart. Proof
+     * of life is a `playback:state` event with `is_playing === true` (Rust emits
+     * one from inside the `resume` command) or a `playback:progress` tick, which
+     * the watcher only emits while audio is actually running.
+     *
+     * Resolves `true` once playback is confirmed. On timeout it resolves `false`
+     * after correcting `isPlaying` and replaying the track from the start.
+     */
+    awaitPlaybackStart(trackId, budgetMs) {
+        const bridge = window.Auralis && window.Auralis.bridge;
+        if (!bridge) return Promise.resolve(true);
+        // Only one check can be pending; a newer play() supersedes the older one
+        // (this also guarantees that promise can never be left unresolved).
+        if (this._resumeWatch) this.settleResumeWatch(false);
+        const budget = budgetMs || this.RESUME_VERIFY_MS;
+        return new Promise((resolve) => {
+            const watch = { trackId: trackId, timer: null };
+            watch.finish = (started) => {
+                if (watch.timer) {
+                    clearTimeout(watch.timer);
+                    watch.timer = null;
+                }
+                if (this._resumeWatch === watch) this._resumeWatch = null;
+                resolve(started);
+            };
+            watch.timer = setTimeout(() => this.onResumeWatchTimeout(watch), budget);
+            this._resumeWatch = watch;
+        });
+    }
+
+    /**
+     * Settle a pending `awaitPlaybackStart` check. Called by the
+     * `playback:state` / `playback:progress` listeners — the only evidence that
+     * audio is running — and by the `resume` failure path.
+     */
+    settleResumeWatch(started) {
+        const watch = this._resumeWatch;
+        if (!watch) return;
+        watch.finish(started === true);
+    }
+
+    /**
+     * Give a still-pending resume check its full budget again, measured from now
+     * instead of from before a slow `invoke` round-trip.
+     */
+    renewResumeWatch(budgetMs) {
+        const watch = this._resumeWatch;
+        // No timer means it already settled — nothing to renew.
+        if (!watch || !watch.timer) return;
+        const budget = budgetMs || this.RESUME_VERIFY_MS;
+        clearTimeout(watch.timer);
+        watch.timer = setTimeout(() => this.onResumeWatchTimeout(watch), budget);
+    }
+
+    /**
+     * The resume was reported as successful but nothing started playing within
+     * the window: this is the `stop()`-left-a-drained-sink dead end. Replay the
+     * track unless it is no longer the current one.
+     */
+    onResumeWatchTimeout(watch) {
+        watch.timer = null;
+        // Superseded by a newer watch, or already settled — do nothing.
+        if (this._resumeWatch !== watch) return;
+        const current = this.currentTrack;
+        const stale = !current || String(current.id) !== String(watch.trackId);
+        watch.finish(false);
+        if (stale) {
+            // The track changed (or was cleared) while we waited: whatever plays
+            // now was not started by this resume, so leave it alone.
+            return;
+        }
+        console.warn('Resume reported success but playback never started; replaying track', watch.trackId);
+        this.isPlaying = false;
+        this.updatePlayButton();
+        const bridge = window.Auralis && window.Auralis.bridge;
+        if (bridge && typeof bridge.showToast === 'function') {
+            bridge.showToast('Resume did not start — replaying track', 'info', 4000);
+        }
+        if (bridge && typeof bridge.playTrack === 'function') {
+            bridge.playTrack(watch.trackId);
+        }
+    }
+
     pause() {
+        // A pause cancels any pending "did the resume start?" check — the user
+        // just said stop, so its timeout must not replay the track afterwards.
+        this.settleResumeWatch(false);
         this.isPlaying = false;
         this.updatePlayButton();
         this.stopTimeTracking();

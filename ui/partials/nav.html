@@ -6,39 +6,43 @@
 </div>
 
 <nav class="sidebar-nav">
-    <a href="#" class="nav-item" hx-get="/partials/home.html" hx-target="#content" hx-swap="innerHTML">
+    <!-- hx-sync="#content:replace" on every nav-item: these requests are owned by
+         their own nav item, so without a shared sync key they would not be
+         serialized against the #content initial load (or against each other) and
+         a late response could overwrite the view the user just navigated to. -->
+    <a href="#" class="nav-item" hx-get="/partials/home.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
         <i data-lucide="home"></i>
         <span>Home</span>
     </a>
-    <a href="#" class="nav-item" hx-get="/partials/library.html" hx-target="#content" hx-swap="innerHTML">
+    <a href="#" class="nav-item" hx-get="/partials/library.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
         <i data-lucide="library"></i>
         <span>Library</span>
     </a>
-    <a href="#" class="nav-item" hx-get="/partials/albums.html" hx-target="#content" hx-swap="innerHTML">
+    <a href="#" class="nav-item" hx-get="/partials/albums.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
         <i data-lucide="disc-3"></i>
         <span>Albums</span>
     </a>
-    <a href="#" class="nav-item" hx-get="/partials/artists.html" hx-target="#content" hx-swap="innerHTML">
+    <a href="#" class="nav-item" hx-get="/partials/artists.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
         <i data-lucide="users"></i>
         <span>Artists</span>
     </a>
-    <a href="#" class="nav-item" hx-get="/partials/playlists.html" hx-target="#content" hx-swap="innerHTML">
+    <a href="#" class="nav-item" hx-get="/partials/playlists.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
         <i data-lucide="list-music"></i>
         <span>Playlists</span>
     </a>
-    <a href="#" class="nav-item" hx-get="/partials/search.html" hx-target="#content" hx-swap="innerHTML">
+    <a href="#" class="nav-item" hx-get="/partials/search.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
         <i data-lucide="search"></i>
         <span>Search</span>
     </a>
-    <a href="#" class="nav-item" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML">
+    <a href="#" class="nav-item" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
         <i data-lucide="download"></i>
         <span>Download</span>
     </a>
-    <a href="#" class="nav-item" hx-get="/partials/sync.html" hx-target="#content" hx-swap="innerHTML">
+    <a href="#" class="nav-item" hx-get="/partials/sync.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
         <i data-lucide="radio"></i>
         <span>Sync</span>
     </a>
-    <a href="#" class="nav-item" hx-get="/partials/settings.html" hx-target="#content" hx-swap="innerHTML">
+    <a href="#" class="nav-item" hx-get="/partials/settings.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
         <i data-lucide="settings"></i>
         <span>Settings</span>
     </a>

@@ -248,19 +248,50 @@ impl AudioPlayer {
         Ok(())
     }
 
+    /// Un-pause playback, or report that there is nothing left to resume.
+    ///
+    /// rodio's `Player::play()` is documented as "resumes playback of a paused
+    /// player. No effect if not paused", so a resume can silently do nothing.
+    /// Two states reach that branch in practice:
+    ///
+    /// * there is no sink at all — `stop()` takes it out of `self.sink` but
+    ///   leaves `current_track` set, so the frontend still believes a track is
+    ///   loaded and keeps asking to resume; and
+    /// * the sink is drained — a source that played to the end leaves
+    ///   `Player::empty()` true forever, and `play()` cannot re-queue it.
+    ///
+    /// Both used to return `Ok(())`. The caller then treated the resume as
+    /// done, drew a pause button over silence, and every later press took the
+    /// same dead path until the app was restarted. Report the failure so the
+    /// caller replays the track instead.
     pub async fn resume(&self) -> Result<(), PlayerError> {
         debug!("Resuming playback");
-        let sink_guard = self.sink.read().await;
-        if let Some(s) = sink_guard.as_ref() {
+        // Read the anchor before taking the sink guard so no lock guard is held
+        // across an `.await`.
+        let anchor_some = self.play_anchor.read().await.is_some();
+        {
+            let sink_guard = self.sink.read().await;
+            let s = match sink_guard.as_ref() {
+                Some(s) => s,
+                None => {
+                    return Err(PlayerError::StateError(
+                        "nothing to resume: playback is not active".into(),
+                    ));
+                }
+            };
+            if s.empty() {
+                return Err(PlayerError::StateError(
+                    "nothing to resume: the track already finished".into(),
+                ));
+            }
             // Guard against double resume: if already playing (anchor Some && !is_paused), no-op.
-            let anchor_some = self.play_anchor.read().await.is_some();
             if anchor_some && !s.is_paused() {
                 return Ok(());
             }
             s.play();
-            // Discard elapsed while paused — do not fold stale anchor into `played`.
-            *self.play_anchor.write().await = Some(Instant::now());
         }
+        // Discard elapsed while paused — do not fold stale anchor into `played`.
+        *self.play_anchor.write().await = Some(Instant::now());
         Ok(())
     }
 
@@ -1025,6 +1056,51 @@ mod tests {
             reconcile_duration(Duration::from_secs(266), None),
             Duration::from_secs(266)
         );
+    }
+
+    /// Headless-safe: `AudioPlayer::new()` opens no device (the output stream is
+    /// lazy), so a fresh player has `sink == None`. `resume()` must not report
+    /// success there, or the frontend waits forever for audio that never starts.
+    #[tokio::test]
+    async fn resume_without_a_sink_reports_an_error() {
+        let player = AudioPlayer::new().unwrap();
+        let err = player
+            .resume()
+            .await
+            .expect_err("resume must not report success with no sink");
+        assert!(
+            matches!(&err, PlayerError::StateError(_)),
+            "expected a StateError, got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("nothing to resume"),
+            "unexpected error message: {message}"
+        );
+        assert!(!player.is_playing().await);
+    }
+
+    /// `stop()` takes the sink out of the player but leaves `current_track`
+    /// set — the exact state that used to turn every later resume into a silent
+    /// no-op that reported success ("cannot play anything until restart").
+    #[tokio::test]
+    async fn resume_after_stop_reports_an_error() {
+        let player = AudioPlayer::new().unwrap();
+        player.stop().await.unwrap();
+        let err = player
+            .resume()
+            .await
+            .expect_err("resume must not report success after stop");
+        assert!(
+            matches!(&err, PlayerError::StateError(_)),
+            "expected a StateError, got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("nothing to resume"),
+            "unexpected error message: {message}"
+        );
+        assert!(!player.is_playing().await);
     }
 
     #[tokio::test]

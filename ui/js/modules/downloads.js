@@ -301,6 +301,11 @@ export const downloadMethods = {
             request: {
                 url: resolved.stream_url,
                 title: resolved.title,
+                // Written into the file's tags by the backend, so the library
+                // scanner reports the real artist instead of `Unknown Artist`
+                // and the track is not named after its sanitized filename.
+                artist: resolved.author || resolved.artist || null,
+                album: resolved.album || null,
                 platform: resolved.platform,
                 format,
                 ext: resolved.ext,

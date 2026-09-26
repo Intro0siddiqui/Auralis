@@ -38,8 +38,14 @@ pub(crate) async fn cleanup_staging_file(path: &Path) {
 pub struct StreamDownload {
     /// Direct, streamable audio URL (http/https).
     pub stream_url: String,
-    /// Display title used for the output filename and UI.
+    /// Display title used for the output filename, UI and the tags written
+    /// into the finished file.
     pub title: String,
+    /// Optional artist, written into the finished file's tags so the library
+    /// scanner does not fall back to `Unknown Artist`.
+    pub artist: Option<String>,
+    /// Optional album, written into the finished file's tags.
+    pub album: Option<String>,
     /// Source platform label (`youtube`, `direct`, …) for display.
     pub platform: String,
     /// Container/format metadata (display only; the bytes are saved with `ext`).
@@ -62,6 +68,9 @@ pub struct StreamDownload {
 #[derive(Clone)]
 struct DownloadJob {
     stream_url: String,
+    title: String,
+    artist: Option<String>,
+    album: Option<String>,
     output_path: PathBuf,
     staging_path: PathBuf,
     thumbnail: Option<String>,
@@ -589,6 +598,9 @@ impl Downloader {
                 id,
                 DownloadJob {
                     stream_url: req.stream_url.clone(),
+                    title: req.title.clone(),
+                    artist: req.artist,
+                    album: req.album,
                     output_path: path,
                     staging_path,
                     thumbnail: req.thumbnail,
@@ -1416,6 +1428,50 @@ impl Downloader {
         if let Some(thumb) = &job.thumbnail {
             Self::save_thumbnail(&client, thumb, &job.output_path).await;
         }
+
+        // Write title/artist/album into the finished file so the library
+        // scanner reads real metadata instead of the sanitized filename /
+        // "Unknown Artist". Sibling of `save_thumbnail`: both attach metadata
+        // to the same committed file, both are non-fatal.
+        //
+        // `spawn_blocking` because lofty's MP4 write rebuilds the metadata
+        // atoms and rewrites the file, which is blocking I/O on a Tokio worker
+        // (same reason as `validate_audio_file_async`). A tagging failure —
+        // including a join failure — is only logged; the download stays
+        // Completed and the file stays exactly as downloaded.
+        let tag_path = job.output_path.clone();
+        let tag_title = job.title.clone();
+        let tag_artist = job.artist.clone();
+        let tag_album = job.album.clone();
+        let tagged = tokio::task::spawn_blocking(move || {
+            super::tags::write_tags(
+                &tag_path,
+                &tag_title,
+                tag_artist.as_deref(),
+                tag_album.as_deref(),
+            )
+        })
+        .await;
+        match tagged {
+            Ok(Ok(())) => info!(
+                download_id = %id,
+                path = %job.output_path.display(),
+                "Wrote title/artist/album tags into downloaded file"
+            ),
+            Ok(Err(tag_err)) => warn!(
+                download_id = %id,
+                path = %job.output_path.display(),
+                error = %tag_err,
+                "Could not write tags into downloaded file (non-fatal — file kept untagged)"
+            ),
+            Err(join_err) => warn!(
+                download_id = %id,
+                path = %job.output_path.display(),
+                error = %join_err,
+                "Tagging task failed (non-fatal — file kept untagged)"
+            ),
+        }
+
 
         // MediaStore Publishing on Android
         #[cfg(target_os = "android")]
