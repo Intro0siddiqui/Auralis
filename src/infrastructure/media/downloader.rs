@@ -1374,16 +1374,19 @@ impl Downloader {
                         == Some(true)
                     {
                         "The container itself only describes a short track, so the server sent a windowed object and reports it as complete (this is the SABR behaviour, not a broken transfer)"
-                    } else if facts.verdict == Some(Verdict::Truncated { .. }) {
+                    } else if matches!(facts.verdict, Some(Verdict::Truncated { .. })) {
                         "The container describes the full track but the file is missing bytes the sample table references, so the transfer was interrupted"
                     } else {
                         "The container could not be parsed, so the decoder's verdict could not be checked"
                     };
+                    let facts_summary = facts.summary();
+                    let content_summary = content.summary();
                     cleanup_staging_file(&job.staging_path).await;
                     return Err(DownloaderError::DownloadFailed(format!(
                         "{truncation} [{explanation}. received {have_now} bytes of {clen} \
                          advertised (itag={itag}, host={host}, end_reason={end_reason}); \
-                         {facts}; {content}; bytes after the window: {topup_summary}]"
+                         {facts_summary}; {content_summary}; \
+                         bytes after the window: {topup_summary}]"
                     )));
                 }
             }

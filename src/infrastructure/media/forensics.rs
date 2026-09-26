@@ -45,9 +45,10 @@ use std::path::Path;
 /// and a phone should not have to hold a 200 MB buffer for a diagnostic.
 const MAX_INSPECT_BYTES: u64 = 192 * 1024 * 1024;
 
-/// A decoded sample counts as audible above this magnitude (out of ±32768), so
-/// dithering noise and digital silence do not read as "audio present".
-const AUDIBLE_THRESHOLD: i16 = 16;
+/// A decoded sample counts as audible above this magnitude. rodio 0.22 decodes
+/// to `f32` samples normalised to ±1.0, so this is a very quiet threshold: it
+/// filters dithering noise and digital silence without touching real audio.
+const AUDIBLE_THRESHOLD: f32 = 0.001;
 
 /// What the container structure says about completeness.
 #[derive(Debug, Clone, PartialEq, Eq)]
