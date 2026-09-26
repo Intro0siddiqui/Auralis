@@ -36,7 +36,11 @@ async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream", "gzip", "brotli", "deflate"] }
 
 # Tauri runtime (v2)
-tauri = { version = "2", features = [] }
+# `protocol-asset` is required because `tauri.conf.json` enables
+# `app.security.assetProtocol` (cover art and any other local file rendered via
+# `convertFileSrc()`). Without the matching cargo feature the build script
+# fails with "the `tauri` dependency features ... does not match the allowlist".
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 
