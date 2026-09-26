@@ -74,6 +74,28 @@ pub struct AudioPlayer {
 unsafe impl Send for AudioPlayer {}
 unsafe impl Sync for AudioPlayer {}
 
+/// Reconcile the library's recorded duration with what a decoder reports.
+///
+/// The decoder's number is a **lower bound, not an authority**. rodio's
+/// `total_duration()` reads a container header, and for the MP4s YouTube serves
+/// (fragmented, and muxed 360p progressives among them) it can stop at the first
+/// fragment it manages to parse: a 4:26 track came back as 1:32. The library
+/// value comes from the container's own sample table and is the same number the
+/// download gate verifies before saving a file, so when the two disagree the
+/// container wins and the decoder is only allowed to add information by
+/// claiming *more*.
+///
+/// Before this, a >5s disagreement overwrote the library value with the
+/// decoder's, which shortened the progress bar, capped seeking at the wrong
+/// point and made the player report a long track as over.
+fn reconcile_duration(db: Duration, decoded: Option<Duration>) -> Duration {
+    match decoded {
+        Some(dec) if !db.is_zero() => db.max(dec),
+        Some(dec) => dec,
+        None => db,
+    }
+}
+
 impl AudioPlayer {
     pub fn new() -> Result<Self, PlayerError> {
         info!("Initializing audio player (output stream opened lazily)");
@@ -152,32 +174,26 @@ impl AudioPlayer {
             }
         };
         let source = create_decoder(file, path)?;
-        // Auto-repair duration: compare actual decoded stream duration with expected database duration
+        // Reconcile the duration the decoder reports with the one the library
+        // recorded. The decoder may only ever *raise* it, never lower it: see
+        // `reconcile_duration` for why.
         if let Some(dec_dur) = source.total_duration() {
             let db_dur = *self.track_duration.read().await;
-            let dec_secs = dec_dur.as_secs();
+            let reconciled = reconcile_duration(db_dur, Some(dec_dur));
             let db_secs = db_dur.as_secs();
-
-            let reconciled = if !db_dur.is_zero() {
-                let diff = (dec_secs as i64 - db_secs as i64).abs();
-                if diff > 5 {
-                    warn!(
-                        path = %path,
-                        db_secs = db_secs,
-                        dec_secs = dec_secs,
-                        diff_secs = diff,
-                        "Severe duration mismatch (>5s) between DB metadata and decoder; auto-repairing track duration"
-                    );
-                    dec_dur
-                } else if diff > 2 {
-                    warn!(path = %path, db_secs = db_secs, dec_secs = dec_secs, "Minor duration mismatch DB vs decoder, using max");
-                    db_dur.max(dec_dur)
-                } else {
-                    db_dur
-                }
-            } else {
-                dec_dur
-            };
+            let dec_secs = dec_dur.as_secs();
+            if (dec_secs as i64 - db_secs as i64).unsigned_abs() > 5 {
+                warn!(
+                    path = %path,
+                    db_secs = db_secs,
+                    dec_secs = dec_secs,
+                    kept_secs = reconciled.as_secs(),
+                    "Decoder and library disagree on the track length; keeping the container's claim. \
+                     rodio's total_duration() under-reports some MP4s (it stops at the first \
+                     fragment it can parse), and trusting it here is what made a 4:26 track \
+                     display as 1:32 and become unseekable past that point"
+                );
+            }
 
             *self.track_duration.write().await = reconciled;
 
@@ -977,6 +993,39 @@ pub enum PlayerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconcile_never_shortens_a_known_duration() {
+        // The real case: container says 4:26, rodio says 1:32.
+        let db = Duration::from_secs(266);
+        let decoded = Duration::from_secs(92);
+        assert_eq!(reconcile_duration(db, Some(decoded)), db);
+    }
+
+    #[test]
+    fn reconcile_uses_the_decoder_when_the_library_has_nothing() {
+        assert_eq!(
+            reconcile_duration(Duration::ZERO, Some(Duration::from_secs(92))),
+            Duration::from_secs(92)
+        );
+    }
+
+    #[test]
+    fn reconcile_raises_the_duration_when_the_decoder_claims_more() {
+        // A library row with a placeholder duration must still be corrected.
+        assert_eq!(
+            reconcile_duration(Duration::from_secs(30), Some(Duration::from_secs(92))),
+            Duration::from_secs(92)
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_the_library_value_without_a_decoder_opinion() {
+        assert_eq!(
+            reconcile_duration(Duration::from_secs(266), None),
+            Duration::from_secs(266)
+        );
+    }
 
     #[tokio::test]
     async fn test_next_shuffle_index_single_track() {
