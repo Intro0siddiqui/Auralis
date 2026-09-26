@@ -279,6 +279,19 @@ mod tests {
     }
 
     #[test]
+    fn test_download_creation_with_caller_id() {
+        let id = Uuid::new_v4();
+        let download = DownloadProgress::with_id(
+            id,
+            "https://youtube.com/watch?v=test".to_string(),
+            "Test Song".to_string(),
+            AudioFormat::Mp3,
+        );
+
+        assert_eq!(download.id, id);
+    }
+
+    #[test]
     fn test_progress_update() {
         let mut download = DownloadProgress::new(
             "https://youtube.com/watch?v=test".to_string(),

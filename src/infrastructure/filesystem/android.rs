@@ -14,7 +14,7 @@ use crate::domain::models::{AudioFormat, ScanSummary, Track, TrackFilter};
 use crate::domain::repositories::TrackRepository;
 use crate::infrastructure::filesystem::metadata::MetadataExtractor;
 use crate::infrastructure::filesystem::scanner::{
-    detect_format, is_audio_file, ScanProgress, ScannerError,
+    detect_format, is_audio_file, preserve_track_state, ScanProgress, ScannerError,
 };
 use lofty::file::AudioFile;
 use lofty::probe::Probe;
@@ -144,14 +144,7 @@ impl AndroidScanner {
         })?;
 
         if let Some(existing_track) = existing {
-            let mut updated_track = track;
-            updated_track.id = existing_track.id;
-            updated_track.date_added = existing_track.date_added;
-            updated_track.last_played = existing_track.last_played;
-            updated_track.play_count = existing_track.play_count;
-            if updated_track.album_art_path.is_none() {
-                updated_track.album_art_path = existing_track.album_art_path;
-            }
+            let updated_track = preserve_track_state(&existing_track, track);
             track_repo
                 .update(&updated_track)
                 .await
@@ -289,14 +282,7 @@ impl AndroidScanner {
         track.file_size = size;
 
         if let Some(existing_track) = existing {
-            let mut updated_track = track;
-            updated_track.id = existing_track.id;
-            updated_track.date_added = existing_track.date_added;
-            updated_track.last_played = existing_track.last_played;
-            updated_track.play_count = existing_track.play_count;
-            if updated_track.album_art_path.is_none() {
-                updated_track.album_art_path = existing_track.album_art_path;
-            }
+            let updated_track = preserve_track_state(&existing_track, track);
 
             track_repo
                 .update(&updated_track)
@@ -666,14 +652,7 @@ impl AndroidScanner {
                 .map(ToString::to_string);
 
             if let Some(existing_track) = existing {
-                let mut updated_track = track;
-                updated_track.id = existing_track.id;
-                updated_track.date_added = existing_track.date_added;
-                updated_track.last_played = existing_track.last_played;
-                updated_track.play_count = existing_track.play_count;
-                if updated_track.album_art_path.is_none() {
-                    updated_track.album_art_path = existing_track.album_art_path;
-                }
+                let updated_track = preserve_track_state(&existing_track, track);
                 track_repo
                     .update(&updated_track)
                     .await

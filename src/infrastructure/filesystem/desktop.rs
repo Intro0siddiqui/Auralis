@@ -7,7 +7,7 @@ use crate::domain::models::{AudioFormat, ScanSummary, TrackFilter};
 use crate::domain::repositories::TrackRepository;
 use crate::infrastructure::filesystem::metadata::MetadataExtractor;
 use crate::infrastructure::filesystem::scanner::{
-    is_audio_file, ScanProgress, ScanResult, ScannerError,
+    is_audio_file, preserve_track_state, ScanProgress, ScanResult, ScannerError,
 };
 use lofty::file::AudioFile;
 use lofty::probe::Probe;
@@ -459,14 +459,7 @@ impl DesktopScanner {
         track.mtime = mtime;
 
         if let Some(existing_track) = existing {
-            let mut updated_track = track;
-            updated_track.id = existing_track.id;
-            updated_track.date_added = existing_track.date_added;
-            updated_track.last_played = existing_track.last_played;
-            updated_track.play_count = existing_track.play_count;
-            if updated_track.album_art_path.is_none() {
-                updated_track.album_art_path = existing_track.album_art_path;
-            }
+            let updated_track = preserve_track_state(&existing_track, track);
 
             track_repo
                 .update(&updated_track)

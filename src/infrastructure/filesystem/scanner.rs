@@ -6,7 +6,7 @@
 pub use crate::infrastructure::filesystem::android::AndroidScanner;
 pub use crate::infrastructure::filesystem::desktop::DesktopScanner;
 
-use crate::domain::models::AudioFormat;
+use crate::domain::models::{AudioFormat, Track};
 use std::path::Path;
 
 /// Supported audio extensions (case-insensitive)
@@ -66,6 +66,26 @@ pub(crate) enum ScanResult {
     Updated,
     Skipped,
     SkippedUnplayable,
+}
+
+/// Merge persistent/user-owned track state into metadata extracted from disk.
+///
+/// A rescan should refresh file-derived metadata, but it must not reset
+/// favorites, listening history, or Auralis download provenance.
+pub(crate) fn preserve_track_state(existing: &Track, mut updated: Track) -> Track {
+    updated.id = existing.id;
+    updated.date_added = existing.date_added;
+    updated.last_played = existing.last_played;
+    updated.play_count = existing.play_count;
+    updated.is_favorite = existing.is_favorite || updated.is_favorite;
+    updated.is_downloaded = existing.is_downloaded || updated.is_downloaded;
+    if existing.source_url.is_some() {
+        updated.source_url = existing.source_url.clone();
+    }
+    if updated.album_art_path.is_none() {
+        updated.album_art_path = existing.album_art_path.clone();
+    }
+    updated
 }
 
 /// Scanner-related errors
@@ -143,6 +163,40 @@ mod tests {
         assert!(is_supported_audio_extension("ogg"));
         assert!(!is_supported_audio_extension("txt"));
         assert!(!is_supported_audio_extension("exe"));
+    }
+
+    #[test]
+    fn test_preserve_track_state_during_rescan() {
+        let mut existing = Track::new(
+            "Original title".to_string(),
+            "/music/original.mp3".to_string(),
+            120,
+            AudioFormat::Mp3,
+        );
+        existing.is_favorite = true;
+        existing.is_downloaded = true;
+        existing.play_count = 7;
+        existing.source_url = Some("https://youtube.com/watch?v=original".to_string());
+        existing.album_art_path = Some("/cache/original.jpg".to_string());
+
+        let mut updated = Track::new(
+            "Updated title".to_string(),
+            "/music/original.mp3".to_string(),
+            121,
+            AudioFormat::Mp3,
+        );
+        updated.title = "Updated title".to_string();
+
+        let merged = preserve_track_state(&existing, updated);
+
+        assert_eq!(merged.id, existing.id);
+        assert_eq!(merged.date_added, existing.date_added);
+        assert_eq!(merged.last_played, existing.last_played);
+        assert_eq!(merged.play_count, 7);
+        assert!(merged.is_favorite);
+        assert!(merged.is_downloaded);
+        assert_eq!(merged.source_url, existing.source_url);
+        assert_eq!(merged.album_art_path, existing.album_art_path);
     }
 
     struct MockTrackRepo {
