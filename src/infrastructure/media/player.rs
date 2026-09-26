@@ -43,6 +43,10 @@ unsafe impl Sync for OutputStreamHolder {}
 
 /// Audio player using rodio
 #[derive(Clone)]
+/// Test-only slot holding the start observer. See the field's doc comment.
+#[cfg(test)]
+type StartObserverSlot = Arc<std::sync::Mutex<Option<Arc<dyn Fn(Option<usize>) + Send + Sync>>>>;
+
 pub struct AudioPlayer {
     output: Arc<std::sync::Mutex<OutputStreamHolder>>,
     sink: Arc<RwLock<Option<Player>>>,
@@ -73,7 +77,7 @@ pub struct AudioPlayer {
     // reference (Tauri's `State<'_, AudioPlayer>`), so a seam needing `&mut`
     // would not be reachable from a realistic test setup.
     #[cfg(test)]
-    start_observer: Arc<std::sync::Mutex<Option<Arc<dyn Fn(Option<usize>) + Send + Sync>>>>,
+    start_observer: StartObserverSlot,
 }
 
 // SAFETY: `AudioPlayer` is a bag of `Arc<RwLock<_>>` / `Arc<Mutex<_>>`
