@@ -194,7 +194,7 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
 /// Apply the headers googlevideo validates (`Referer`/`Origin`/`Accept`) plus any
 /// client-matched headers produced by the frontend resolver. The User-Agent is
 /// configured on the `reqwest` client itself, so it is skipped here.
-pub(crate) pub(crate) fn inject_stream_headers(
+pub(crate) fn inject_stream_headers(
     mut req: reqwest::RequestBuilder,
     job_headers: Option<&HashMap<String, String>>,
 ) -> reqwest::RequestBuilder {

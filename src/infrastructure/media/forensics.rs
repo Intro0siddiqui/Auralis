@@ -204,8 +204,9 @@ fn children(buf: &[u8], b: &Located) -> Vec<Located> {
     let mut out = Vec::new();
     let mut off = b.start;
     while let Some(child) = read_box(buf, off, b.end) {
+        let child_end = child.end;
         out.push(child);
-        off = child.end;
+        off = child_end;
     }
     out
 }
@@ -215,12 +216,16 @@ fn find_all(buf: &[u8], root: &Located, name: &[u8; 4]) -> Vec<Located> {
     let mut out = Vec::new();
     let mut stack = children(buf, root);
     while let Some(b) = stack.pop() {
+        // Collect the children first: `b` is moved into `out` below.
+        let kids = if CONTAINERS.contains(&b.kind) {
+            children(buf, &b)
+        } else {
+            Vec::new()
+        };
         if b.is(name) {
             out.push(b);
         }
-        if CONTAINERS.contains(&b.kind) {
-            stack.extend(children(buf, &b));
-        }
+        stack.extend(kids);
     }
     out
 }
@@ -540,13 +545,14 @@ pub fn inspect_container(path: &Path) -> ContainerFacts {
     let mut moov: Option<Located> = None;
     let mut sidx: Option<Sidx> = None;
     while let Some(b) = read_box(&buf, off, buf.len()) {
+        let box_end = b.end;
         match &b.kind {
             b"moov" => moov = Some(b),
             b"moof" => facts.fragment_count += 1,
             b"sidx" => sidx = parse_sidx(&buf, &b),
             _ => {}
         }
-        off = b.end;
+        off = box_end;
     }
 
     if let Some(index) = sidx {
@@ -642,10 +648,13 @@ pub fn inspect_content(path: &Path, ext: &str) -> ContentFacts {
         return facts;
     };
     facts.decoded_secs = decoder.total_duration().map(|d| d.as_secs());
-    facts.sample_rate = decoder.sample_rate();
-    let rate = decoder.sample_rate().max(1) as f64;
+    // rodio 0.22: `sample_rate()` is a `NonZero<u32>` and `Decoder` *is* the
+    // sample iterator (there is no `samples()` helper).
+    let sample_rate = decoder.sample_rate().get();
+    facts.sample_rate = sample_rate;
+    let rate = f64::from(sample_rate.max(1));
     let mut index: u64 = 0;
-    for sample in decoder.samples() {
+    for sample in decoder {
         if sample.abs() > AUDIBLE_THRESHOLD {
             facts.audible_samples = index + 1;
         }
