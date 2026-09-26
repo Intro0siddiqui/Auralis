@@ -119,9 +119,39 @@ export const uiMethods = {
         if (!imgEl || !path) return;
         try {
             const dataUri = await this.invoke('media_data_url', { path });
-            if (dataUri) imgEl.src = dataUri;
+            if (dataUri) {
+                imgEl.src = dataUri;
+                return;
+            }
+            this._artworkFailed(imgEl, path, 'media_data_url returned nothing');
         } catch (err) {
-            console.error('Cover art fallback failed:', err);
+            // A missing/broken cover used to leave the browser's broken-image
+            // icon in every library card, with the reason only in a console
+            // nobody can read on a release build. Report it once, then fall
+            // back to the neutral placeholder so the card still looks right.
+            this._artworkFailed(imgEl, path, (err && err.message) || String(err));
+        }
+    },
+
+    _artworkFailed(imgEl, path, reason) {
+        console.error('[Auralis] cover art unavailable', path, reason);
+        try {
+            window.__auralisArtworkFailures = window.__auralisArtworkFailures || [];
+            window.__auralisArtworkFailures.push({ path, reason, at: new Date().toISOString() });
+        } catch (_) {}
+        if (imgEl && imgEl.parentNode) {
+            // Replace the broken <img> with the same neutral icon the templates
+            // use for a track without artwork.
+            const holder = document.createElement('div');
+            holder.className = 'art-placeholder';
+            holder.style.cssText = 'width:100%;height:100%;display:flex;align-items:center;justify-content:center;opacity:.5';
+            holder.innerHTML = '<i data-lucide="music" style="width:28px;height:28px"></i>';
+            imgEl.parentNode.replaceChild(holder, imgEl);
+            try {
+                if (window.lucide && typeof window.lucide.createIcons === 'function') {
+                    window.lucide.createIcons();
+                }
+            } catch (_) {}
         }
     },
 

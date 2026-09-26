@@ -875,6 +875,36 @@ describe('YouTube Search & Streaming Integration', () => {
         );
     });
 
+    it('the asset protocol is enabled and scoped for local cover art', () => {
+        // Every library card renders artwork with convertFileSrc(), which
+        // produces an asset:// url. Tauri v2 only serves those when
+        // app.security.assetProtocol is enabled *and* the path is in scope -
+        // the CSP already allowed `asset:`, so without this every cover was a
+        // broken image with the reason buried in an unreadable console.
+        const conf = JSON.parse(fs.readFileSync(path.resolve(
+            import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname),
+            '../../tauri.conf.json'), 'utf8'));
+        const security = conf.app.security || {};
+        assert.ok(security.assetProtocol, 'tauri.conf.json must configure app.security.assetProtocol');
+        assert.equal(security.assetProtocol.enable, true, 'the asset protocol must be enabled');
+        const scope = security.assetProtocol.scope || [];
+        assert.ok(scope.length > 0, 'the asset protocol needs a scope');
+        assert.ok(
+            scope.some((entry) => entry.includes('APPDATA') || entry.includes('APPLOCALDATA')),
+            `the app data dir (where downloads and their .jpg sidecars live) must be in scope: ${JSON.stringify(scope)}`
+        );
+        assert.ok(
+            security.csp.includes('asset:'),
+            "the CSP must keep allowing asset: in img-src or cover art cannot load at all"
+        );
+        const uiSrc = fs.readFileSync(path.resolve(
+            import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname),
+            '../../ui/js/modules/ui.js'), 'utf8');
+        assert.ok(uiSrc.includes('media_data_url'), 'cover art must fall back to media_data_url');
+        assert.ok(uiSrc.includes('_artworkFailed'),
+            'a failed cover must be recorded and replaced by a placeholder, not left broken');
+    });
+
     it('ui/js/player.js coordinates smoothly with streaming audio element', () => {
         const src = fs.readFileSync(playerJsPath, 'utf8');
         assert.ok(src.includes('window._auralisStreamAudio'), 'player.js must check window._auralisStreamAudio');
