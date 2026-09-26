@@ -117,9 +117,7 @@ enum Reject {
 /// `bytes={range}/{complete-length}`, and the two must not be confused with each
 /// other for the sake of a defensive parse.
 fn split_content_range(value: &str) -> Option<(&str, &str)> {
-    let (unit, rest) = value
-        .trim()
-        .split_once(|c: char| c == ' ' || c == '\t' || c == '=')?;
+    let (unit, rest) = value.trim().split_once([' ', '\t', '='])?;
     if !unit.eq_ignore_ascii_case("bytes") {
         return None;
     }
@@ -621,7 +619,7 @@ mod tests {
     /// out rather than borrowing a computed value whose lifetime would have to
     /// be reasoned about at each one.
     fn response(status_line: &str, headers: &[(&str, String)], body: &[u8]) -> String {
-        let mut out = String::from(format!("{status_line}\r\n"));
+        let mut out = format!("{status_line}\r\n");
         for (name, value) in headers {
             out.push_str(&format!("{name}: {value}\r\n"));
         }

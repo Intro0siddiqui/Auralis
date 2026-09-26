@@ -1281,7 +1281,7 @@ mod tests {
                     assert_eq!(clear, ClearOutcome::NotAttempted, "{copy:?}/{clear:?}");
                 }
                 // The only way out without a step is a published row.
-                if step == None {
+                if step.is_none() {
                     assert_eq!(copy, CopyOutcome::Complete, "{copy:?}/{clear:?}");
                     assert_eq!(clear, ClearOutcome::Updated, "{copy:?}/{clear:?}");
                 }
