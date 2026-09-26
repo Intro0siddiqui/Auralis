@@ -486,34 +486,33 @@ class YouTubeResolver {
 
         // 1. First attempt: Direct raw player API query.
         //
-        // Ordering is driven by one question: which clients can this request
-        // actually succeed with, given the token we hold?
+        // Clients fall into three groups, and the order is those groups:
         //
-        // Per the yt-dlp PO-Token Guide's enforcement table, `mweb`/`web`/
-        // `web_safari` need a GVS token; `tv` and `android_vr` need none at
-        // all; `android` and `ios` need DroidGuard/iOSGuard tokens we cannot
-        // mint. We mint BotGuard/WEB, so:
+        //   SERVABLE  — web-family. These are the only clients a BotGuard/WEB
+        //               token is valid on, so while we hold one they lead.
+        //   TOKEN_FREE — need no PO token at all. They lead when we hold none.
+        //   UNMINTABLE — need a DroidGuard/iOSGuard token we cannot produce, so
+        //               they are tried last. Kept, not deleted: `ios` does
+        //               resolve and does return real audio urls, so this is a
+        //               prediction of GVS failure rather than an observation of
+        //               one, and the client report will settle it.
         //
-        //  - with a token, only MWEB and WEB can use it, so they lead;
-        //  - TV and ANDROID_VR are the token-free clients that still return
-        //    plain CDN urls, so they follow immediately;
-        //  - ANDROID is last: it needs a DroidGuard token we cannot produce,
-        //    and on a Jio residential line it came back SABR-only
-        //    (adaptiveWithUrl=0, audioWithUrl=0), so it contributes nothing.
+        // `tv` is in TOKEN_FREE but must not lead: the guide's cell reads "All
+        // formats DRM'd if cookies (logged-in or active guest) aren't passed",
+        // and we send no account cookies, whereas `android_vr` carries no such
+        // caveat and was the client a device report showed returning real audio
+        // (22 adaptive / 4 with urls). So ANDROID_VR is the better first bet.
         //
-        // Measured on device (track rOWDEfnWx5s, residential Jio, v2.6.50):
-        // MWEB/TV/WEB all UNPLAYABLE, ANDROID SABR-only, while IOS returned
-        // 20 adaptive / 2 audio with urls and ANDROID_VR 22 / 4 — both real
-        // audio. ANDROID_VR used to be demoted to last resort on the belief
-        // that it "returns only muxed itag 18"; that was never true of it and
-        // is what ANDROID actually did here. Demoting the two clients that
-        // work, in favour of one that returns nothing, wasted the rotation.
-        //
-        // This also means pot_scope is necessary but not sufficient on such a
-        // network: the web family never obtains a url to scope a token onto.
+        // `web_safari` is here because it replaced `tv_simply` in yt-dlp's
+        // defaults and IS web-family, so our token serves it — and it is the one
+        // web client we had never actually tried, on a network where mweb and
+        // web both came back UNPLAYABLE. An experiment, not a claim.
+        const SERVABLE_CLIENTS = ['MWEB', 'WEB', 'WEB_SAFARI'];
+        const TOKEN_FREE_CLIENTS = ['ANDROID_VR', 'TV'];
+        const UNMINTABLE_CLIENTS = ['IOS', 'ANDROID'];
         const orderedClients = opts.poToken
-            ? ['MWEB', 'WEB', 'IOS', 'ANDROID_VR', 'TV', 'ANDROID']
-            : ['TV', 'ANDROID_VR', 'MWEB', 'WEB', 'IOS', 'ANDROID'];
+            ? [...SERVABLE_CLIENTS, ...TOKEN_FREE_CLIENTS, ...UNMINTABLE_CLIENTS]
+            : [...TOKEN_FREE_CLIENTS, ...SERVABLE_CLIENTS, ...UNMINTABLE_CLIENTS];
         // 2026 Jio sn-gwpa-cived gates TV too — caller may exclude TV on 403 retry (ANDROID+pot or WEB_SAFARI).
         // Keep const orderedClients for test regex; apply caller overrides via effective list.
         let effectiveOrderedClients = [...orderedClients];
@@ -1042,6 +1041,10 @@ class YouTubeResolver {
             'TV': 'Mozilla/5.0 (ChromiumStylePlatform) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'MWEB': 'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
             'WEB': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            // MUST exist. `uaMap[winningClient] || uaMap['ANDROID']` would otherwise
+            // put an Android app UA on a web_safari URL — the same UA/token
+            // mismatch class that produced the byte-0 403 fixed in v2.6.50.
+            'WEB_SAFARI': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
         };
         const headers = {
             'User-Agent': uaMap[winningClient] || uaMap['ANDROID'],

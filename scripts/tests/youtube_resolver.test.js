@@ -260,46 +260,54 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         }
     });
 
-    it('source has actions.execute loop over 6 clients (not 3)', () => {
-        // Must list all 6 clients somewhere (PO-token-aware orderedClients now splits order)
-        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
-            assert.ok(src.includes(`'${c}'`), `Expected client '${c}' in youtube.js`);
-        }
-        // orderedClients must be defined (PO-token-aware, Sept 2026 client reality)
-        assert.ok(src.includes('orderedClients'), 'Expected orderedClients PO-token-aware ordering');
-        assert.ok(src.includes("TV") && src.includes("ANDROID_VR"), 'orderedClients must mention TV/ANDROID_VR');
-        // Order is derived from one question: which clients can succeed with the
-        // token we hold? Per the PO-Token Guide, mweb/web/web_safari need a GVS
-        // token (the only kind we mint), tv and android_vr need none, and
-        // android needs a DroidGuard token we cannot produce.
-        //
-        // The previous expectation here encoded a belief that measurement
-        // disproved: that `ANDROID_VR` "returns only muxed itag 18" and is
-        // therefore a last resort. On device (rOWDEfnWx5s, residential Jio)
-        // ANDROID_VR returned 22 adaptive / 4 audio WITH urls, itag 140
-        // audio-only — while ANDROID was the one returning nothing usable
-        // (SABR-only, audioWithUrl=0). The two had been swapped in priority.
-        const m = src.match(/(?:const|let)\s+orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
-        assert.ok(m, 'orderedClients ternary not found or malformed');
-        const withToken = m[1].replace(/\s/g, '');
-        const withoutToken = m[2].replace(/\s/g, '');
-        assert.ok(withToken.startsWith("'MWEB','WEB'"), 'with a Web token the two web-family clients that can use it must lead');
-        assert.ok(withoutToken.startsWith("'TV','ANDROID_VR'"), 'without a token the token-free clients that work must lead');
+    it('clients are grouped by whether the held token can serve them', () => {
+        // Asserting the three GROUPS is the durable form: the order is derived
+        // from group membership, so a test that pinned the flattened array would
+        // break on any reorder while saying nothing about the rule. The rule is:
+        //   servable (web-family, the only ones our Web token works on)
+        //   -> token-free (need no token at all)
+        //   -> unmintable (need DroidGuard/iOSGuard, which we cannot produce)
+        const group = (name) => {
+            const m = src.match(new RegExp(`const ${name} = \\[([^\\]]+)\\]`));
+            assert.ok(m, `${name} group not found in youtube.js`);
+            return (m[1].match(/'([A-Z_]+)'/g) || []).map((x) => x.replace(/'/g, ''));
+        };
+        const servable = group('SERVABLE_CLIENTS');
+        const tokenFree = group('TOKEN_FREE_CLIENTS');
+        const unmintable = group('UNMINTABLE_CLIENTS');
 
-        for (const [label, order] of [['with token', withToken], ['without token', withoutToken]]) {
-            // ANDROID cannot use our Web token and was measured returning no
-            // audio urls at all, so it must never be tried ahead of a client
-            // that can actually deliver.
-            assert.equal(
-                order.lastIndexOf("'ANDROID'"), order.length - "'ANDROID'".length,
-                `${label}: ANDROID should be last, it needs a DroidGuard token we cannot mint (got ${order})`
-            );
-            for (const c of ["'TV'", "'ANDROID_VR'"]) {
-                assert.ok(
-                    order.indexOf(c) < order.indexOf("'ANDROID'"),
-                    `${label}: ${c} needs no token and must be tried before ANDROID (got ${order})`
-                );
-            }
+        assert.deepEqual(servable, ['MWEB', 'WEB', 'WEB_SAFARI'],
+            'web-family clients are the only ones a BotGuard token is valid on');
+        assert.deepEqual(tokenFree, ['ANDROID_VR', 'TV'],
+            'ANDROID_VR before TV: tv is DRM-capped without cookies and we send none');
+        assert.deepEqual(unmintable, ['IOS', 'ANDROID'],
+            'kept but last — ios does resolve, so this is a prediction, not an observation');
+
+        // Disjoint and complete: no client may be in two groups, or in none.
+        const all = [...servable, ...tokenFree, ...unmintable];
+        assert.equal(new Set(all).size, all.length, 'a client appears in more than one group');
+        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB', 'WEB_SAFARI']) {
+            assert.ok(all.includes(c), `${c} is in no group, so it can never be tried`);
+        }
+
+        // The two branches must differ only in whether SERVABLE leads: a token
+        // we hold makes the servable group worth trying first, and without one
+        // nothing in it can be served, so the token-free group should lead.
+        const spread = (a, b, c) =>
+            new RegExp(`\\[\\.\\.\\.${a}, \\.\\.\\.${b}, \\.\\.\\.${c}\\]`).test(src);
+        assert.ok(spread('SERVABLE_CLIENTS', 'TOKEN_FREE_CLIENTS', 'UNMINTABLE_CLIENTS'),
+            'with a token, the servable group must lead');
+        assert.ok(spread('TOKEN_FREE_CLIENTS', 'SERVABLE_CLIENTS', 'UNMINTABLE_CLIENTS'),
+            'without a token, the token-free group must lead since nothing can be served');
+    });
+
+    it('every client youtube.js can emit has its own User-Agent', () => {
+        // A client with no uaMap entry silently falls back to ANDROID's, which
+        // is the same UA/client mismatch that produced the byte-0 403.
+        const uaBlock = src.match(/const uaMap = \{([\s\S]*?)\n\s*\};/);
+        assert.ok(uaBlock, 'uaMap not found');
+        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB', 'WEB_SAFARI']) {
+            assert.ok(uaBlock[1].includes(`'${c}':`), `uaMap has no entry for ${c}`);
         }
     });
 
@@ -345,19 +353,19 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         // ANDROID_VR "returns only muxed itag 18 and 403s past ~60s" and belongs
         // last. On device it returned 22 adaptive / 4 audio WITH urls at itag
         // 140 audio-only, while ANDROID was the client returning nothing.
-        const m = src.match(/(?:const|let)\s+orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
-        assert.ok(m, 'orderedClients ternary not found');
-        const withToken = m[1].replace(/\s/g, '');
-        const withoutToken = m[2].replace(/\s/g, '');
-        assert.ok(withToken.startsWith("'MWEB','WEB'"), 'with a Web token, the web-family clients that can use it lead');
-        assert.ok(withoutToken.startsWith("'TV','ANDROID_VR'"), 'without a token, the token-free clients that work lead');
-        for (const order of [withToken, withoutToken]) {
-            assert.ok(order.endsWith("'ANDROID'"), 'ANDROID (needs a DroidGuard token we cannot mint) must be last');
-            assert.ok(
-                order.indexOf("'ANDROID_VR'") < order.indexOf("'ANDROID'"),
-                'ANDROID_VR needs no token and must be tried before ANDROID'
-            );
-        }
+        // The order is now derived from three named groups; see the grouping
+        // test in the 6-client suite for the assertion of record. What matters
+        // here is only that the SABR-era demotions are gone: ANDROID_VR is no
+        // longer last resort, and ANDROID (which needs a token we cannot mint
+        // and was measured returning no audio urls) is.
+        assert.ok(src.includes('TOKEN_FREE_CLIENTS') && src.includes('UNMINTABLE_CLIENTS'),
+            'orderedClients must be derived from the named groups');
+        const unmintable = src.match(/const UNMINTABLE_CLIENTS = \[([^\]]+)\]/);
+        assert.ok(unmintable, 'UNMINTABLE_CLIENTS not found');
+        assert.equal((unmintable[1].match(/'([A-Z_]+)'/g) || []).pop(), "'ANDROID'",
+            'ANDROID must be last of the unmintable pair');
+        assert.ok(!/const\s+UNMINTABLE_CLIENTS\s*=\s*\[[^\]]*'ANDROID_VR'/.test(src),
+            'ANDROID_VR must NOT be demoted to unmintable — it needs no token and returns real audio');
     });
 
     it('resolver records a per-client reaction report (SABR/403/format counts)', () => {

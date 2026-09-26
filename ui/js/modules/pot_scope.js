@@ -25,13 +25,18 @@
  * we have no way to mint. So `TV` must stay out — a web token on a TV URL is
  * downside with no upside, since TV does not want a token from any source.
  *
- * `WEB_SAFARI` is absent even though the guide lists it as GVS-requiring,
- * because `orderedClients` in youtube.js cannot produce it — an entry the
- * resolver can never emit is a trap that fails silently the day someone wires
- * the client up. `scripts/tests/pot_scope.test.js` asserts every member here
- * appears in `orderedClients`, so this list cannot drift out of sync.
+ * `WEB_SAFARI` is here because `orderedClients` in youtube.js now emits it: it
+ * replaced `tv_simply` in yt-dlp's defaults, it is web-family, and it needs a GVS
+ * token we can mint. It is the one web client we had never tried, which matters
+ * on a network where mweb and web both resolve to nothing.
+ *
+ * `scripts/tests/pot_scope.test.js` asserts every member of this list appears in
+ * `orderedClients`, and that every web-family client `orderedClients` can emit is
+ * classified here — so the two cannot drift apart in either direction. An entry
+ * the resolver cannot produce is a trap that fails silently the day someone wires
+ * the client up.
  */
-export const WEB_FAMILY_CLIENTS = ['MWEB', 'WEB'];
+export const WEB_FAMILY_CLIENTS = ['MWEB', 'WEB', 'WEB_SAFARI'];
 
 /**
  * May a token ride along on a URL produced by `winningClient`?
