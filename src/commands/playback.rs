@@ -196,7 +196,18 @@ pub async fn play(
         .await
         .map_err(|e| format!("Failed to look up track: {e}"))?;
 
-    // If queue index is provided, set it
+    // If queue index is provided, set it — but remember what it was.
+    //
+    // It has to be set *before* `play_track`, because the commit step mirrors a
+    // decoder-repaired duration onto the queue entry at `current_index`, and that
+    // must be the entry for the track we are about to play.
+    //
+    // If playback then fails, `play_track` now leaves `current_track` describing
+    // the *previous* track (it commits nothing until rodio has accepted a
+    // source). Leaving the index pointing at the track that failed to start
+    // would then highlight one entry in the queue while the player bar shows
+    // another, so put the index back.
+    let previous_index = player.get_current_index().await;
     if let Some(idx) = queue_index {
         player.set_current_index(Some(idx)).await;
     }
@@ -205,6 +216,7 @@ pub async fn play(
 
     // Play the track — log full context so the UI can show exactly why it failed
     if let Err(e) = player.play_track(track.clone()).await {
+        player.set_current_index(previous_index).await;
         warn!(%track_id, file_path=%track.file_path, title=%track.title, error=%e, "Playback failed — file missing or undecodable");
         return Err(format!(
             "Playback error [{} — {}]: {}",

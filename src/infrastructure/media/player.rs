@@ -96,6 +96,24 @@ fn reconcile_duration(db: Duration, decoded: Option<Duration>) -> Duration {
     }
 }
 
+/// A start that rodio has accepted: a sink exists and holds the decoded source.
+///
+/// Produced by [`AudioPlayer::start_sink`] (which can fail) and turned into
+/// player state by [`AudioPlayer::commit_start`] (which cannot). Keeping the
+/// two apart is what makes starting a track transactional: the identity of what
+/// is playing is published only after audio is actually running, so a missing
+/// file or an unavailable output device no longer leaves the player describing a
+/// track that never started.
+struct EstablishedStart {
+    /// Length to publish for the new track: the library's claim reconciled with
+    /// the decoder's (see [`reconcile_duration`]).
+    duration: Duration,
+    /// The decoder's own claim, kept so the commit can tell "the library said so"
+    /// from "the decoder corrected it". The mirrored copies of the track are
+    /// only re-stamped in the second case — see [`AudioPlayer::commit_start`].
+    decoded: Option<Duration>,
+}
+
 impl AudioPlayer {
     pub fn new() -> Result<Self, PlayerError> {
         info!("Initializing audio player (output stream opened lazily)");
@@ -145,8 +163,45 @@ impl AudioPlayer {
         Err(PlayerError::InitError("audio output unavailable".into()))
     }
 
+    /// Start a bare file path, publishing the new duration only once playback is
+    /// established. Prefer [`AudioPlayer::play_track`], which also publishes the
+    /// track identity.
+    ///
+    /// With no `Track` of its own, the length the decoder is reconciled against
+    /// is whatever the player already published — the caller is expected to have
+    /// set it (or to use `play_track`, which does).
     pub async fn play(&self, path: &str) -> Result<(), PlayerError> {
+        let library_duration = *self.track_duration.read().await;
+        let start = self.start_sink(path, library_duration).await?;
+        self.commit_start(None, &start).await;
+        Ok(())
+    }
+
+    /// Do the fallible half of a start: stop, open, decode, and hand the source
+    /// to a fresh rodio player. Returns only once playback is established.
+    ///
+    /// Nothing here publishes track identity. Every rejection this can produce —
+    /// missing file, undecodable file, no audio output device — happens before
+    /// `current_track` / `track_duration` / the queue are touched, so the
+    /// caller can commit or, on `Err`, leave the player exactly as it was.
+    ///
+    /// `library_duration` is passed in rather than read from `track_duration`
+    /// because at this point `track_duration` still describes the *previous*
+    /// track: reconciling the incoming file's decoder against that is how a
+    /// 1:32 file would inherit a 4:26 track's length.
+    async fn start_sink(
+        &self,
+        path: &str,
+        library_duration: Duration,
+    ) -> Result<EstablishedStart, PlayerError> {
         info!(path = %path, "Starting playback");
+
+        // Tearing the previous sink down first is deliberate and long-standing:
+        // the playback watcher's end-of-track detection is `sink.empty()`, so a
+        // sink that outlived a failed start would keep auto-advance firing
+        // against the old track. `stop()` clears playback position only — it
+        // never touches track identity — so a failure below still leaves the
+        // player describing the previous track.
         self.stop().await?;
 
         let vol = *self.volume.read().await;
@@ -174,39 +229,26 @@ impl AudioPlayer {
             }
         };
         let source = create_decoder(file, path)?;
+
         // Reconcile the duration the decoder reports with the one the library
         // recorded. The decoder may only ever *raise* it, never lower it: see
         // `reconcile_duration` for why.
-        if let Some(dec_dur) = source.total_duration() {
-            let db_dur = *self.track_duration.read().await;
-            let reconciled = reconcile_duration(db_dur, Some(dec_dur));
-            let db_secs = db_dur.as_secs();
+        let decoded = source.total_duration();
+        let duration = reconcile_duration(library_duration, decoded);
+        if let Some(dec_dur) = decoded {
+            let db_secs = library_duration.as_secs();
             let dec_secs = dec_dur.as_secs();
             if (dec_secs as i64 - db_secs as i64).unsigned_abs() > 5 {
                 warn!(
                     path = %path,
                     db_secs = db_secs,
                     dec_secs = dec_secs,
-                    kept_secs = reconciled.as_secs(),
+                    kept_secs = duration.as_secs(),
                     "Decoder and library disagree on the track length; keeping the container's claim. \
                      rodio's total_duration() under-reports some MP4s (it stops at the first \
                      fragment it can parse), and trusting it here is what made a 4:26 track \
                      display as 1:32 and become unseekable past that point"
                 );
-            }
-
-            *self.track_duration.write().await = reconciled;
-
-            let mut curr = self.current_track.write().await;
-            if let Some(ref mut t) = *curr {
-                t.duration_secs = reconciled.as_secs() as u32;
-            }
-
-            if let Some(idx) = *self.current_index.read().await {
-                let mut q = self.queue.write().await;
-                if let Some(t) = q.get_mut(idx) {
-                    t.duration_secs = reconciled.as_secs() as u32;
-                }
             }
         }
 
@@ -220,14 +262,69 @@ impl AudioPlayer {
         self.mark_playing().await;
 
         debug!(path = %path, "Playback started");
-        Ok(())
+        Ok(EstablishedStart { duration, decoded })
     }
 
+    /// The commit point of a start: publish a [`EstablishedStart`] that
+    /// `start_sink` has already proven, and only that.
+    ///
+    /// `track` is `None` for a bare `play(path)`, which has no identity to
+    /// publish and so may only refresh the length of what is already current.
+    ///
+    /// The mirrored copies (`current_track.duration_secs` and the queue entry at
+    /// `current_index`) are re-stamped only when the *decoder* had an opinion to
+    /// correct them with. Without one they already hold the library's value, and
+    /// the queue entry is a different track anyway while `next` / `previous` are
+    /// between `play_track` and their own index update — overwriting it there
+    /// would corrupt a track that is still current until they land.
+    async fn commit_start(&self, track: Option<Track>, start: &EstablishedStart) {
+        let mirror_secs = start.decoded.map(|_| start.duration.as_secs() as u32);
+
+        *self.track_duration.write().await = start.duration;
+
+        if let Some(mut track) = track {
+            if let Some(secs) = mirror_secs {
+                track.duration_secs = secs;
+            }
+            *self.current_track.write().await = Some(track);
+        } else if let Some(secs) = mirror_secs {
+            // Guards are scoped to their block: no `.await` runs while one is
+            // held.
+            let mut current_track = self.current_track.write().await;
+            if let Some(current) = current_track.as_mut() {
+                current.duration_secs = secs;
+            }
+        }
+
+        if let Some(secs) = mirror_secs {
+            // Read the index into a local first: a temporary guard in an
+            // `if let` scrutinee would live to the end of the block, holding it
+            // across the `queue` write below.
+            let index = *self.current_index.read().await;
+            if let Some(index) = index {
+                let mut queue = self.queue.write().await;
+                if let Some(entry) = queue.get_mut(index) {
+                    entry.duration_secs = secs;
+                }
+            }
+        }
+    }
+
+    /// Start `track`, publishing the new state only once rodio has accepted it.
+    ///
+    /// The ordering is the point: the fallible work runs to completion first, so
+    /// a missing or undecodable file returns `Err` with `current_track`,
+    /// `track_duration` and the queue still describing the previous track, rather
+    /// than leaving the player bar pointing at a song that never played.
+    ///
+    /// The queue index is deliberately not written here — `next` and `previous`
+    /// own it, and set it only after this returns `Ok`.
     pub async fn play_track(&self, track: Track) -> Result<(), PlayerError> {
         info!(track_id = %track.id, title = %track.title, "Starting track playback");
-        *self.track_duration.write().await = Duration::from_secs(track.duration_secs as u64);
-        *self.current_track.write().await = Some(track.clone());
-        self.play(&track.file_path).await
+        let library_duration = Duration::from_secs(track.duration_secs as u64);
+        let start = self.start_sink(&track.file_path, library_duration).await?;
+        self.commit_start(Some(track), &start).await;
+        Ok(())
     }
 
     pub async fn pause(&self) -> Result<(), PlayerError> {
@@ -1024,6 +1121,29 @@ pub enum PlayerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::AudioFormat;
+
+    /// Publish the state a successful `play_track` leaves behind: track 0 of a
+    /// two-track queue is current, with a 4:26 length.
+    async fn seed_previous_state(player: &AudioPlayer) -> Track {
+        let current = Track::new(
+            "Previous".to_string(),
+            "/library/previous.mp3".to_string(),
+            266,
+            AudioFormat::Mp3,
+        );
+        let queued = Track::new(
+            "Queued".to_string(),
+            "/library/queued.mp3".to_string(),
+            180,
+            AudioFormat::Mp3,
+        );
+        player.set_queue(vec![current.clone(), queued]).await;
+        player.set_current_index(Some(0)).await;
+        *player.current_track.write().await = Some(current.clone());
+        *player.track_duration.write().await = Duration::from_secs(266);
+        current
+    }
 
     #[test]
     fn reconcile_never_shortens_a_known_duration() {
@@ -1101,6 +1221,220 @@ mod tests {
             "unexpected error message: {message}"
         );
         assert!(!player.is_playing().await);
+    }
+
+    /// Headless-safe: a missing file is rejected by `File::open`, long before the
+    /// output device is touched, so the whole "failed start" contract is
+    /// exercisable with no audio hardware.
+    ///
+    /// This is the regression being pinned. `play_track` used to publish
+    /// `current_track` and `track_duration` *before* doing the fallible work, so a
+    /// failure returned `Err` while the player kept claiming the track that never
+    /// started — the player bar pointed at a song that was not playing, and
+    /// "next" walked on from a bogus position.
+    #[tokio::test]
+    async fn play_track_that_cannot_start_keeps_the_previous_track() {
+        let player = AudioPlayer::new().unwrap();
+        let previous = seed_previous_state(&player).await;
+        let duration_before = player.duration().await;
+
+        let incoming = Track::new(
+            "Never Plays".to_string(),
+            "/nonexistent/auralis/never-plays.mp3".to_string(),
+            92,
+            AudioFormat::Mp3,
+        );
+        let err = player
+            .play_track(incoming)
+            .await
+            .expect_err("a missing file must not report success");
+        assert!(
+            matches!(&err, PlayerError::FileError(_)),
+            "expected a FileError, got {err:?}"
+        );
+
+        let current = player
+            .get_current_track()
+            .await
+            .expect("a failed start must not clear the current track");
+        assert_eq!(
+            current.id, previous.id,
+            "current_track moved to a track that never started"
+        );
+        assert_eq!(current.title, previous.title);
+        assert_eq!(
+            current.duration_secs, previous.duration_secs,
+            "the current track's own length was rewritten by a failed start"
+        );
+        assert_eq!(
+            player.duration().await,
+            duration_before,
+            "track_duration was overwritten by a failed start"
+        );
+        assert_eq!(
+            player.get_current_index().await,
+            Some(0),
+            "the queue index must not move on a failed start"
+        );
+        let queue = player.get_queue().await;
+        assert_eq!(queue[0].id, previous.id);
+        assert_eq!(
+            queue[0].duration_secs, 266,
+            "the queue entry was re-stamped by a failed start"
+        );
+        assert!(
+            !player.is_playing().await,
+            "a failed start must not leave a sink behind"
+        );
+    }
+
+    /// The same guarantee at the *second* rejection point: the file is there, so
+    /// `File::open` succeeds, and `create_decoder` is what refuses it. Pins that
+    /// the rollback is structural (nothing is written until playback exists) and
+    /// not just an early `return` on the open.
+    #[tokio::test]
+    async fn play_track_on_an_undecodable_file_keeps_the_previous_track() {
+        let dir = std::env::temp_dir().join(format!("auralis_test_play_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let corrupt = dir.join("corrupt.m4a");
+        std::fs::write(&corrupt, b"NOT_A_REAL_AUDIO_FILE").unwrap();
+
+        let player = AudioPlayer::new().unwrap();
+        let previous = seed_previous_state(&player).await;
+        let duration_before = player.duration().await;
+
+        let incoming = Track::new(
+            "Corrupt".to_string(),
+            corrupt.to_str().unwrap_or_default().to_string(),
+            120,
+            AudioFormat::M4a,
+        );
+        let err = player
+            .play_track(incoming)
+            .await
+            .expect_err("an undecodable file must not report success");
+        assert!(
+            matches!(&err, PlayerError::DecodeError(_)),
+            "expected a DecodeError, got {err:?}"
+        );
+
+        assert_eq!(
+            player.get_current_track().await.map(|t| t.id),
+            Some(previous.id),
+            "current_track moved to a track that never started"
+        );
+        assert_eq!(player.duration().await, duration_before);
+        assert_eq!(player.get_queue().await[0].duration_secs, 266);
+        assert!(!player.is_playing().await);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The commit half, driven directly.
+    ///
+    /// A real `start_sink` needs a rodio output device, so the *successful* start
+    /// path cannot be exercised headlessly and this test does not claim to: it
+    /// proves that the commit publishes every field `play_track` owns, in one
+    /// place, from an `EstablishedStart` and nothing else.
+    #[tokio::test]
+    async fn commit_start_publishes_the_established_track() {
+        let player = AudioPlayer::new().unwrap();
+        let incoming = Track::new(
+            "Incoming".to_string(),
+            "/library/incoming.mp3".to_string(),
+            30,
+            AudioFormat::Mp3,
+        );
+        player.set_queue(vec![incoming.clone()]).await;
+        player.set_current_index(Some(0)).await;
+
+        // A payload `start_sink` would have produced for a 30s library row whose
+        // decoder claimed 92s: `reconcile_duration` keeps the larger value and the
+        // commit re-stamps every published copy with it.
+        let start = EstablishedStart {
+            duration: Duration::from_secs(92),
+            decoded: Some(Duration::from_secs(92)),
+        };
+        player.commit_start(Some(incoming.clone()), &start).await;
+
+        assert_eq!(player.duration().await, Duration::from_secs(92));
+        let current = player
+            .get_current_track()
+            .await
+            .expect("the commit must publish the track");
+        assert_eq!(current.id, incoming.id);
+        assert_eq!(current.duration_secs, 92);
+        let queue = player.get_queue().await;
+        assert_eq!(
+            queue[0].duration_secs, 92,
+            "the queue entry at current_index must be re-stamped with the established length"
+        );
+    }
+
+    /// With no decoder opinion there is nothing to correct the mirrored copies
+    /// *with*: the queue entry at `current_index` still belongs to the track that
+    /// is current until `next` / `previous` land their own index update, and
+    /// stamping it with the incoming track's length would corrupt a track that is
+    /// still current.
+    #[tokio::test]
+    async fn commit_start_without_a_decoder_opinion_leaves_the_queue_entry_alone() {
+        let player = AudioPlayer::new().unwrap();
+        let previous = seed_previous_state(&player).await;
+        let incoming = Track::new(
+            "Incoming".to_string(),
+            "/library/incoming.mp3".to_string(),
+            42,
+            AudioFormat::Mp3,
+        );
+
+        let start = EstablishedStart {
+            duration: Duration::from_secs(42),
+            decoded: None,
+        };
+        player.commit_start(Some(incoming.clone()), &start).await;
+
+        assert_eq!(player.duration().await, Duration::from_secs(42));
+        let current = player
+            .get_current_track()
+            .await
+            .expect("the commit must publish the track");
+        assert_eq!(current.id, incoming.id);
+        assert_eq!(
+            current.duration_secs, 42,
+            "with no decoder opinion the published track keeps the library's own length"
+        );
+        let queue = player.get_queue().await;
+        assert_eq!(
+            queue[0].id, previous.id,
+            "the queue itself must be untouched"
+        );
+        assert_eq!(
+            queue[0].duration_secs, 266,
+            "the still-current queue entry must keep its own length"
+        );
+    }
+
+    /// `play(path)` has no `Track` to publish, so its commit may only refresh the
+    /// length of what is already current — it must not invent an identity, and it
+    /// must not clear one either.
+    #[tokio::test]
+    async fn commit_start_without_a_track_refreshes_only_the_duration() {
+        let player = AudioPlayer::new().unwrap();
+        let previous = seed_previous_state(&player).await;
+
+        let start = EstablishedStart {
+            duration: Duration::from_secs(300),
+            decoded: Some(Duration::from_secs(300)),
+        };
+        player.commit_start(None, &start).await;
+
+        assert_eq!(player.duration().await, Duration::from_secs(300));
+        let current = player
+            .get_current_track()
+            .await
+            .expect("a bare-path commit must not clear the current track");
+        assert_eq!(current.id, previous.id);
+        assert_eq!(current.duration_secs, 300);
     }
 
     #[tokio::test]

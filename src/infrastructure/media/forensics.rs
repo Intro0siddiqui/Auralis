@@ -32,6 +32,17 @@
 //!    audible sample. This is what separates "complete file, decoder gave up" from
 //!    "complete file, three minutes of silence".
 //!
+//! Question 2 has one trap of its own, which cost a second round of real-device
+//! bugs: the position of the last *audible* sample is not a length. A perfectly
+//! complete track that ends in silence reports a short `audible_secs`, which
+//! then failed a completeness check and burned four pointless range-top-up
+//! rounds. So the length that was really decoded is exposed separately, as
+//! [`ContentFacts::measured_secs`]: `total_samples / sample_rate`, obtained by
+//! counting the sample stream rather than by asking the decoder what it thinks
+//! the length is. `audible_secs` stays in the report because it is diagnostic
+//! gold — it is how you tell a silent tail from a windowed stream — but it is no
+//! longer a completeness signal.
+//!
 //! Nothing here panics on malformed input: every field is optional and an
 //! unreadable structure simply yields [`Verdict::Unknown`], which makes callers
 //! fall back to their previous behaviour.
@@ -122,24 +133,71 @@ impl ContainerFacts {
 #[derive(Debug, Clone, Default)]
 pub struct ContentFacts {
     /// Length the decoder reported for the whole file.
+    ///
+    /// **Untrustworthy.** `rodio`'s `total_duration()` stops at the first
+    /// fragment it can parse, so on a fragmented MP4 it under-reports: a 4:26
+    /// track reads as 1:32. Kept only so a report can show how far the
+    /// decoder's opinion and the measurement below disagree; that gap is the
+    /// symptom worth diagnosing.
     pub decoded_secs: Option<u64>,
     /// Position of the last sample above the audible threshold.
+    ///
+    /// Diagnostic, *not* a length: a complete track that fades into silence
+    /// reports less than it holds. Use [`ContentFacts::measured_secs`] to judge
+    /// how much audio is present.
     pub audible_secs: Option<f64>,
     pub sample_rate: u32,
+    /// Samples actually yielded by iterating the decoded stream. This count is
+    /// a measurement, so it cannot be wrong in the way `total_duration()` is.
     pub total_samples: u64,
     pub audible_samples: u64,
 }
 
 impl ContentFacts {
+    /// Length of the audio that was really decoded, in seconds.
+    ///
+    /// Derived rather than stored on purpose: it is exactly
+    /// `total_samples / sample_rate`, and a second copy of that number in the
+    /// struct could disagree with the two fields it comes from. A gate that
+    /// read a stale field would be making a completeness decision from a
+    /// number nothing maintains.
+    ///
+    /// * `None` — the file never decoded, so nothing was measured. A caller
+    ///   deciding "is this file complete?" must fall back to its other
+    ///   evidence; `None` never means "empty".
+    /// * `Some(0.0)` — the stream was walked and held no samples at all. That
+    ///   *is* a measurement, and it is a damning one: measured against a
+    ///   non-zero expected duration it proves the file is not complete, so it
+    ///   must be distinguishable from `None`.
+    ///
+    /// Fractional seconds are kept. Truncating to whole seconds would hide a
+    /// sub-second shortfall, and callers compare this against a tolerance
+    /// rather than against an exact figure.
+    pub fn measured_secs(&self) -> Option<f64> {
+        // `sample_rate` is a plain `u32` and is 0 whenever no decoder was
+        // built, so the division has to be guarded. `f64::from(u64)` is exact
+        // for any real sample count.
+        if self.sample_rate == 0 {
+            return None;
+        }
+        Some(self.total_samples as f64 / f64::from(self.sample_rate))
+    }
+
     pub fn summary(&self) -> String {
+        // `decoded`/`audible` are printed with a literal `s` after the value
+        // either way, so the unmeasured cases read `?s` rather than going
+        // silently blank.
+        let secs = |value: Option<f64>| match value {
+            Some(v) => format!("{v:.1}s"),
+            None => "?s".to_string(),
+        };
         format!(
-            "decoded={}s audible_until={}s ({} of {} samples above {AUDIBLE_THRESHOLD}, {} Hz)",
+            "decoded={}s measured={} audible_until={} ({} of {} samples above {AUDIBLE_THRESHOLD}, {} Hz)",
             self.decoded_secs
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "?".into()),
-            self.audible_secs
-                .map(|s| format!("{s:.1}"))
-                .unwrap_or_else(|| "?".into()),
+            secs(self.measured_secs()),
+            secs(self.audible_secs),
             self.audible_samples,
             self.total_samples,
             self.sample_rate
@@ -622,7 +680,12 @@ pub fn inspect_container(path: &Path) -> ContainerFacts {
 /// This is the check a sample table cannot make: the table says which bytes
 /// *should* be there, not whether they contain music. A complete file that ends
 /// in digital silence reports a large gap between `audible_secs` and
-/// `decoded_secs`, which is the signature of a server-side partial stream.
+/// [`ContentFacts::measured_secs`], which is the signature of a server-side
+/// partial stream.
+///
+/// The stream is iterated either way, so the same pass produces the measured
+/// length (`ContentFacts::measured_secs`) — the number a completeness decision
+/// should be made from, since it does not care how the track ends.
 pub fn inspect_content(path: &Path, ext: &str) -> ContentFacts {
     let mut facts = ContentFacts::default();
     let Ok(file) = File::open(path) else {
@@ -810,5 +873,114 @@ mod tests {
         let runs = vec![(1, 2), (4, 3)];
         let (offset, first_sample, samples) = last_chunk(&offsets, &runs).unwrap();
         assert_eq!((offset, first_sample, samples), (50, 9, 3));
+    }
+
+    /// A `ContentFacts` shaped the way `inspect_content` builds it: the
+    /// decoder's claim, plus the sample stream that was really iterated.
+    fn content_facts(
+        decoded_secs: Option<u64>,
+        sample_rate: u32,
+        total_samples: u64,
+        audible_samples: u64,
+    ) -> ContentFacts {
+        // Same arithmetic as `inspect_content`, so a test cannot assert a
+        // relationship production would not itself hold.
+        ContentFacts {
+            decoded_secs,
+            audible_secs: Some(audible_samples as f64 / f64::from(sample_rate.max(1))),
+            sample_rate,
+            total_samples,
+            audible_samples,
+        }
+    }
+
+    #[test]
+    fn measured_secs_comes_from_the_stream_not_the_decoder_claim() {
+        // The exact v2.6.44 shape: the decoder under-reports a fragmented MP4
+        // badly, and the sample count says what is really there.
+        let facts = content_facts(Some(92), 44_100, 12_656_571, 12_600_000);
+        let measured = facts.measured_secs().expect("a decoded file measures");
+        assert!((measured - 12_656_571.0 / 44_100.0).abs() < 1e-9);
+        assert!(
+            measured > 286.9 && measured < 287.0,
+            "measured {measured} should be a ~287s track, not the decoder's 92s"
+        );
+        assert_eq!(facts.decoded_secs, Some(92));
+        assert_ne!(f64::from(facts.decoded_secs.unwrap()), measured);
+    }
+
+    #[test]
+    fn measured_secs_is_none_when_nothing_was_decoded() {
+        // `sample_rate` is 0 exactly when no decoder could be built, so the
+        // division must not happen.
+        let undecodable = content_facts(None, 0, 0, 0);
+        assert_eq!(undecodable.measured_secs(), None);
+        // A zero rate is not something `inspect_content` can produce alongside
+        // samples, but it must still answer "unmeasured" rather than divide.
+        let contradictory = content_facts(None, 0, 44_100, 0);
+        assert_eq!(contradictory.measured_secs(), None);
+        // Same answer as the untouched default, so callers can rely on it.
+        assert_eq!(ContentFacts::default().measured_secs(), None);
+    }
+
+    #[test]
+    fn an_empty_stream_measures_zero_rather_than_unknown() {
+        // Decoding succeeded and the stream was empty. That is a real
+        // measurement, and it is distinct from "could not measure": against a
+        // non-zero expected duration it proves the file is not complete.
+        let facts = content_facts(Some(0), 44_100, 0, 0);
+        assert_eq!(facts.measured_secs(), Some(0.0));
+        // The distinction from the unmeasured case is the whole point.
+        assert_ne!(
+            facts.measured_secs(),
+            content_facts(None, 0, 0, 0).measured_secs()
+        );
+    }
+
+    #[test]
+    fn measured_secs_keeps_the_fractional_sample() {
+        // 100000 / 44100 = 2.267573696...: truncating to whole seconds would
+        // report 2s and hide the shortfall against a 2.2s expectation.
+        let odd = content_facts(Some(2), 44_100, 100_000, 100_000);
+        let measured = odd.measured_secs().expect("measured");
+        assert!((measured - 100_000.0 / 44_100.0).abs() < 1e-12);
+        assert!(
+            measured > 2.26 && measured < 2.28,
+            "fractional seconds must survive: {measured}"
+        );
+        // A single sample at an integer rate is a real sub-second length.
+        let tiny = content_facts(Some(0), 8_000, 1, 1);
+        assert_eq!(tiny.measured_secs(), Some(0.000_125));
+        // An exactly divisible count is exact, not merely close.
+        let exact = content_facts(Some(10), 48_000, 480_000, 480_000);
+        assert_eq!(exact.measured_secs(), Some(10.0));
+    }
+
+    #[test]
+    fn summary_reports_the_measured_length_alongside_the_decoder_claim() {
+        // This test is the reason `measured_secs` is exposed through
+        // `summary()`: `downloader.rs` logs and embeds that string in the
+        // failure it shows the user, so the measured length is read from
+        // production code and cannot rot into a dead item.
+        let facts = content_facts(Some(92), 44_100, 441_000, 400_000);
+        let summary = facts.summary();
+        assert!(
+            summary.contains("measured=10.0s"),
+            "measured length missing from: {summary}"
+        );
+        // The unreliable claim stays visible for diagnosis, just labelled.
+        assert!(summary.contains("decoded=92s"), "{summary}");
+        // `audible_secs` is unchanged and still reported — and here it is
+        // *shorter* than the measured length, which is the complete-track-
+        // ending-in-silence case the measured value exists to handle.
+        assert!(summary.contains("audible_until=9.1s"), "{summary}");
+        assert!(summary.contains("400000 of 441000 samples"), "{summary}");
+
+        // The unmeasured case is visibly unmeasured, not a silent zero.
+        let undecodable = ContentFacts::default();
+        let summary = undecodable.summary();
+        assert!(summary.contains("measured=?s"), "{summary}");
+        assert!(summary.contains("decoded=?s"), "{summary}");
+        assert!(summary.contains("audible_until=?s"), "{summary}");
     }
 }
