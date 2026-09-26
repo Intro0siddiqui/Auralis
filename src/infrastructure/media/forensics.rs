@@ -736,7 +736,7 @@ mod tests {
         while file.len() < 1000 {
             file.push(0);
         }
-        file.extend(std::iter::repeat(0u8).take(sample_bytes));
+        file.extend(std::iter::repeat_n(0u8, sample_bytes));
         file
     }
 
@@ -803,10 +803,12 @@ mod tests {
 
     #[test]
     fn last_chunk_maps_offsets_to_sample_ranges() {
-        // 5 chunks; the last one holds 3 samples starting at sample 4.
+        // `stsc` runs: from chunk 1 there are 2 samples per chunk, from chunk 4
+        // there are 3. With 5 chunks the last one therefore starts after
+        // 2 + 2 + 2 + 3 = 9 samples and holds 3.
         let offsets = vec![10, 20, 30, 40, 50];
         let runs = vec![(1, 2), (4, 3)];
         let (offset, first_sample, samples) = last_chunk(&offsets, &runs).unwrap();
-        assert_eq!((offset, first_sample, samples), (50, 4, 3));
+        assert_eq!((offset, first_sample, samples), (50, 9, 3));
     }
 }
