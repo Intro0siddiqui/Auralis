@@ -751,11 +751,11 @@ jobs:
     if: always()
     # test-android-e2e is deliberately absent: it is report-only (see above) and
     # must not gate the branch status.
-    # `check-android` is deliberately NOT required yet. It cannot be verified
-    # locally (no Android NDK on the dev box), and putting an unproven job in
-    # this set means one environmental hiccup blocks every push. It reports
-    # freely; once it has been green on a main run it gets promoted here.
-    needs: [lint, build-linux, build-android]
+    # `check-android` was reporting-only until it had been green on a main run
+    # (it cannot be verified locally — no Android NDK on the dev box, and an
+    # unproven job in this set means one environmental hiccup blocks every
+    # push). Promoted after it passed 36251350233.
+    needs: [lint, build-linux, check-android, build-android]
     runs-on: ubuntu-22.04
     steps:
       - name: Check required jobs
