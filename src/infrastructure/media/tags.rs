@@ -42,6 +42,10 @@
 //! those downloads report a plain error and keep their untagged file.
 
 use lofty::file::{FileType, TaggedFileExt};
+// `set_title`/`set_artist`/`set_album` come from `Accessor` and `save_to_path`
+// from `TagExt`; both live in the prelude, which `filesystem::metadata` also
+// imports. Without it the compiler reports E0599 "no method named set_title".
+use lofty::prelude::*;
 use lofty::probe::Probe;
 use std::path::Path;
 use tracing::debug;
