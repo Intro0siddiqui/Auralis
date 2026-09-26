@@ -248,6 +248,24 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
+      # `cc-rs` (ring, via aws-lc/rustls) does not read
+      # CARGO_TARGET_*_LINKER — it resolves the C compiler by name on PATH, and
+      # asks for `<target>-clang` with no API suffix. The NDK only ships the
+      # suffixed wrappers (`aarch64-linux-android21-clang`), so without these
+      # relative symlinks in the NDK's own bin dir the build script dies with
+      # ToolNotFound. Relative so the wrapper's `dirname $0` still finds the
+      # toolchain it belongs to.
+      - name: Put the NDK clang wrappers on PATH under their unsuffixed names
+        run: |
+          NDK_BIN="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -d "$NDK_BIN" || { echo "::error::NDK bin missing at $NDK_BIN"; exit 1; }
+          ln -sf aarch64-linux-android21-clang "$NDK_BIN/aarch64-linux-android-clang"
+          ln -sf armv7a-linux-androideabi21-clang "$NDK_BIN/armv7-linux-androideabi-clang"
+          ln -sf aarch64-linux-android21-ar "$NDK_BIN/aarch64-linux-android-ar"
+          ln -sf armv7a-linux-androideabi21-ar "$NDK_BIN/armv7-linux-androideabi-ar"
+          echo "$NDK_BIN" >> "$GITHUB_PATH"
+          echo "toolchain wired:"; ls -l "$NDK_BIN" | grep -E "android-clang|android-ar" || true
+
       - name: cargo check (Android targets)
         run: |
           for target in aarch64-linux-android armv7-linux-androideabi; do
