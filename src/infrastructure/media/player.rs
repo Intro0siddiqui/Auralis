@@ -41,12 +41,12 @@ struct OutputStreamHolder {
 unsafe impl Send for OutputStreamHolder {}
 unsafe impl Sync for OutputStreamHolder {}
 
-/// Audio player using rodio
-#[derive(Clone)]
 /// Test-only slot holding the start observer. See the field's doc comment.
 #[cfg(test)]
 type StartObserverSlot = Arc<std::sync::Mutex<Option<Arc<dyn Fn(Option<usize>) + Send + Sync>>>>;
 
+/// Audio player using rodio
+#[derive(Clone)]
 pub struct AudioPlayer {
     output: Arc<std::sync::Mutex<OutputStreamHolder>>,
     sink: Arc<RwLock<Option<Player>>>,
