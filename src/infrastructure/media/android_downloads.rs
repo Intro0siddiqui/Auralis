@@ -94,7 +94,7 @@ pub fn publish_to_downloads(src_path: &Path) -> Option<String> {
     }
     #[cfg(target_os = "android")]
     {
-        let display = src_path
+        let display_name = src_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "audio_track.mp3".to_string());
@@ -103,7 +103,7 @@ pub fn publish_to_downloads(src_path: &Path) -> Option<String> {
             .and_then(|e| e.to_str())
             .unwrap_or("mp3");
         let mime = mime_for_ext(ext);
-        match publish_inner(src_path, &display, mime) {
+        match publish_inner(src_path, &display_name, mime) {
             Ok(public) => {
                 info!(src = %src_path.display(), public = %public, "Published to Download/Auralis via MediaStore");
                 Some(public)
@@ -112,7 +112,7 @@ pub fn publish_to_downloads(src_path: &Path) -> Option<String> {
                 // `e` already carries the display name, the row id, the API
                 // level and the JNI error string, because a release build has
                 // no logcat and this line is the only evidence that survives.
-                warn!(src = %src_path.display(), display = %display, error = %e, "MediaStore publish failed, keeping internal path");
+                warn!(src = %src_path.display(), display_name = %display_name, error = %e, "MediaStore publish failed, keeping internal path");
                 None
             }
         }
@@ -484,10 +484,14 @@ fn take_pending_exception(env: &mut JNIEnv<'_>) -> Option<String> {
             match called.and_then(|value| value.l().ok()) {
                 Some(obj) if !obj.is_null() => {
                     let text = JString::from(obj);
-                    match env.get_string(&text) {
+                    // Bind the Result before the block ends: as a tail expression
+                    // it would be dropped *after* `text`, but `JavaStr`'s Drop
+                    // borrows the JString it came from.
+                    let extracted = match env.get_string(&text) {
                         Ok(java) => Some(java.into()),
                         Err(_) => None,
-                    }
+                    };
+                    extracted
                 }
                 _ => None,
             }
@@ -506,10 +510,13 @@ fn describe_uri(env: &mut JNIEnv<'_>, uri: &JObject<'_>) -> (String, String) {
         Ok(value) => match value.l() {
             Ok(obj) if !obj.is_null() => {
                 let text = JString::from(obj);
-                match env.get_string(&text) {
+                // Same drop-order reason as above: keep the `Result` off the
+                // block's tail expression so it dies before `text`.
+                let extracted = match env.get_string(&text) {
                     Ok(java) => java.into(),
                     Err(_) => String::new(),
-                }
+                };
+                extracted
             }
             _ => String::new(),
         },

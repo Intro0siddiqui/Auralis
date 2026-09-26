@@ -1510,8 +1510,10 @@ impl Downloader {
                         // path so `download:completed` shows the Files-visible location.
                         state.output_path = Some(pub_path.clone());
                     }
-                    completion_path = pub_path;
+                    // Log before the move: `info!` borrows `pub_path`, so this
+                    // has to precede the assignment that consumes it.
                     info!(download_id = %id, public = %pub_path, internal = %job.output_path.display(), "Published download to Download/Auralis");
+                    completion_path = pub_path;
                 } else {
                     warn!(download_id = %id, src = %job.output_path.display(), "MediaStore publish returned None — keeping internal path");
                 }
