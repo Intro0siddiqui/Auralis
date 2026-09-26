@@ -263,6 +263,11 @@ jobs:
           ln -sf armv7a-linux-androideabi21-clang "$NDK_BIN/armv7-linux-androideabi-clang"
           ln -sf aarch64-linux-android21-ar "$NDK_BIN/aarch64-linux-android-ar"
           ln -sf armv7a-linux-androideabi21-ar "$NDK_BIN/armv7-linux-androideabi-ar"
+          # cc-rs derives the prefix for 32-bit ARM Android as
+          # `arm-linux-androideabi`, not Rust's `armv7-linux-androideabi`, and
+          # the NDK ships neither spelling unsuffixed.
+          ln -sf armv7a-linux-androideabi21-clang "$NDK_BIN/arm-linux-androideabi-clang"
+          ln -sf armv7a-linux-androideabi21-ar "$NDK_BIN/arm-linux-androideabi-ar"
           echo "$NDK_BIN" >> "$GITHUB_PATH"
           echo "toolchain wired:"; ls -l "$NDK_BIN" | grep -E "android-clang|android-ar" || true
 
