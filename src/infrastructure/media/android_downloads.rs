@@ -11,6 +11,23 @@
 //!
 //! Downloader keeps `Range` pause/resume working by streaming to the internal
 //! tmp first; this module is only called once on `complete` to copy.
+//!
+//! # The pending-row invariant (DL-07)
+//!
+//! The API 29+ branch creates its `MediaStore` row **invisible**
+//! (`is_pending = 1`): `MediaProvider` hides such a row from the file manager,
+//! from `MediaStore` queries and from the media scanner, and keeps the display
+//! name reserved for as long as the row exists. A row that is inserted pending
+//! and then dropped on the floor is therefore worse than no row at all — the
+//! file "does not exist" *and* the next publish of the same track collides
+//! with the ghost.
+//!
+//! So: **a row inserted pending is always either made visible or removed.**
+//! Every exit path after the insert funnels through
+//! [`resolve_pending_row`], which clears `is_pending` when the byte copy
+//! completed and deletes the row in every other case (including a clear that
+//! failed or matched no rows). The decision itself lives in the pure
+//! [`next_step`] so it can be unit-tested without a device.
 
 use std::path::Path;
 #[cfg(target_os = "android")]
@@ -21,6 +38,32 @@ use jni::{
     objects::{JObject, JString, JValue},
     JNIEnv,
 };
+
+/// `MediaStore.MediaColumns` names, spelled out so this module keeps building
+/// (and behaving identically) without the Android SDK on the host.
+#[cfg(target_os = "android")]
+const COLUMN_IS_PENDING: &str = "is_pending";
+#[cfg(target_os = "android")]
+const COLUMN_DISPLAY_NAME: &str = "display_name";
+#[cfg(target_os = "android")]
+const COLUMN_MIME_TYPE: &str = "mime_type";
+#[cfg(target_os = "android")]
+const COLUMN_RELATIVE_PATH: &str = "relative_path";
+
+/// Where the public copy lives, as a `MediaStore` relative path (API 29+) and
+/// as the absolute path we hand back to the caller. The legacy branch builds
+/// its destination from `Environment`, which is the same directory in practice;
+/// if a device ever disagrees, the public path we return is still the one the
+/// Q+ branch writes to.
+#[cfg(target_os = "android")]
+const PUBLIC_RELATIVE_PATH: &str = "Download/Auralis";
+#[cfg(target_os = "android")]
+const PUBLIC_ABSOLUTE_DIR: &str = "/storage/emulated/0/Download/Auralis";
+
+/// Chunk size for the `OutputStream.write([B)` loop. A local-ref array per
+/// chunk on a permanently attached thread, so keep it modest.
+#[cfg(target_os = "android")]
+const COPY_CHUNK_BYTES: usize = 64 * 1024;
 
 /// MIME for a download ext, for MediaStore DISPLAY.
 pub fn mime_for_ext(ext: &str) -> &'static str {
@@ -66,7 +109,10 @@ pub fn publish_to_downloads(src_path: &Path) -> Option<String> {
                 Some(public)
             }
             Err(e) => {
-                warn!(src = %src_path.display(), error = %e, "MediaStore publish failed, keeping internal path");
+                // `e` already carries the display name, the row id, the API
+                // level and the JNI error string, because a release build has
+                // no logcat and this line is the only evidence that survives.
+                warn!(src = %src_path.display(), display = %display, error = %e, "MediaStore publish failed, keeping internal path");
                 None
             }
         }
@@ -109,98 +155,559 @@ fn publish_inner(src_path: &Path, display_name: &str, mime: &str) -> Result<Stri
 
         if sdk >= 29 {
             // Q+ MediaStore path with IS_PENDING
-            publish_q(env, &resolver, &ctx, src_path, display_name, mime)
+            publish_q(env, &resolver, &ctx, sdk, src_path, display_name, mime)
         } else {
-            publish_legacy(env, &resolver, &ctx, src_path, display_name)
+            publish_legacy(env, &resolver, &ctx, sdk, src_path, display_name)
         }
     })
     .ok_or_else(|| "JNI env unavailable".to_string())?
 }
 
+/// How the byte copy into the MediaStore stream ended.
+#[cfg(any(target_os = "android", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyOutcome {
+    /// Every source byte reached the row's file and the stream closed cleanly
+    /// — the row now holds the whole track and is worth publishing.
+    Complete,
+    /// Anything else: the stream never opened, the source could not be read, a
+    /// write/flush/close failed. The row holds a truncated file (or nothing)
+    /// and must never become visible.
+    Failed,
+}
+
+/// What the `is_pending = 0` update reported.
+#[cfg(any(target_os = "android", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClearOutcome {
+    /// Update was not attempted because the copy was not complete.
+    NotAttempted,
+    /// `ContentResolver.update` reported at least one affected row.
+    Updated,
+    /// It reported 0 rows — the provider did not match the row, so visibility
+    /// was *not* achieved. Treating this as success is what let an invisible
+    /// file ship unnoticed before.
+    NoRows,
+    /// The call itself failed (a thrown Java exception, a bad signature …).
+    Failed,
+}
+
+/// The two ways a pending row can be resolved.
+#[cfg(any(target_os = "android", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingStep {
+    Clear,
+    Delete,
+}
+
+/// The whole DL-07 invariant as a decision table, with no JNI in it so it can
+/// be unit-tested off-device:
+///
+/// * a row is made visible **only** when the byte copy completed, and
+/// * if the visibility step did not demonstrably happen, the row is removed.
+///
+/// An unclearable row is deleted rather than left pending: an invisible row is
+/// not merely useless, it keeps `Download/Auralis/<name>` reserved so the next
+/// publish of the same track collides with a ghost nobody can see or remove.
+/// Deleting is safe because the URI addresses a row this process created
+/// moments ago, and because the internal copy the library actually plays is
+/// never touched from here.
+#[cfg(any(target_os = "android", test))]
+fn next_step(copy: CopyOutcome, clear: ClearOutcome) -> Option<PendingStep> {
+    match (copy, clear) {
+        (CopyOutcome::Complete, ClearOutcome::NotAttempted) => Some(PendingStep::Clear),
+        (CopyOutcome::Complete, ClearOutcome::Updated) => None,
+        (CopyOutcome::Complete, ClearOutcome::NoRows | ClearOutcome::Failed) => {
+            Some(PendingStep::Delete)
+        }
+        // An incomplete copy is never published, whatever the clear said.
+        (CopyOutcome::Failed, _) => Some(PendingStep::Delete),
+    }
+}
+
+/// What [`resolve_pending_row`] did with the row. `Unresolved` is the only
+/// state that can still leave something pending, so it is the one that has to
+/// be loud in the log.
 #[cfg(target_os = "android")]
-fn publish_q(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingOutcome {
+    /// `is_pending = 0` was applied; the file is in the file manager.
+    Visible,
+    /// The row is gone; nothing pending was left behind.
+    Removed,
+    /// Deleting the row also failed. The row is still there and still
+    /// invisible, and only a human can now clean it up.
+    Unresolved,
+}
+
+/// A `MediaStore` row this process has just inserted and not yet resolved.
+///
+/// Deliberately *not* a `Drop` guard: resolving the row needs `&mut JNIEnv`,
+/// which a `drop` impl cannot obtain safely (JNI during unwinding, and no way
+/// to report the outcome), and an implicit resolver would hide the very exit
+/// paths that leak rows in the first place. Every caller resolves the row
+/// explicitly, on purpose, in the order the protocol requires.
+#[cfg(target_os = "android")]
+struct PendingRow<'local> {
+    uri: JObject<'local>,
+    /// Row id, i.e. the last path segment of the uri. Log-only: update/delete
+    /// address the row by uri, but a human needs the id to clean up by hand.
+    id: String,
+    /// Full uri text, log-only, so a leaked row can be deleted with
+    /// `content delete --uri <this>`.
+    uri_string: String,
+    display_name: String,
+    api: i32,
+}
+
+/// The one place a pending row is made visible or removed.
+///
+/// Every exit path of [`publish_q`] after a successful insert must reach this
+/// — the success path included. Holding the invariant across early `return`s is
+/// the entire point of funnelling them all through one function.
+#[cfg(target_os = "android")]
+fn resolve_pending_row<'local>(
+    env: &mut JNIEnv<'local>,
+    resolver: &JObject<'_>,
+    row: &PendingRow<'local>,
+    copy: CopyOutcome,
+) -> PendingOutcome {
+    // `jni` reports a thrown Java exception as an `Err` but deliberately
+    // leaves it *pending*, and the JNI spec only sanctions a handful of calls
+    // (ExceptionCheck/Clear/Describe among them) while one is pending. Every
+    // caller arrives straight off a failed JNI call, so drain it here first —
+    // otherwise the update/delete below is undefined behaviour and can abort
+    // the VM instead of merely failing.
+    if let Some(exception) = take_pending_exception(env) {
+        warn!(
+            display_name = %row.display_name,
+            row_id = %row.id,
+            api = row.api as i64,
+            exception = %exception,
+            "Drained a pending Java exception before resolving the MediaStore row"
+        );
+    }
+
+    let clear = match next_step(copy, ClearOutcome::NotAttempted) {
+        Some(PendingStep::Clear) => clear_pending_flag(env, resolver, row),
+        // Incomplete copy: no visibility step at all, the table below sends
+        // the row straight to delete.
+        Some(PendingStep::Delete) | None => ClearOutcome::NotAttempted,
+    };
+
+    if matches!(next_step(copy, clear), Some(PendingStep::Delete)) {
+        return delete_pending_row(env, resolver, row);
+    }
+
+    // `Clear` cannot come back here: `clear` is no longer `NotAttempted`.
+    info!(
+        display_name = %row.display_name,
+        row_id = %row.id,
+        api = row.api as i64,
+        uri = %row.uri_string,
+        "MediaStore row is visible: is_pending cleared"
+    );
+    PendingOutcome::Visible
+}
+
+/// `UPDATE row SET is_pending = 0` — the transition that makes the row appear
+/// in the file manager. The affected-row count is checked: 0 is not evidence of
+/// success, and the previous unchecked call here is how an invisible file
+/// shipped without a word in any log.
+#[cfg(target_os = "android")]
+fn clear_pending_flag<'local>(
+    env: &mut JNIEnv<'local>,
+    resolver: &JObject<'_>,
+    row: &PendingRow<'local>,
+) -> ClearOutcome {
+    let cv = match new_content_values(env) {
+        Ok(cv) => cv,
+        Err(e) => {
+            warn!(
+                display_name = %row.display_name,
+                row_id = %row.id,
+                api = row.api as i64,
+                error = %e,
+                "Could not build ContentValues for is_pending=0 — the row stays pending and will be deleted"
+            );
+            return ClearOutcome::Failed;
+        }
+    };
+    if let Err(e) = put_int_column(env, &cv, COLUMN_IS_PENDING, 0) {
+        warn!(
+            display_name = %row.display_name,
+            row_id = %row.id,
+            api = row.api as i64,
+            error = %e,
+            "Could not set is_pending=0 in ContentValues — the row stays pending and will be deleted"
+        );
+        return ClearOutcome::Failed;
+    }
+
+    let result = env
+        .call_method(
+            resolver,
+            "update",
+            "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I",
+            &[
+                JValue::Object(&row.uri),
+                JValue::Object(&cv),
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
+            ],
+        )
+        .and_then(|value| value.i());
+
+    match result {
+        Ok(rows) if rows > 0 => ClearOutcome::Updated,
+        Ok(rows) => {
+            warn!(
+                display_name = %row.display_name,
+                row_id = %row.id,
+                api = row.api as i64,
+                rows_updated = rows as i64,
+                uri = %row.uri_string,
+                "Clearing is_pending matched no MediaStore row — the file cannot be made visible and the row will be deleted"
+            );
+            ClearOutcome::NoRows
+        }
+        Err(e) => {
+            warn!(
+                display_name = %row.display_name,
+                row_id = %row.id,
+                api = row.api as i64,
+                error = %e,
+                "Clearing is_pending failed — the file cannot be made visible and the row will be deleted"
+            );
+            ClearOutcome::Failed
+        }
+    }
+}
+
+/// `resolver.delete(uri, null, null)` — the documented way for an app to
+/// remove a row it owns, and the only way an undeliverable pending row stops
+/// reserving its display name.
+#[cfg(target_os = "android")]
+fn delete_pending_row<'local>(
+    env: &mut JNIEnv<'local>,
+    resolver: &JObject<'_>,
+    row: &PendingRow<'local>,
+) -> PendingOutcome {
+    // The clear may itself have left an exception pending; deleting is a JNI
+    // call like any other and has the same restriction.
+    if let Some(exception) = take_pending_exception(env) {
+        warn!(
+            display_name = %row.display_name,
+            row_id = %row.id,
+            api = row.api as i64,
+            exception = %exception,
+            "Drained a pending Java exception before deleting the MediaStore row"
+        );
+    }
+
+    let result = env
+        .call_method(
+            resolver,
+            "delete",
+            "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I",
+            &[
+                JValue::Object(&row.uri),
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
+            ],
+        )
+        .and_then(|value| value.i());
+
+    match result {
+        // 0 rows still satisfies the invariant: there is no pending row left.
+        Ok(rows) if rows > 0 => {
+            warn!(
+                display_name = %row.display_name,
+                row_id = %row.id,
+                api = row.api as i64,
+                rows_deleted = rows as i64,
+                uri = %row.uri_string,
+                "Deleted the unpublished MediaStore row so nothing stays invisible in Download/Auralis"
+            );
+            PendingOutcome::Removed
+        }
+        Ok(rows) => {
+            warn!(
+                display_name = %row.display_name,
+                row_id = %row.id,
+                api = row.api as i64,
+                rows_deleted = rows as i64,
+                uri = %row.uri_string,
+                "The unpublished MediaStore row was already gone — nothing pending is left behind"
+            );
+            PendingOutcome::Removed
+        }
+        Err(e) => {
+            warn!(
+                display_name = %row.display_name,
+                row_id = %row.id,
+                api = row.api as i64,
+                error = %e,
+                uri = %row.uri_string,
+                "Could NOT delete the unpublished MediaStore row — it is still pending and invisible; remove it with `content delete --uri <uri>`"
+            );
+            PendingOutcome::Unresolved
+        }
+    }
+}
+
+/// Print a pending Java exception to logcat and clear it, returning its
+/// `toString()` for our own log line.
+///
+/// Two reasons this exists rather than a bare `exception_clear`:
+///
+/// * the message is what makes a `warn!` diagnosable — `jni::Error` renders a
+///   thrown exception as the bare string `JavaException`, and
+/// * the `update`/`delete` calls that follow a failure are only legal once the
+///   exception is gone.
+#[cfg(target_os = "android")]
+fn take_pending_exception(env: &mut JNIEnv<'_>) -> Option<String> {
+    match env.exception_check() {
+        Ok(true) => {}
+        // `Ok(false)`, or a failure of the check itself: nothing to drain.
+        _ => return None,
+    }
+    // ExceptionDescribe writes the Java stack trace to logcat, the only place
+    // a release build shows it.
+    let _ = env.exception_describe();
+    let throwable = env.exception_occurred().ok();
+    let text = match throwable {
+        Some(throwable) => {
+            let called = env
+                .call_method(&throwable, "toString", "()Ljava/lang/String;", &[])
+                .ok();
+            match called.and_then(|value| value.l().ok()) {
+                Some(obj) if !obj.is_null() => {
+                    let text = JString::from(obj);
+                    match env.get_string(&text) {
+                        Ok(java) => Some(java.into()),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        None => None,
+    };
+    let _ = env.exception_clear();
+    text
+}
+
+/// `Uri.toString()` plus the row id parsed from it. Log-only; both are needed
+/// to act on a row by hand from an adb shell.
+#[cfg(target_os = "android")]
+fn describe_uri(env: &mut JNIEnv<'_>, uri: &JObject<'_>) -> (String, String) {
+    let text = match env.call_method(uri, "toString", "()Ljava/lang/String;", &[]) {
+        Ok(value) => match value.l() {
+            Ok(obj) if !obj.is_null() => {
+                let text = JString::from(obj);
+                match env.get_string(&text) {
+                    Ok(java) => java.into(),
+                    Err(_) => String::new(),
+                }
+            }
+            _ => String::new(),
+        },
+        Err(_) => String::new(),
+    };
+    let id = text
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    (text, id)
+}
+
+#[cfg(target_os = "android")]
+fn new_content_values<'local>(env: &mut JNIEnv<'local>) -> Result<JObject<'local>, String> {
+    env.new_object("android/content/ContentValues", "()V", &[])
+        .map_err(|e| format!("new ContentValues: {e}"))
+}
+
+#[cfg(target_os = "android")]
+fn put_string_column<'local>(
+    env: &mut JNIEnv<'local>,
+    cv: &JObject<'_>,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let j_key = env
+        .new_string(key)
+        .map_err(|e| format!("new_string({key}): {e}"))?;
+    let j_value = env
+        .new_string(value)
+        .map_err(|e| format!("new_string({key} value): {e}"))?;
+    env.call_method(
+        cv,
+        "put",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        &[
+            JValue::Object(&j_key.into()),
+            JValue::Object(&j_value.into()),
+        ],
+    )
+    .map_err(|e| format!("ContentValues.put({key}): {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn put_int_column<'local>(
+    env: &mut JNIEnv<'local>,
+    cv: &JObject<'_>,
+    key: &str,
+    value: i32,
+) -> Result<(), String> {
+    let j_key = env
+        .new_string(key)
+        .map_err(|e| format!("new_string({key}): {e}"))?;
+    let j_value = env
+        .new_object("java/lang/Integer", "(I)V", &[JValue::Int(value)])
+        .map_err(|e| format!("new Integer({key}={value}): {e}"))?;
+    env.call_method(
+        cv,
+        "put",
+        "(Ljava/lang/String;Ljava/lang/Integer;)V",
+        &[JValue::Object(&j_key.into()), JValue::Object(&j_value)],
+    )
+    .map_err(|e| format!("ContentValues.put({key}): {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn open_output_stream<'local>(
+    env: &mut JNIEnv<'local>,
+    resolver: &JObject<'_>,
+    uri: &JObject<'_>,
+) -> Result<JObject<'local>, String> {
+    let os = env
+        .call_method(
+            resolver,
+            "openOutputStream",
+            "(Landroid/net/Uri;)Ljava/io/OutputStream;",
+            &[JValue::Object(uri)],
+        )
+        .and_then(|value| value.l())
+        .map_err(|e| format!("openOutputStream: {e}"))?;
+    if os.is_null() {
+        // A null stream is how `FileNotFoundException` surfaces when the
+        // provider declined the row; the exception itself is still pending and
+        // is drained by the caller.
+        return Err("openOutputStream returned null".into());
+    }
+    Ok(os)
+}
+
+/// Stream `src_path` into the row's `OutputStream`.
+///
+/// `close` is attempted on every path — including the failure paths — because
+/// `MediaProvider` keeps the row's size pinned until its last connection is
+/// closed, and because an abandoned stream leaks a provider connection. A
+/// failed `close` counts as a failed copy: the row is only published when the
+/// provider confirmed the whole write, and the internal copy (the one the
+/// library plays) is untouched either way.
+#[cfg(target_os = "android")]
+fn copy_into_media_store(
     env: &mut JNIEnv<'_>,
+    os: &JObject<'_>,
+    src_path: &Path,
+) -> Result<(), String> {
+    let mut result: Result<(), String> = Ok(());
+    let mut file = match std::fs::File::open(src_path) {
+        Ok(file) => file,
+        Err(e) => {
+            close_media_stream(env, os);
+            return Err(format!("open source for MediaStore copy: {e}"));
+        }
+    };
+    let mut buf = vec![0u8; COPY_CHUNK_BYTES];
+    loop {
+        let n = match std::io::Read::read(&mut file, &mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                result = Err(format!("read source for MediaStore copy: {e}"));
+                break;
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        let chunk = match env.byte_array_from_slice(&buf[..n]) {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                result = Err(format!("byte_array_from_slice: {e}"));
+                break;
+            }
+        };
+        let chunk = JObject::from(chunk);
+        if let Err(e) = env.call_method(os, "write", "([B)V", &[JValue::Object(&chunk)]) {
+            result = Err(format!("write to MediaStore row: {e}"));
+            break;
+        }
+    }
+    if result.is_ok() {
+        if let Err(e) = env.call_method(os, "flush", "()V", &[]) {
+            result = Err(format!("flush MediaStore row: {e}"));
+        }
+    }
+
+    // A failed JNI call above left a Java exception pending, and JNI forbids
+    // (almost) all calls while one is — so drain it before closing.
+    if result.is_err() {
+        if let Some(exception) = take_pending_exception(env) {
+            warn!(
+                src = %src_path.display(),
+                exception = %exception,
+                "Drained a pending Java exception before closing the MediaStore stream"
+            );
+        }
+    }
+    if let Err(e) = env.call_method(os, "close", "()V", &[]) {
+        let _ = take_pending_exception(env);
+        if result.is_ok() {
+            result = Err(format!("close MediaStore row: {e}"));
+        } else {
+            warn!(
+                src = %src_path.display(),
+                error = %e,
+                "Closing the MediaStore stream failed on top of an already failed copy"
+            );
+        }
+    }
+    result
+}
+
+/// Best-effort `OutputStream.close()`. Used on the paths where the copy never
+/// started, so a stream is never left open without a log line.
+#[cfg(target_os = "android")]
+fn close_media_stream(env: &mut JNIEnv<'_>, os: &JObject<'_>) {
+    if let Err(e) = env.call_method(os, "close", "()V", &[]) {
+        let _ = take_pending_exception(env);
+        warn!(error = %e, "Closing the MediaStore stream failed");
+    }
+}
+
+#[cfg(target_os = "android")]
+fn publish_q<'local>(
+    env: &mut JNIEnv<'local>,
     resolver: &JObject<'_>,
     _ctx: &JObject<'_>,
+    sdk: i32,
     src_path: &Path,
     display_name: &str,
     mime: &str,
 ) -> Result<String, String> {
-    // Build ContentValues
-    let cv_class = env
-        .find_class("android/content/ContentValues")
-        .map_err(|e| e.to_string())?;
-    let cv = env
-        .new_object(cv_class, "()V", &[])
-        .map_err(|e| e.to_string())?;
-    let j_display = env.new_string(display_name).map_err(|e| e.to_string())?;
-    let j_mime = env.new_string(mime).map_err(|e| e.to_string())?;
-    let j_rel = env
-        .new_string("Download/Auralis")
-        .map_err(|e| e.to_string())?;
-    // put(String, String)
-    env.call_method(
-        &cv,
-        "put",
-        "(Ljava/lang/String;Ljava/lang/String;)V",
-        &[
-            JValue::Object(
-                &env.new_string("display_name")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-            ),
-            JValue::Object(&j_display.into()),
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    env.call_method(
-        &cv,
-        "put",
-        "(Ljava/lang/String;Ljava/lang/String;)V",
-        &[
-            JValue::Object(
-                &env.new_string("mime_type")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-            ),
-            JValue::Object(&j_mime.into()),
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    env.call_method(
-        &cv,
-        "put",
-        "(Ljava/lang/String;Ljava/lang/String;)V",
-        &[
-            JValue::Object(
-                &env.new_string("relative_path")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-            ),
-            JValue::Object(&j_rel.into()),
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    // put(String, Integer) for is_pending = 1
-    let j_pending_key = env.new_string("is_pending").map_err(|e| e.to_string())?;
-    let integer_class = env
-        .find_class("java/lang/Integer")
-        .map_err(|e| e.to_string())?;
-    let j_one = env
-        .new_object(integer_class, "(I)V", &[JValue::Int(1)])
-        .map_err(|e| e.to_string())?;
-    env.call_method(
-        &cv,
-        "put",
-        "(Ljava/lang/String;Ljava/lang/Integer;)V",
-        &[
-            JValue::Object(&j_pending_key.into()),
-            JValue::Object(&j_one),
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+    // --- insert: this is the point of no return, the row exists from here on --
+    let cv = new_content_values(env)?;
+    put_string_column(env, &cv, COLUMN_DISPLAY_NAME, display_name)?;
+    put_string_column(env, &cv, COLUMN_MIME_TYPE, mime)?;
+    put_string_column(env, &cv, COLUMN_RELATIVE_PATH, PUBLIC_RELATIVE_PATH)?;
+    put_int_column(env, &cv, COLUMN_IS_PENDING, 1)?;
 
-    // MediaStore.Downloads.EXTERNAL_CONTENT_URI
     let downloads_class = env
         .find_class("android/provider/MediaStore$Downloads")
         .map_err(|e| e.to_string())?;
@@ -210,108 +717,149 @@ fn publish_q(
         .l()
         .map_err(|e| e.to_string())?;
 
-    // resolver.insert(uri, cv) -> Uri
-    let out_uri = env
+    let out_uri = match env
         .call_method(
             resolver,
             "insert",
             "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
             &[JValue::Object(&uri), JValue::Object(&cv)],
         )
-        .map_err(|e| format!("insert: {e}"))?
-        .l()
-        .map_err(|e| e.to_string())?;
-    if out_uri.is_null() {
-        return Err("insert returned null uri".into());
-    }
-
-    // resolver.openOutputStream(uri) -> OutputStream
-    let os = env
-        .call_method(
-            resolver,
-            "openOutputStream",
-            "(Landroid/net/Uri;)Ljava/io/OutputStream;",
-            &[JValue::Object(&out_uri)],
-        )
-        .map_err(|e| format!("openOutputStream: {e}"))?
-        .l()
-        .map_err(|e| e.to_string())?;
-    if os.is_null() {
-        return Err("openOutputStream returned null".into());
-    }
-
-    // Stream src file bytes into OutputStream in 64KB chunks via JNI
+        .and_then(|value| value.l())
     {
-        let mut file = std::fs::File::open(src_path).map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = std::io::Read::read(&mut file, &mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            let jarr = env
-                .byte_array_from_slice(&buf[..n])
-                .map_err(|e| e.to_string())?;
-            let jarr_obj = JObject::from(jarr);
-            env.call_method(&os, "write", "([B)V", &[JValue::Object(&jarr_obj)])
-                .map_err(|e| format!("write: {e}"))?;
+        Ok(out_uri) => out_uri,
+        Err(e) => {
+            // No row was created, so there is nothing to resolve.
+            let exception = take_pending_exception(env);
+            return Err(format!(
+                "MediaStore insert failed for '{}' (api {}): {}{}",
+                display_name,
+                sdk,
+                e,
+                exception_note(exception.as_deref())
+            ));
         }
-        env.call_method(&os, "flush", "()V", &[])
-            .map_err(|e| e.to_string())?;
-        env.call_method(&os, "close", "()V", &[])
-            .map_err(|e| e.to_string())?;
+    };
+    if out_uri.is_null() {
+        let exception = take_pending_exception(env);
+        warn!(
+            display_name = %display_name,
+            api = sdk as i64,
+            exception = %exception.as_deref().unwrap_or("none"),
+            "MediaStore insert returned a null uri — no row was created"
+        );
+        return Err(format!(
+            "MediaStore insert returned a null uri for '{}' (api {}){}",
+            display_name,
+            sdk,
+            exception_note(exception.as_deref())
+        ));
     }
 
-    // Clear IS_PENDING = 0
-    let cv_class2 = env
-        .find_class("android/content/ContentValues")
-        .map_err(|e| e.to_string())?;
-    let cv2 = env
-        .new_object(cv_class2, "()V", &[])
-        .map_err(|e| e.to_string())?;
-    let j_pending_key2 = env.new_string("is_pending").map_err(|e| e.to_string())?;
-    let integer_class2 = env
-        .find_class("java/lang/Integer")
-        .map_err(|e| e.to_string())?;
-    let j_zero = env
-        .new_object(integer_class2, "(I)V", &[JValue::Int(0)])
-        .map_err(|e| e.to_string())?;
-    env.call_method(
-        &cv2,
-        "put",
-        "(Ljava/lang/String;Ljava/lang/Integer;)V",
-        &[
-            JValue::Object(&j_pending_key2.into()),
-            JValue::Object(&j_zero),
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    env.call_method(
-        resolver,
-        "update",
-        "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I",
-        &[
-            JValue::Object(&out_uri),
-            JValue::Object(&cv2),
-            JValue::Object(&JObject::null()),
-            JValue::Object(&JObject::null()),
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+    let (uri_string, row_id) = describe_uri(env, &out_uri);
+    let row = PendingRow {
+        uri: out_uri,
+        id: row_id,
+        uri_string,
+        display_name: display_name.to_string(),
+        api: sdk,
+    };
+    // Belt and braces: nothing above should have left a Java exception
+    // pending (`jni` reports a throw as `Err`), but every JNI call below this
+    // line is only legal if that is true, and the alternative to a drain here
+    // is an abort inside the VM.
+    if let Some(exception) = take_pending_exception(env) {
+        warn!(
+            display_name = %row.display_name,
+            row_id = %row.id,
+            api = row.api as i64,
+            exception = %exception,
+            "Drained a pending Java exception after the MediaStore insert"
+        );
+    }
+    info!(
+        display_name = %row.display_name,
+        row_id = %row.id,
+        api = row.api as i64,
+        uri = %row.uri_string,
+        "Inserted MediaStore row with is_pending=1 (invisible until cleared)"
+    );
 
-    // Public path: resolver queries _data or build via Environment + Download/Auralis/display_name
-    // Simpler: return /storage/emulated/0/Download/Auralis/<display>
-    Ok(format!(
-        "/storage/emulated/0/Download/Auralis/{}",
-        display_name
-    ))
+    // --- open the row's stream --
+    let os = match open_output_stream(env, resolver, &row.uri) {
+        Ok(os) => os,
+        Err(e) => {
+            // Nothing was written, so the row must not be published: resolve it
+            // (which deletes it) before bailing out.
+            let outcome = resolve_pending_row(env, resolver, &row, CopyOutcome::Failed);
+            return Err(format!(
+                "{} [{}]",
+                e,
+                unresolved_note(&row, outcome, "no bytes were written")
+            ));
+        }
+    };
+
+    // --- copy the bytes --
+    let copy_res = copy_into_media_store(env, &os, src_path);
+    let (copy, note) = match &copy_res {
+        Ok(()) => (CopyOutcome::Complete, "the byte copy completed".to_string()),
+        Err(e) => (CopyOutcome::Failed, e.clone()),
+    };
+    if let Err(e) = &copy_res {
+        warn!(
+            display_name = %row.display_name,
+            row_id = %row.id,
+            api = row.api as i64,
+            error = %e,
+            "MediaStore byte copy failed — the row will not be published"
+        );
+    }
+
+    // --- resolve the row: always, success included --
+    match resolve_pending_row(env, resolver, &row, copy) {
+        PendingOutcome::Visible => Ok(format!("{PUBLIC_ABSOLUTE_DIR}/{display_name}")),
+        outcome => Err(unresolved_note(&row, outcome, &note)),
+    }
 }
 
+/// One-line summary of what happened to a row that never became visible, used
+/// as the error the caller (and its `warn!`) reports.
+#[cfg(target_os = "android")]
+fn unresolved_note(row: &PendingRow<'_>, outcome: PendingOutcome, reason: &str) -> String {
+    match outcome {
+        PendingOutcome::Visible => {
+            format!("MediaStore row {} for '{}' is visible", row.id, row.display_name)
+        }
+        PendingOutcome::Removed => format!(
+            "MediaStore copy of '{}' (api {}) was not published because {}; the pending row {} was removed",
+            row.display_name, row.api, reason, row.id
+        ),
+        PendingOutcome::Unresolved => format!(
+            "MediaStore copy of '{}' (api {}) was not published because {}; the pending row {} could NOT be deleted and is still invisible at {}",
+            row.display_name, row.api, reason, row.id, row.uri_string
+        ),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn exception_note(exception: Option<&str>) -> String {
+    match exception {
+        Some(text) => format!(" [java exception: {text}]"),
+        None => String::new(),
+    }
+}
+
+/// API 26-28: no `is_pending` protocol exists here, so there is no pending row
+/// to leak — the file lands on the filesystem and the media scanner indexes it
+/// directly. The only discipline worth adding is to say *where* it went and on
+/// which API, since a `scanFile` that throws leaves a file the file manager may
+/// only pick up on the next boot scan.
 #[cfg(target_os = "android")]
 fn publish_legacy(
     env: &mut JNIEnv<'_>,
     resolver: &JObject<'_>,
     ctx: &JObject<'_>,
+    sdk: i32,
     src_path: &Path,
     display_name: &str,
 ) -> Result<String, String> {
@@ -369,10 +917,10 @@ fn publish_legacy(
     std::fs::create_dir_all(
         std::path::Path::new(&dest_path)
             .parent()
-            .unwrap_or(std::path::Path::new("/storage/emulated/0/Download")),
+            .unwrap_or(std::path::Path::new(PUBLIC_ABSOLUTE_DIR)),
     )
-    .map_err(|e| e.to_string())?;
-    std::fs::copy(src_path, &dest_path).map_err(|e| e.to_string())?;
+    .map_err(|e| format!("create {}: {}", PUBLIC_ABSOLUTE_DIR, e))?;
+    std::fs::copy(src_path, &dest_path).map_err(|e| format!("copy to {dest_path}: {e}"))?;
 
     // MediaScannerConnection.scanFile(ctx, [path], null, null)
     let scanner_class = env
@@ -382,19 +930,41 @@ fn publish_legacy(
     let arr = env
         .new_object_array(1, "java/lang/String", &j_path)
         .map_err(|e| e.to_string())?;
-    env.call_static_method(
-        scanner_class,
-        "scanFile",
-        "(Landroid/content/Context;[Ljava/lang/String;[Ljava/lang/String;Landroid/media/MediaScannerConnection$OnScanCompletedListener;)V",
-        &[
-            JValue::Object(ctx),
-            JValue::Object(&arr.into()),
-            JValue::Object(&JObject::null()),
-            JValue::Object(&JObject::null()),
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+    let scan = env
+        .call_static_method(
+            scanner_class,
+            "scanFile",
+            "(Landroid/content/Context;[Ljava/lang/String;[Ljava/lang/String;Landroid/media/MediaScannerConnection$OnScanCompletedListener;)V",
+            &[
+                JValue::Object(ctx),
+                JValue::Object(&arr.into()),
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
+            ],
+        )
+        .map_err(|e| format!("MediaScannerConnection.scanFile: {e}"));
+    if let Err(e) = &scan {
+        // The file is already on disk, so this is cosmetic — but the file
+        // manager may not list it until the next boot scan, and this is the
+        // only hint that says why.
+        let exception = take_pending_exception(env);
+        warn!(
+            display = %display_name,
+            api = sdk as i64,
+            path = %dest_path,
+            error = %e,
+            exception = %exception.as_deref().unwrap_or("none"),
+            "MediaScannerConnection.scanFile failed; the file is on disk but may stay unindexed"
+        );
+        return Err(format!("{}{}", e, exception_note(exception.as_deref())));
+    }
     let _ = resolver;
+    info!(
+        display = %display_name,
+        api = sdk as i64,
+        path = %dest_path,
+        "Legacy publish: file copied and handed to the media scanner (no is_pending below API 29)"
+    );
     Ok(dest_path)
 }
 
@@ -428,18 +998,14 @@ fn with_attached_env<T>(
     let vm = cached_vm()?;
     let mut guard = vm.attach_current_thread().ok()?;
     let res = f(&mut guard);
+    // Outer safety net: the publish paths drain a pending exception before
+    // every follow-up JNI call, but a thread that hands back to Java with one
+    // still pending makes the *next* JNI call on that thread undefined
+    // behaviour, so nothing may leave here with one.
     if guard.exception_check().unwrap_or(false) {
         let _ = guard.exception_clear();
     }
-    match res {
-        Ok(v) => Some(Ok(v)),
-        Err(e) => {
-            if guard.exception_check().unwrap_or(false) {
-                let _ = guard.exception_clear();
-            }
-            Some(Err(e))
-        }
-    }
+    Some(res)
 }
 
 #[cfg(target_os = "android")]
@@ -639,4 +1205,95 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
         Ok(std::path::PathBuf::from(cache_path))
     })
     .and_then(|r| r.ok())
+}
+
+/// The JNI side of publishing cannot be exercised off-device, but the decision
+/// that makes DL-07 impossible to regress — "clear, or delete?" — is pure and
+/// lives in [`next_step`]. These tests are the executable form of the
+/// invariant; [`resolve_pending_row`] is the only caller and is a straight-line
+/// transcription of the table.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_copy_clears_then_stops() {
+        // The happy path stops right after a successful clear: no delete, so a
+        // published row is never removed.
+        assert_eq!(
+            next_step(CopyOutcome::Complete, ClearOutcome::NotAttempted),
+            Some(PendingStep::Clear)
+        );
+        assert_eq!(
+            next_step(CopyOutcome::Complete, ClearOutcome::Updated),
+            None
+        );
+    }
+
+    #[test]
+    fn incomplete_copy_is_never_cleared() {
+        // A truncated row must not be published, whatever the clear said.
+        for clear in [
+            ClearOutcome::NotAttempted,
+            ClearOutcome::Updated,
+            ClearOutcome::NoRows,
+            ClearOutcome::Failed,
+        ] {
+            assert_eq!(
+                next_step(CopyOutcome::Failed, clear),
+                Some(PendingStep::Delete),
+                "a failed copy must delete, never clear (clear = {clear:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn unclearable_row_is_deleted_not_left_pending() {
+        // DL-07: a clear that throws, or that matches 0 rows, leaves the file
+        // invisible either way. Deleting is the only outcome that satisfies
+        // "always made visible or removed".
+        assert_eq!(
+            next_step(CopyOutcome::Complete, ClearOutcome::Failed),
+            Some(PendingStep::Delete)
+        );
+        assert_eq!(
+            next_step(CopyOutcome::Complete, ClearOutcome::NoRows),
+            Some(PendingStep::Delete)
+        );
+    }
+
+    #[test]
+    fn every_copy_and_clear_combination_terminates() {
+        // The invariant: `Clear` comes back at most once and only for a
+        // complete copy whose clear has not been attempted — so the caller's
+        // two-step sequence cannot loop, cannot retry a clear, and cannot end
+        // with a pending row nobody resolved.
+        for copy in [CopyOutcome::Complete, CopyOutcome::Failed] {
+            for clear in [
+                ClearOutcome::NotAttempted,
+                ClearOutcome::Updated,
+                ClearOutcome::NoRows,
+                ClearOutcome::Failed,
+            ] {
+                let step = next_step(copy, clear);
+                if step == Some(PendingStep::Clear) {
+                    assert_eq!(copy, CopyOutcome::Complete, "{copy:?}/{clear:?}");
+                    assert_eq!(clear, ClearOutcome::NotAttempted, "{copy:?}/{clear:?}");
+                }
+                // The only way out without a step is a published row.
+                if step == None {
+                    assert_eq!(copy, CopyOutcome::Complete, "{copy:?}/{clear:?}");
+                    assert_eq!(clear, ClearOutcome::Updated, "{copy:?}/{clear:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mime_for_ext_covers_the_formats_we_publish() {
+        assert_eq!(mime_for_ext("mp3"), "audio/mpeg");
+        assert_eq!(mime_for_ext("M4A"), "audio/mp4");
+        assert_eq!(mime_for_ext("opus"), "audio/opus");
+        assert_eq!(mime_for_ext("unknown"), "audio/mpeg");
+    }
 }
