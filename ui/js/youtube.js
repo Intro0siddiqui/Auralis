@@ -503,17 +503,29 @@ class YouTubeResolver {
         // caveat and was the client a device report showed returning real audio
         // (22 adaptive / 4 with urls). So ANDROID_VR is the better first bet.
         //
-        // `web_safari` is here because it replaced `tv_simply` in yt-dlp's
-        // defaults and IS web-family, so our token serves it — and it is the one
-        // web client we had never actually tried, on a network where mweb and
-        // web both came back UNPLAYABLE. An experiment, not a claim.
-        const SERVABLE_CLIENTS = ['MWEB', 'WEB', 'WEB_SAFARI'];
+        // `web_safari` was here and has been REMOVED. It is not a client name
+        // the vendored InnerTube library knows: `ui/vendor/youtubei.esm.mjs`
+        // validates the name against a 15-entry allowlist and throws
+        // `Invalid client: WEB_SAFARI` otherwise, so it cost a failed round trip
+        // on every resolve and could never return a result. Measured, from the
+        // device client report: `WEB_SAFARI: error ... err=Invalid client:
+        // WEB_SAFARI` in 8ms. The allowlist is IOS, WEB, MWEB, YTKIDS, YTMUSIC,
+        // ANDROID, ANDROID_VR, VISIONOS, YTSTUDIO_ANDROID, YTMUSIC_ANDROID, TV,
+        // TV_SIMPLY, TV_EMBEDDED, WEB_EMBEDDED, WEB_CREATOR.
+        //
+        // Whether one of the allowlisted clients we do not emit (WEB_EMBEDDED,
+        // VISIONOS) would resolve where mweb and web come back UNPLAYABLE is
+        // still an open question — but it is not urgent, because a device report
+        // has now produced a client that WORKS (ANDROID, via the legacy
+        // progressive path). Churning the ordering for an untried client is not
+        // worth breaking the one we can measure. Left for a report to motivate.
+        const SERVABLE_CLIENTS = ['MWEB', 'WEB'];
         const TOKEN_FREE_CLIENTS = ['ANDROID_VR', 'TV'];
         const UNMINTABLE_CLIENTS = ['IOS', 'ANDROID'];
         const orderedClients = opts.poToken
             ? [...SERVABLE_CLIENTS, ...TOKEN_FREE_CLIENTS, ...UNMINTABLE_CLIENTS]
             : [...TOKEN_FREE_CLIENTS, ...SERVABLE_CLIENTS, ...UNMINTABLE_CLIENTS];
-        // 2026 Jio sn-gwpa-cived gates TV too — caller may exclude TV on 403 retry (ANDROID+pot or WEB_SAFARI).
+        // 2026 Jio sn-gwpa-cived gates TV too — caller may exclude TV on 403 retry (ANDROID, or MWEB/WEB).
         // Keep const orderedClients for test regex; apply caller overrides via effective list.
         let effectiveOrderedClients = [...orderedClients];
         // Allow caller (downloads.js 403 auto-retry) to exclude a client or force rotation
@@ -558,6 +570,7 @@ class YouTubeResolver {
                         progressive: 0,
                         adaptiveWithUrl: 0,
                         audioWithUrl: 0,
+                        progressiveWithUrl: 0,
                         sabrStreamingUrl: false,
                         ms: 0,
                     };
@@ -574,13 +587,31 @@ class YouTubeResolver {
                         entry.progressive = (sd?.formats?.length || 0);
                         entry.adaptiveWithUrl = rawAdapt.filter(urlOf).length;
                         entry.audioWithUrl = rawAdapt.filter((f) => String(f.mimeType || '').startsWith('audio/') && urlOf(f)).length;
+                        // Whether the MUXED progressive formats carry a url.
+                        // This is not redundant with `progressive`, and the gap
+                        // was load-bearing: downloads.js decides which client is
+                        // worth retrying by asking `audioWithUrl > 0`, which only
+                        // counts ADAPTIVE audio. A client whose sole usable url is
+                        // the muxed progressive itag 18 therefore scores zero and
+                        // gets locked out as a dead end — and on the device
+                        // (2026-09-26) ANDROID was exactly that client, and the
+                        // only one that has ever completed a download. The
+                        // filter could not see the path that worked because the
+                        // report never recorded it.
+                        entry.progressiveWithUrl = (sd?.formats || []).filter(urlOf).length;
                         entry.sabrStreamingUrl = Boolean(sd?.serverAbrStreamingUrl);
                         // A client that answered but exposed only SABR metadata is
                         // materially different from one that returned real CDN urls.
-                        if (entry.sabrStreamingUrl && entry.audioWithUrl === 0) {
+                        if (entry.sabrStreamingUrl && entry.audioWithUrl === 0 && entry.progressiveWithUrl === 0) {
                             entry.reason = 'sabr-only';
-                        } else if (entry.adaptive > 0 && entry.adaptiveWithUrl === 0) {
+                        } else if (entry.adaptive > 0 && entry.adaptiveWithUrl === 0 && entry.progressiveWithUrl === 0) {
                             entry.reason = 'adaptive-urls-missing';
+                        } else if (entry.audioWithUrl === 0 && entry.progressiveWithUrl > 0) {
+                            // Servable, but only through the muxed path. Worth
+                            // naming, because this is the shape that produced the
+                            // one success we have, and it reads as a failure next
+                            // to a client with adaptive audio urls.
+                            entry.reason = 'progressive-only';
                         }
                         console.log(`[YouTubeResolver] actions.execute('${cl}') -> status: ${st}, formats: ${totalFormats}, adaptiveWithUrl: ${entry.adaptiveWithUrl}, audioWithUrl: ${entry.audioWithUrl}, sabr: ${entry.sabrStreamingUrl}`);
                         if (sd && (sd.adaptiveFormats?.length || sd.formats?.length)) {
@@ -678,6 +709,7 @@ class YouTubeResolver {
                         progressive: 0,
                         adaptiveWithUrl: 0,
                         audioWithUrl: 0,
+                        progressiveWithUrl: 0,
                         sabrStreamingUrl: false,
                         ms: 0,
                     };
@@ -693,6 +725,11 @@ class YouTubeResolver {
                             entry.progressive = (sd.formats || []).length;
                             entry.adaptiveWithUrl = adapt.filter(urlOf).length;
                             entry.audioWithUrl = adapt.filter((f) => isAudioFormat(f) && urlOf(f)).length;
+                            // Same gap as the actions.execute path: `audioWithUrl`
+                            // counts adaptive audio only, so a client that can
+                            // serve purely through the muxed progressive url reads
+                            // as unable to serve at all. See the long note there.
+                            entry.progressiveWithUrl = (sd.formats || []).filter(urlOf).length;
                             if (candidates.length > 0) {
                                 if (hasDirectOrDecipherableAudio(res)) {
                                     entry.ok = true;
@@ -1041,10 +1078,13 @@ class YouTubeResolver {
             'TV': 'Mozilla/5.0 (ChromiumStylePlatform) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'MWEB': 'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
             'WEB': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            // MUST exist. `uaMap[winningClient] || uaMap['ANDROID']` would otherwise
-            // put an Android app UA on a web_safari URL — the same UA/token
-            // mismatch class that produced the byte-0 403 fixed in v2.6.50.
-            'WEB_SAFARI': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+            // The `WEB_SAFARI` entry that used to sit here is gone with the
+            // client. Keeping a UA for a client the resolver cannot emit is how
+            // the mismatch above happened in the first place: the entry made
+            // `WEB_SAFARI` *look* wired up, so the invalid name survived review.
+            // The invariant is now enforced by test instead — every client
+            // `orderedClients` can emit must have an entry here, and anything
+            // without one is a client we must not emit.
         };
         const headers = {
             'User-Agent': uaMap[winningClient] || uaMap['ANDROID'],

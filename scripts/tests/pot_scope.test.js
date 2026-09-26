@@ -156,7 +156,7 @@ describe('WEB_FAMILY_CLIENTS cannot name a client the resolver cannot produce', 
         // If a web client is ever added to orderedClients, it must be classified
         // here on purpose rather than defaulting into the "no token" branch.
         for (const c of produced) {
-            if (/^(MWEB|WEB|WEB_SAFARI)$/.test(c)) {
+            if (/^(MWEB|WEB)$/.test(c)) {
                 assert.ok(WEB_FAMILY_CLIENTS.includes(c), `${c} is web-family and must be in WEB_FAMILY_CLIENTS`);
             }
         }

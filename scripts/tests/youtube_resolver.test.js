@@ -276,7 +276,7 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         const tokenFree = group('TOKEN_FREE_CLIENTS');
         const unmintable = group('UNMINTABLE_CLIENTS');
 
-        assert.deepEqual(servable, ['MWEB', 'WEB', 'WEB_SAFARI'],
+        assert.deepEqual(servable, ['MWEB', 'WEB'],
             'web-family clients are the only ones a BotGuard token is valid on');
         assert.deepEqual(tokenFree, ['ANDROID_VR', 'TV'],
             'ANDROID_VR before TV: tv is DRM-capped without cookies and we send none');
@@ -286,7 +286,7 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         // Disjoint and complete: no client may be in two groups, or in none.
         const all = [...servable, ...tokenFree, ...unmintable];
         assert.equal(new Set(all).size, all.length, 'a client appears in more than one group');
-        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB', 'WEB_SAFARI']) {
+        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
             assert.ok(all.includes(c), `${c} is in no group, so it can never be tried`);
         }
 
@@ -306,8 +306,33 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         // is the same UA/client mismatch that produced the byte-0 403.
         const uaBlock = src.match(/const uaMap = \{([\s\S]*?)\n\s*\};/);
         assert.ok(uaBlock, 'uaMap not found');
-        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB', 'WEB_SAFARI']) {
+        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
             assert.ok(uaBlock[1].includes(`'${c}':`), `uaMap has no entry for ${c}`);
+        }
+    });
+
+    it('every client the resolver can emit is a name the vendored InnerTube library accepts', () => {
+        // WEB_SAFARI shipped in v2.6.51 as "the one web client we had never
+        // tried". It is not a client name at all: youtubei.esm.mjs validates
+        // against a fixed allowlist and throws `Invalid client: WEB_SAFARI`, so
+        // it failed in 8ms on every resolve and could never return a url. The
+        // device report is what surfaced it, which means no test was reading the
+        // thing that decides whether a client name is real.
+        const allowlist = ['IOS', 'WEB', 'MWEB', 'YTKIDS', 'YTMUSIC', 'ANDROID',
+            'ANDROID_VR', 'VISIONOS', 'YTSTUDIO_ANDROID', 'YTMUSIC_ANDROID',
+            'TV', 'TV_SIMPLY', 'TV_EMBEDDED', 'WEB_EMBEDDED', 'WEB_CREATOR'];
+        const group = (name) => {
+            const m = src.match(new RegExp(`const ${name} = \\[([^\\]]+)\\]`));
+            assert.ok(m, `${name} group not found in youtube.js`);
+            return (m[1].match(/'([A-Z_]+)'/g) || []).map((x) => x.replace(/'/g, ''));
+        };
+        const emitted = [...group('SERVABLE_CLIENTS'), ...group('TOKEN_FREE_CLIENTS'),
+            ...group('UNMINTABLE_CLIENTS')];
+        assert.ok(emitted.length > 0, 'no clients parsed — the regex must match the const declarations');
+        for (const c of emitted) {
+            assert.ok(allowlist.includes(c),
+                `${c} is not in the vendored library's client allowlist, so actions.execute throws ` +
+                `"Invalid client: ${c}" and it can never resolve`);
         }
     });
 
@@ -895,6 +920,76 @@ describe('YouTube Search & Streaming Integration', () => {
         ({ obj, calls } = makeCtx(['IOS', 'ANDROID_VR']));
         await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: truncated });
         assert.equal(calls.length, 0, 'must not rotate into a client the report proves cannot serve audio');
+    });
+
+    it('a client serving audio through the muxed progressive url counts as servable', async () => {
+        // The real per-client report from the device, 2026-09-26, track
+        // hsXKOsnptw4 — the download that failed:
+        //
+        //   IOS        OK  adaptiveWithUrl=21 audioWithUrl=4   -> 403 at byte 0
+        //   ANDROID_VR OK  adaptiveWithUrl=21 audioWithUrl=4   -> 403 at byte 0
+        //   ANDROID    OK  adaptiveWithUrl=0  audioWithUrl=0 progressive=1
+        //
+        // and the report from the track that SUCCEEDED, Ral6kFSx7ZY:
+        //
+        //   ANDROID    CHOSEN OK adaptiveWithUrl=0 audioWithUrl=0 progressive=1
+        //               -> itag=18 muxed progressive -> downloaded
+        //
+        // So ANDROID served audio, and only through the muxed progressive url.
+        // The old predicate asked `audioWithUrl > 0`, which counts adaptive audio
+        // only, so ANDROID scored 0 and was classified a dead end — locking out
+        // the only client that has ever completed a download on this network.
+        // The retry then rotated IOS -> ANDROID_VR, which 403'd identically and
+        // consumed the final attempt. This test pins the corrected predicate.
+        const report = [
+            { client: 'IOS', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 21, progressiveWithUrl: 0 },
+            { client: 'ANDROID_VR', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 21, progressiveWithUrl: 1 },
+            { client: 'ANDROID', status: 'OK', audioWithUrl: 0, adaptiveWithUrl: 0, progressiveWithUrl: 1, sabrStreamingUrl: true },
+            { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'WEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+        ];
+        // Ordered as the device report shows it, with a token present:
+        // SERVABLE, then TOKEN_FREE, then UNMINTABLE.
+        const ordered = ['MWEB', 'WEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
+        const err403 = 'HTTP 403 Forbidden [rr1---sn-gwpa-civey.googlevideo.com] body: (empty body), start_byte=0';
+
+        const calls = [];
+        const obj = {
+            ...downloadMethods,
+            _pendingDownloadContexts: new Map(),
+            extractErrorMessage: (p) => p.error || '',
+            showToast: () => {},
+            getDownloadOptions: () => ({}),
+            downloadResolvedTrack: async (r, f, o) => { calls.push({ client: r.client }); return { id: 'next' }; },
+        };
+        obj._autoRetryBudget = new Map([['hsXKOsnptw4', { attempts: 1, triedClients: ['IOS'] }]]);
+        obj._pendingDownloadContexts.set('dl1', {
+            key: 'hsXKOsnptw4',
+            // IOS won, then 403'd, so it is the client being rotated away from.
+            resolved: { client: 'IOS', orderedClients: ordered, client_report: report },
+            opts: {}, originalUrl: 'https://youtu.be/hsXKOsnptw4', format: 'm4a', _retrying: false,
+        });
+        global.window = global.window || {};
+        global.window.AuralisYouTube = {
+            resolve: async (_u, o) => ({ kind: 'track', stream_url: 'https://x/', client: o.forceClient, client_report: report }),
+        };
+
+        await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: err403 });
+        assert.equal(calls.length, 1, 'exactly one retry expected');
+        assert.equal(calls[0].client, 'ANDROID',
+            'the progressive-only client is the one that has actually downloaded a file; ' +
+            'it must be chosen over another adaptive client that already 403\'d');
+
+        // And the report itself must carry the measurement the predicate reads.
+        // Without progressiveWithUrl in the recorded entry the filter is guessing,
+        // so pin the field at its source rather than only at the consumer.
+        const uiDir = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js');
+        const ysrc = fs.readFileSync(path.join(uiDir, 'youtube.js'), 'utf8');
+        assert.ok(/progressiveWithUrl = \(sd\?\.formats \|\| \[\]\)\.filter\(urlOf\)\.length/.test(ysrc),
+            'the actions.execute report must record whether progressive formats carry urls');
+        assert.ok(/entry\.progressiveWithUrl = \(sd\.formats \|\| \[\]\)\.filter\(urlOf\)\.length/.test(ysrc),
+            'the getInfo report must record the same, or the two paths disagree');
     });
 
     it('downloader tops a windowed (SABR) partial download up with explicit ranges', () => {

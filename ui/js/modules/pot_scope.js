@@ -25,10 +25,12 @@
  * we have no way to mint. So `TV` must stay out — a web token on a TV URL is
  * downside with no upside, since TV does not want a token from any source.
  *
- * `WEB_SAFARI` is here because `orderedClients` in youtube.js now emits it: it
- * replaced `tv_simply` in yt-dlp's defaults, it is web-family, and it needs a GVS
- * token we can mint. It is the one web client we had never tried, which matters
- * on a network where mweb and web both resolve to nothing.
+ * `WEB_SAFARI` was in this list and has been removed. It is not a name the
+ * vendored InnerTube library accepts — `ui/vendor/youtubei.esm.mjs` validates
+ * against a 15-entry allowlist and throws `Invalid client: WEB_SAFARI`
+ * otherwise — so it could never produce a url to reason about. A token-scope
+ * allowlist entry for a client that cannot be emitted is a trap: it looks
+ * handled, and the failure surfaces somewhere else entirely.
  *
  * `scripts/tests/pot_scope.test.js` asserts every member of this list appears in
  * `orderedClients`, and that every web-family client `orderedClients` can emit is
@@ -36,7 +38,7 @@
  * the resolver cannot produce is a trap that fails silently the day someone wires
  * the client up.
  */
-export const WEB_FAMILY_CLIENTS = ['MWEB', 'WEB', 'WEB_SAFARI'];
+export const WEB_FAMILY_CLIENTS = ['MWEB', 'WEB'];
 
 /**
  * May a token ride along on a URL produced by `winningClient`?

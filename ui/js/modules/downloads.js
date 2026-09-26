@@ -78,6 +78,12 @@ export const downloadMethods = {
                         `progressive=${r.progressive}`,
                         `adaptiveWithUrl=${r.adaptiveWithUrl}`,
                         `audioWithUrl=${r.audioWithUrl}`,
+                        // Printed because the one client that has ever completed a
+                        // download on the test network served audio through this
+                        // field alone, and it was invisible in the report that
+                        // would have shown us. A measurement nobody can read is
+                        // the same as no measurement.
+                        `progressiveWithUrl=${r.progressiveWithUrl ?? 0}`,
                         `sabr=${r.sabrStreamingUrl ? 'yes' : 'no'}`,
                         r.ms ? `${r.ms}ms` : null,
                         r.error ? `err=${String(r.error).slice(0, 120)}` : null,
@@ -191,11 +197,19 @@ export const downloadMethods = {
             if (failed && !tried.includes(failed)) tried.push(failed);
         }
         // A client whose own reaction record shows it cannot serve a real audio
-        // URL is a dead end: SABR-only responses expose no adaptive url (so the
-        // resolver falls back to the muxed itag 18, which the CDN then 403s), and
-        // UNPLAYABLE clients returned nothing at all. Rotating into one of those
+        // URL is a dead end: UNPLAYABLE clients returned nothing at all, and a
+        // SABR-only response exposes no adaptive url. Rotating into one of those
         // only burns a download, so prefer an untried client that demonstrably
-        // handed out audio urls.
+        // handed out a url we can fetch.
+        //
+        // "Servable" must count the MUXED progressive url, not just adaptive
+        // audio. It did not, and that was not a cosmetic gap: on 2026-09-26 the
+        // device report showed ANDROID at adaptiveWithUrl=0 / audioWithUrl=0
+        // with progressive=1 — and ANDROID was the only client that completed a
+        // download, serving the muxed itag 18. Scored on adaptive audio alone it
+        // read as a dead end, so the retry rotated IOS -> ANDROID_VR instead,
+        // which 403'd the same way, and burned the last attempt. The filter was
+        // excluding the only client that had ever worked.
         const reportByClient = new Map();
         for (const e of (resolved.client_report || [])) {
             if (e && e.client && !reportByClient.has(e.client)) reportByClient.set(e.client, e);
@@ -204,7 +218,7 @@ export const downloadMethods = {
             const e = reportByClient.get(c);
             if (!e) return true; // no evidence either way — let it try
             if (e.status && e.status !== 'OK') return false;
-            return (e.audioWithUrl || 0) > 0;
+            return (e.audioWithUrl || 0) > 0 || (e.progressiveWithUrl || 0) > 0;
         };
         const rotate = (is403 || isTruncated);
         // Candidates: the clients after the winner first, then the rest, minus
