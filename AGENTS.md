@@ -204,6 +204,16 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 | Source | Finding |
 |---|---|
+**Read this before trusting any row in the table below.** The claim with the **most citation and the least measurement is the one that was wrong** (`android_vr` "only muxed itag 18" — refuted by our own client report), and the claim that changed code correctly had **no citation at all** — it was a quoted cell from the PO-Token Guide (`tv`: *"All formats DRM'd if cookies… aren't passed"*), supplied by the audit agent after the code was already written. A guess with a reference attached passes as a checked fact; that is how a wrong belief survives review and then steers code for two versions.
+
+**Rules for anything asserted about the outside world** (a platform, a spec, a CDN, a crate's contract):
+
+1. **Quote the source cell, and name where it came from.** A paraphrase is not a citation — it is the failure mode wearing a citation's clothes.
+2. **If the sentence cannot be produced, the answer is "unknown."** Treat it as unknown. Do not implement on a summary, and do not implement on anyone's memory — including the audit agent's, and including mine. The 2026 `tv` correction was found by the reviewer *re-reading* the table, not by remembering it.
+3. **Separate confidence from content**: read-from-source or inferred. Inferences get labelled as inferences *especially when they are probably right*.
+4. **Prefer measurement over citation when they conflict**, and mark the citation as contradicted rather than deleting it — the surviving row is the evidence that the belief existed. Rows below marked ⚠️ are refuted by our own client reports; do not re-derive behaviour from them.
+5. **Need a fact nobody has quoted? Dispatch a reader** — a read-only subagent, or the audit agent — and require the quoted cell back. The dependency is on *a reader*, not on any one agent's recall.
+
 | yt-dlp #12551, #12218 | "incomplete download of audio (no error indicated)" — 100 % bytes, audio stops mid-file |
 | LuanRT/GoogleVideo #52 | The ~60 s SABR cutoff is a *client library* limit, not a YouTube limit — SABR is a stateful sequential protocol |
 | cobalt discussion #1374 | *"no exact plan on how to handle SABR… we're using youtube clients that don't have it enforced, but we have no clue for how long this will last"* |
