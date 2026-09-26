@@ -1472,7 +1472,6 @@ impl Downloader {
             ),
         }
 
-
         // MediaStore Publishing on Android
         #[cfg(target_os = "android")]
         {
