@@ -220,6 +220,16 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 **Data-driven client rotation (v2.6.44).** `downloads.js` reads `resolved.client_report` and only rotates into a client whose own record shows it can serve audio (`status === 'OK'` and `audioWithUrl > 0`). SABR-only (`audioWithUrl: 0`) and `UNPLAYABLE` clients are dead ends — rotating into one just burns a download on a 403 — so when every remaining client is one, the retry stops and the real error is surfaced.
 
+**The truncation verdict was itself wrong (v2.6.45).** v2.6.44's error text settled it: `[received 21379314 bytes of 21379314 advertised (itag=18, end_reason=all-advertised-bytes-received)]` with `url+header: HTTP 416 | header: HTTP 416 | url: HTTP 400`. A `416` means the object really does end there, and 21.4 MB for a 287 s track is 596 kbps — exactly a muxed 360p progressive — while a real 99-second window would be ~7 MB. So the file was **complete** and rodio's `total_duration()` was wrong about it. The lesson: a decoder's opinion is not evidence.
+
+**`src/infrastructure/media/forensics.rs` (v2.6.45)** answers the two questions separately, with no decoding assumptions:
+- *Are all the media bytes there?* The MP4 sample table says so exactly: `stco`/`co64` chunk offsets + `stsc` samples-per-chunk + `stsz` sample sizes give the highest byte the file must reach (`Verdict::Complete` / `Truncated { missing_bytes }`); a fragmented file answers the same through its `sidx` (`sidx.end + first_offset + Σ referenced_size`). Anything unparsable yields `Verdict::Unknown` so callers keep their old behaviour. Also reports `table_secs` (what the container claims), `has_video_track`, `fragment_count`.
+- *Is there audio in them?* `inspect_content` decodes the whole file and reports `audible_secs` (position of the last sample above ±16) — the signature of a server-side window is a large gap between `audible_secs` and the expected length even when the byte count is complete.
+
+**The gate now trusts the container, not the decoder.** A short decoder verdict is only honoured when the container agrees: the file is kept when `verdict == Complete` **and** `table_secs` covers the track **and** there is audible audio for ~all of it; otherwise the range top-up runs and, if that fails, the error explains *which* problem it is — "the container itself only describes a short track, so the server sent a windowed object and reports it as complete" (rotate clients) versus "the container describes the full track but bytes are missing" (interrupted transfer). `forensics::{summary}` output rides along in the message.
+
+**Race fix (v2.6.45).** `Promise.any` picked whichever client *answered first*, not the best one: on the device `ANDROID` won with a SABR-only response (muxed `itag 18` — exactly the rendition that gets truncated) while `IOS`/`ANDROID_VR` had real audio-only urls ready. A legacy-progressive-only result now waits `LEGACY_RESULT_DELAY_MS` (1200 ms) in both races, so a genuine audio url wins unless nothing else arrives.
+
 **Safety nets (keep all three):** byte accounting in `run_stream` (`downloader.rs`), decoded-duration verification (`completeness.rs` `verify_decoded_duration`, 90 % / 2 s slack) plus the range top-up it triggers, and the JS retry that rotates clients on `Truncated download`.
 
 ---

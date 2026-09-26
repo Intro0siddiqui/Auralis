@@ -770,6 +770,22 @@ describe('YouTube Search & Streaming Integration', () => {
         );
     });
 
+    it('youtube.js deprioritises a legacy-progressive-only result', () => {
+        // Race evidence from the device (v2.6.44): ANDROID answered first but could
+        // only offer the SABR-only muxed itag 18, while IOS and ANDROID_VR had real
+        // audio-only urls ready. `Promise.any` then picked the muxed 360p rendition,
+        // which is exactly the one the server truncates. A legacy-only result must
+        // therefore wait briefly so a genuine audio url can win the race.
+        const ysrc = fs.readFileSync(ytPath, 'utf8');
+        assert.ok(ysrc.includes('LEGACY_RESULT_DELAY_MS'), 'a legacy-only delay must be defined');
+        const delays = ysrc.match(/setTimeout\(resolve, LEGACY_RESULT_DELAY_MS\)/g) || [];
+        assert.equal(delays.length, 2, 'both the actions.execute and getInfo races must delay legacy results');
+        assert.ok(
+            /hasLegacyProgressiveFallback\([\s\S]{0,600}LEGACY_RESULT_DELAY_MS/.test(ysrc),
+            'the delay must sit on the legacy-progressive branch'
+        );
+    });
+
     it('downloads.js only rotates to a client the report proves can serve audio', async () => {
         // Real per-client report from the device (v2.6.43, track BElct8HWkp8):
         // only IOS and ANDROID_VR handed out audio urls; ANDROID was SABR-only
@@ -830,9 +846,16 @@ describe('YouTube Search & Streaming Integration', () => {
         // must hang off it rather than off the byte accounting gate.
         assert.ok(dsrc.includes('range_topup::top_up'), 'downloader must be able to request the bytes after a short file');
         assert.ok(
-            /verify_decoded_duration\([\s\S]{0,2000}range_topup::top_up/.test(dsrc),
+            /verify_decoded_duration\([\s\S]{0,4000}range_topup::top_up/.test(dsrc),
             'the range top-up must be triggered by the decoded-duration verdict'
         );
+        // The decoder is not trusted: the container and a full decode decide.
+        assert.ok(dsrc.includes('inspect_container') && dsrc.includes('inspect_content'),
+            'a short verdict must be checked against the container and the decoded content');
+        assert.ok(dsrc.includes('Verdict::Complete'),
+            'the container verdict must gate acceptance');
+        assert.ok(fs.existsSync(path.join(base, 'forensics.rs')),
+            'the container forensics module must exist');
         assert.ok(dsrc.includes('itag='), 'the truncation error must report the itag/host/clen for diagnosis');
         // The top-up must try the mechanisms a googlevideo edge may honour, and
         // must name the status codes it got so a refusal is explainable in-app.

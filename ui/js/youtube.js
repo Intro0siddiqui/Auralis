@@ -506,6 +506,14 @@ class YouTubeResolver {
             if (effectiveOrderedClients.includes(fc)) effectiveOrderedClients = [fc, ...effectiveOrderedClients.filter((c) => c !== fc)];
             else effectiveOrderedClients = [fc];
         }
+        // A client that can only offer the legacy muxed progressive (itag 18) is a
+        // last resort: the muxed 360p rendition is what the SABR window truncates,
+        // and the bytes it reports as `clen` are the whole window. Because all
+        // clients are raced with `Promise.any`, simply answering *first* used to
+        // win - so a SABR-only client beat a slower client that had a real
+        // audio-only url. Hold such a result back briefly to give the genuine
+        // audio urls a head start, and fall back to it if none arrives.
+        const LEGACY_RESULT_DELAY_MS = 1200;
         // Support orderedClients override for deterministic retry (downloads.js passes remaining)
         if (Array.isArray(opts.orderedClients) && opts.orderedClients.length) {
             effectiveOrderedClients = [...opts.orderedClients];
@@ -603,6 +611,7 @@ class YouTubeResolver {
                                 entry.legacyProgressive = true;
                                 entry.reason = 'legacy-progressive';
                                 console.log(`[YouTubeResolver] actions.execute('${cl}') SABR-only fallback: using legacy progressive formats`);
+                                await new Promise((resolve) => setTimeout(resolve, LEGACY_RESULT_DELAY_MS));
                                 return { info: parsed, winningClient: cl, report: entry };
                             }
                             entry.reason = entry.reason || 'no-usable-audio';
@@ -672,6 +681,7 @@ class YouTubeResolver {
                                     entry.legacyProgressive = true;
                                     entry.reason = 'legacy-progressive';
                                     console.log(`[YouTubeResolver] getInfo('${cl}') SABR-only fallback: using legacy progressive formats`);
+                                    await new Promise((resolve) => setTimeout(resolve, LEGACY_RESULT_DELAY_MS));
                                     return { info: res, winningClient: cl, report: entry };
                                 }
                                 entry.reason = 'no-usable-audio';

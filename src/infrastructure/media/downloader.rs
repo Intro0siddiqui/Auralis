@@ -194,7 +194,7 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
 /// Apply the headers googlevideo validates (`Referer`/`Origin`/`Accept`) plus any
 /// client-matched headers produced by the frontend resolver. The User-Agent is
 /// configured on the `reqwest` client itself, so it is skipped here.
-pub(crate) fn inject_stream_headers(
+pub(crate) pub(crate) fn inject_stream_headers(
     mut req: reqwest::RequestBuilder,
     job_headers: Option<&HashMap<String, String>>,
 ) -> reqwest::RequestBuilder {
@@ -1247,91 +1247,145 @@ impl Downloader {
             &job.ext,
             expected_duration_secs,
         ) {
-            // Every advertised byte arrived, yet the decoder only finds part of
-            // the audio: the edge served a *windowed* resource whose container
-            // header lies about the length. Asking explicitly for the bytes after
-            // what we already hold is the only remaining way to complete such a
-            // file - and when that is refused, the status codes it produced are
-            // the proof that no client-side resume can help.
-            use super::range_topup::{url_param_str, MAX_TOPUP_ROUNDS, TOPUP_CHUNK_BYTES};
-            let mut topup_log: Vec<String> = Vec::new();
-            let mut last_topup_error: Option<String> = None;
-            let mut have = staged_bytes;
-            let mut recovered_secs: Option<u64> = None;
-            for round in 1..=MAX_TOPUP_ROUNDS {
-                match super::range_topup::top_up(
-                    &client,
-                    job.headers.as_ref(),
-                    &request_url,
-                    &job.staging_path,
-                    have,
-                    TOPUP_CHUNK_BYTES,
-                )
-                .await
-                {
-                    Ok(added) => {
-                        have += added;
-                        topup_log.push(format!("round {round}: +{added} bytes (file now {have})"));
-                        match super::completeness::verify_decoded_duration(
-                            &job.staging_path,
-                            &job.ext,
-                            expected_duration_secs,
-                        ) {
-                            Ok(secs) => {
-                                recovered_secs = secs;
-                                break;
-                            }
-                            Err(still_short) => {
-                                topup_log
-                                    .push(format!("round {round}: still short: {still_short}"));
-                            }
-                        }
-                    }
-                    Err(why) => {
-                        last_topup_error = Some(why);
-                        break;
-                    }
-                }
-            }
-            let have_now = tokio::fs::metadata(&job.staging_path)
-                .await
-                .map(|m| m.len())
-                .unwrap_or(have);
-            if let Some(secs) = recovered_secs {
+            // A decoder's opinion of a file's length is not evidence. Real
+            // device data (v2.6.44, track BElct8HWkp8) showed the opposite: a
+            // 21.4 MB muxed file that holds 596 kbps x 287 s of media was
+            // rejected because rodio reported 99 s for it. So ask the container
+            // instead, and only treat the download as short when the container
+            // agrees it is short.
+            use super::forensics::{inspect_container, inspect_content, Verdict};
+            let facts = inspect_container(&job.staging_path);
+            let content = inspect_content(&job.staging_path, &job.ext);
+            let expected_secs = f64::from(expected_duration_secs.unwrap_or(0));
+            let near_expected = |secs: Option<f64>| match (secs, expected_secs) {
+                (Some(value), exp) if exp > 0.0 => value >= exp * 0.9,
+                (Some(_), _) => true,
+                (None, _) => false,
+            };
+            // "Whole" means: the sample table says the audio runs the full length,
+            // every byte it references is present, and there is audible audio for
+            // essentially all of it. Anything less is not proven complete.
+            let container_says_whole =
+                facts.verdict == Some(Verdict::Complete) && near_expected(facts.table_secs);
+            let content_says_whole = near_expected(content.audible_secs);
+            warn!(
+                download_id = %id,
+                container = %facts.summary(),
+                content = %content.summary(),
+                expected_duration = ?expected_duration_secs,
+                "Decoder reported a short file; container and content were inspected"
+            );
+
+            if container_says_whole && content_says_whole {
+                // The decoder under-reported: keep the file. Its own duration is
+                // the truth here, and the library scanner will store that.
                 warn!(
                     download_id = %id,
-                    decoded_secs = secs,
-                    bytes = have_now,
-                    host = %host,
-                    "Range top-up recovered a windowed (SABR-style) partial download"
+                    container = %facts.summary(),
+                    content = %content.summary(),
+                    "Container and decoded audio both cover the full track - keeping the file despite the decoder's short verdict"
                 );
             } else {
-                error!(
-                    download_id = %id,
-                    error = %truncation,
-                    downloaded = have_now,
-                    total = ?total_bytes,
-                    expected_duration = ?expected_duration_secs,
-                    end_reason = %end_reason,
-                    host = %host,
-                    "Refusing to save a decoded-truncated download"
-                );
-                let itag = url_param_str(&request_url, "itag").unwrap_or_else(|| "?".to_string());
-                let clen = extract_url_param_u64(&request_url, "clen").unwrap_or(0);
-                let topup_summary = if let Some(why) = last_topup_error {
-                    why
-                } else if topup_log.is_empty() {
-                    "no range top-up was attempted".to_string()
+                use super::range_topup::{url_param_str, MAX_TOPUP_ROUNDS, TOPUP_CHUNK_BYTES};
+                let mut topup_log: Vec<String> = Vec::new();
+                let mut last_topup_error: Option<String> = None;
+                let mut have = staged_bytes;
+                let mut recovered_secs: Option<u64> = None;
+                for round in 1..=MAX_TOPUP_ROUNDS {
+                    match super::range_topup::top_up(
+                        &client,
+                        job.headers.as_ref(),
+                        &request_url,
+                        &job.staging_path,
+                        have,
+                        TOPUP_CHUNK_BYTES,
+                    )
+                    .await
+                    {
+                        Ok(added) => {
+                            have += added;
+                            topup_log
+                                .push(format!("round {round}: +{added} bytes (file now {have})"));
+                            match super::completeness::verify_decoded_duration(
+                                &job.staging_path,
+                                &job.ext,
+                                expected_duration_secs,
+                            ) {
+                                Ok(secs) => {
+                                    recovered_secs = secs;
+                                    break;
+                                }
+                                Err(still_short) => {
+                                    topup_log
+                                        .push(format!("round {round}: still short: {still_short}"));
+                                }
+                            }
+                        }
+                        Err(why) => {
+                            last_topup_error = Some(why);
+                            break;
+                        }
+                    }
+                }
+                if let Some(secs) = recovered_secs {
+                    warn!(
+                        download_id = %id,
+                        decoded_secs = secs,
+                        bytes = have,
+                        host = %host,
+                        "Range top-up recovered a windowed (SABR-style) partial download"
+                    );
                 } else {
-                    topup_log.join(" | ")
-                };
-                cleanup_staging_file(&job.staging_path).await;
-                return Err(DownloaderError::DownloadFailed(format!(
-                    "{truncation} [received {have_now} bytes of {clen} advertised \
-                     (itag={itag}, host={host}, end_reason={end_reason}); the server served a \
-                     windowed/SABR-style resource and the bytes after it are not retrievable: \
-                     {topup_summary}]"
-                )));
+                    let have_now = tokio::fs::metadata(&job.staging_path)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(have);
+                    error!(
+                        download_id = %id,
+                        error = %truncation,
+                        downloaded = have_now,
+                        total = ?total_bytes,
+                        expected_duration = ?expected_duration_secs,
+                        end_reason = %end_reason,
+                        host = %host,
+                        container = %facts.summary(),
+                        content = %content.summary(),
+                        "Refusing to save a short download"
+                    );
+                    let itag =
+                        url_param_str(&request_url, "itag").unwrap_or_else(|| "?".to_string());
+                    let clen = extract_url_param_u64(&request_url, "clen").unwrap_or(0);
+                    let topup_summary = if let Some(why) = last_topup_error {
+                        why
+                    } else if topup_log.is_empty() {
+                        "no range top-up was attempted".to_string()
+                    } else {
+                        topup_log.join(" | ")
+                    };
+                    // Two very different problems produce the same decoder verdict,
+                    // and the difference decides whether a retry can ever work:
+                    //  * the container itself only describes a short track -> the
+                    //    server deliberately sent a window and calls it the whole
+                    //    object, so a different client is the only way out;
+                    //  * the container describes the full track but bytes are
+                    //    missing -> a genuinely interrupted transfer, which the
+                    //    range top-up above just failed to complete.
+                    let explanation = if facts.table_secs.map(|t| t < expected_secs * 0.9)
+                        == Some(true)
+                    {
+                        "The container itself only describes a short track, so the server sent a windowed object and reports it as complete (this is the SABR behaviour, not a broken transfer)"
+                    } else if facts.verdict == Some(Verdict::Truncated { .. }) {
+                        "The container describes the full track but the file is missing bytes the sample table references, so the transfer was interrupted"
+                    } else {
+                        "The container could not be parsed, so the decoder's verdict could not be checked"
+                    };
+                    cleanup_staging_file(&job.staging_path).await;
+                    return Err(DownloaderError::DownloadFailed(format!(
+                        "{truncation} [{explanation}. received {have_now} bytes of {clen} \
+                         advertised (itag={itag}, host={host}, end_reason={end_reason}); \
+                         {facts}; {content}; bytes after the window: {topup_summary}]"
+                    )));
+                }
             }
         }
 

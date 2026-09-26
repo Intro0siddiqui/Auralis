@@ -6,6 +6,7 @@ pub mod android_downloads;
 pub mod background_service;
 pub mod completeness;
 pub mod downloader;
+pub mod forensics;
 pub mod opus;
 pub mod player;
 pub mod range_topup;
