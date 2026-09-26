@@ -244,9 +244,16 @@ export const downloadMethods = {
             const retryOpts = { ...baseOpts };
             if (nextClient) retryOpts.forceClient = nextClient;
             if (excludeClients.length) retryOpts.excludeClients = excludeClients;
-            // A previous attempt already came back short from the SABR-only
-            // legacy progressive path; refuse to reuse it.
-            if (isTruncated) retryOpts.avoidLegacyProgressive = true;
+            // A previous attempt came back short. Refuse the legacy-progressive
+            // fallback only for the client that actually truncated — the short
+            // stream is a SABR window, not a property of the muxed container,
+            // so the same itag from a different client can be complete. Refusing
+            // the format outright meant one truncation could stop every client
+            // from ever delivering a file.
+            if (isTruncated) {
+                retryOpts.avoidLegacyProgressive = true;
+                retryOpts.truncatedClient = resolved.client || null;
+            }
             const originalUrl = ctx.originalUrl || resolved.originalUrl || p.url;
             if (!originalUrl || !window.AuralisYouTube) throw new Error('No original URL/client for retry');
             const reResolved = await window.AuralisYouTube.resolve(originalUrl, retryOpts);
@@ -354,6 +361,7 @@ export const downloadMethods = {
                         forceClient: ctxOpts?.forceClient || null,
                         excludeClients: ctxOpts?.excludeClients || null,
                         avoidLegacyProgressive: Boolean(ctxOpts?.avoidLegacyProgressive),
+                        truncatedClient: ctxOpts?.truncatedClient || null,
                     });
                     // Also store reverse lookup by stream_url in case completed payload uses different id? not needed
                 } catch (_) {}

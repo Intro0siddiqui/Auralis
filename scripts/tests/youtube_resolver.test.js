@@ -268,18 +268,39 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         // orderedClients must be defined (PO-token-aware, Sept 2026 client reality)
         assert.ok(src.includes('orderedClients'), 'Expected orderedClients PO-token-aware ordering');
         assert.ok(src.includes("TV") && src.includes("ANDROID_VR"), 'orderedClients must mention TV/ANDROID_VR');
-        // PO-aware order (Sept 2026): with a Web/BotGuard PO token => MWEB first
-        // (accepts a web-family token and still serves plain CDN urls);
-        // without a token => TV first (needs none). ANDROID_VR is last resort
-        // because in 2026 it returns only muxed itag 18 and 403s past ~60s.
+        // Order is derived from one question: which clients can succeed with the
+        // token we hold? Per the PO-Token Guide, mweb/web/web_safari need a GVS
+        // token (the only kind we mint), tv and android_vr need none, and
+        // android needs a DroidGuard token we cannot produce.
+        //
+        // The previous expectation here encoded a belief that measurement
+        // disproved: that `ANDROID_VR` "returns only muxed itag 18" and is
+        // therefore a last resort. On device (rOWDEfnWx5s, residential Jio)
+        // ANDROID_VR returned 22 adaptive / 4 audio WITH urls, itag 140
+        // audio-only — while ANDROID was the one returning nothing usable
+        // (SABR-only, audioWithUrl=0). The two had been swapped in priority.
         const m = src.match(/(?:const|let)\s+orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
         assert.ok(m, 'orderedClients ternary not found or malformed');
-        const withToken = m[1];
-        const withoutToken = m[2];
-        assert.ok(withToken.indexOf("'MWEB'") === 0 || withToken.replace(/\s/g, '').startsWith("'MWEB'"), 'with poToken order should start MWEB');
-        assert.ok(withoutToken.replace(/\s/g, '').startsWith("'TV'"), 'without poToken order should start TV');
-        assert.equal(withToken.replace(/\s/g, ''), "'MWEB','ANDROID','IOS','TV','ANDROID_VR','WEB'", 'with poToken branch exact order');
-        assert.equal(withoutToken.replace(/\s/g, ''), "'TV','MWEB','ANDROID','IOS','ANDROID_VR','WEB'", 'without poToken branch exact order: TV, MWEB, ANDROID first');
+        const withToken = m[1].replace(/\s/g, '');
+        const withoutToken = m[2].replace(/\s/g, '');
+        assert.ok(withToken.startsWith("'MWEB','WEB'"), 'with a Web token the two web-family clients that can use it must lead');
+        assert.ok(withoutToken.startsWith("'TV','ANDROID_VR'"), 'without a token the token-free clients that work must lead');
+
+        for (const [label, order] of [['with token', withToken], ['without token', withoutToken]]) {
+            // ANDROID cannot use our Web token and was measured returning no
+            // audio urls at all, so it must never be tried ahead of a client
+            // that can actually deliver.
+            assert.equal(
+                order.lastIndexOf("'ANDROID'"), order.length - "'ANDROID'".length,
+                `${label}: ANDROID should be last, it needs a DroidGuard token we cannot mint (got ${order})`
+            );
+            for (const c of ["'TV'", "'ANDROID_VR'"]) {
+                assert.ok(
+                    order.indexOf(c) < order.indexOf("'ANDROID'"),
+                    `${label}: ${c} needs no token and must be tried before ANDROID (got ${order})`
+                );
+            }
+        }
     });
 
     it('getInfo fallback tries 6 clients', () => {
@@ -315,16 +336,28 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         assert.ok(src.includes('hasLegacyProgressiveFallback'), 'youtube.js missing hasLegacyProgressiveFallback helper');
         assert.ok(src.includes('SABR-only'), 'youtube.js missing SABR-only fallback comment/marker');
         assert.ok(src.includes('formats') && src.includes('signature_cipher'), 'fallback must handle signature_cipher for progressive');
-        // Client order (Sept 2026 evidence, see AGENTS.md): MWEB first when a PO
-        // token exists (it is the client that accepts a Web/BotGuard token AND
-        // still returns plain CDN urls), ANDROID_VR demoted to last resort (in
-        // 2026 it returns only muxed itag 18 and 403s past ~60s), WEB last
-        // (SABR-only). Without a token, TV is tried first (it needs none).
+        // Client order follows the token we hold, not a guess. With a Web token
+        // only MWEB/WEB can use it; TV and ANDROID_VR need no token and still
+        // return plain CDN urls; ANDROID needs a DroidGuard token we cannot mint
+        // and was measured returning no audio urls at all.
+        //
+        // The old expectation repeated a claim measurement disproved — that
+        // ANDROID_VR "returns only muxed itag 18 and 403s past ~60s" and belongs
+        // last. On device it returned 22 adaptive / 4 audio WITH urls at itag
+        // 140 audio-only, while ANDROID was the client returning nothing.
         const m = src.match(/(?:const|let)\s+orderedClients\s*=\s*opts\.poToken\s*\?\s*\[([^\]]+)\]\s*:\s*\[([^\]]+)\]/);
         assert.ok(m, 'orderedClients ternary not found');
-        assert.equal(m[1].replace(/\s/g, ''), "'MWEB','ANDROID','IOS','TV','ANDROID_VR','WEB'", 'with poToken MWEB must be first');
-        assert.equal(m[2].replace(/\s/g, ''), "'TV','MWEB','ANDROID','IOS','ANDROID_VR','WEB'", 'without poToken TV must be first');
-        assert.ok(m[1].lastIndexOf("'ANDROID_VR'") > m[1].indexOf("'MWEB'"), 'ANDROID_VR must be demoted below MWEB');
+        const withToken = m[1].replace(/\s/g, '');
+        const withoutToken = m[2].replace(/\s/g, '');
+        assert.ok(withToken.startsWith("'MWEB','WEB'"), 'with a Web token, the web-family clients that can use it lead');
+        assert.ok(withoutToken.startsWith("'TV','ANDROID_VR'"), 'without a token, the token-free clients that work lead');
+        for (const order of [withToken, withoutToken]) {
+            assert.ok(order.endsWith("'ANDROID'"), 'ANDROID (needs a DroidGuard token we cannot mint) must be last');
+            assert.ok(
+                order.indexOf("'ANDROID_VR'") < order.indexOf("'ANDROID'"),
+                'ANDROID_VR needs no token and must be tried before ANDROID'
+            );
+        }
     });
 
     it('resolver records a per-client reaction report (SABR/403/format counts)', () => {

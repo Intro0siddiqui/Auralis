@@ -485,18 +485,35 @@ class YouTubeResolver {
         };
 
         // 1. First attempt: Direct raw player API query.
-        // 2026 client reality (checked Sept 2026 against yt-dlp / cobalt reports):
-        //  - `web` is SABR-ONLY (adaptiveFormats have no url, only
-        //    serverAbrStreamingUrl) -> those streams are routinely partial.
-        //  - `android_vr` in 2026 often returns ONLY itag 18 (muxed 360p) and
-        //    GVS 403s for ranges past the first ~60s -> last resort only.
-        //  - `android` bypasses SABR (plain CDN urls, full downloads) but needs a
-        //    DroidGuard PO token; `ios` needs an iOSGuard one. We mint a
-        //    BotGuard/WEB token, which is only valid for web-family clients, so
-        //    `mweb` is the client most likely to succeed end to end.
+        //
+        // Ordering is driven by one question: which clients can this request
+        // actually succeed with, given the token we hold?
+        //
+        // Per the yt-dlp PO-Token Guide's enforcement table, `mweb`/`web`/
+        // `web_safari` need a GVS token; `tv` and `android_vr` need none at
+        // all; `android` and `ios` need DroidGuard/iOSGuard tokens we cannot
+        // mint. We mint BotGuard/WEB, so:
+        //
+        //  - with a token, only MWEB and WEB can use it, so they lead;
+        //  - TV and ANDROID_VR are the token-free clients that still return
+        //    plain CDN urls, so they follow immediately;
+        //  - ANDROID is last: it needs a DroidGuard token we cannot produce,
+        //    and on a Jio residential line it came back SABR-only
+        //    (adaptiveWithUrl=0, audioWithUrl=0), so it contributes nothing.
+        //
+        // Measured on device (track rOWDEfnWx5s, residential Jio, v2.6.50):
+        // MWEB/TV/WEB all UNPLAYABLE, ANDROID SABR-only, while IOS returned
+        // 20 adaptive / 2 audio with urls and ANDROID_VR 22 / 4 — both real
+        // audio. ANDROID_VR used to be demoted to last resort on the belief
+        // that it "returns only muxed itag 18"; that was never true of it and
+        // is what ANDROID actually did here. Demoting the two clients that
+        // work, in favour of one that returns nothing, wasted the rotation.
+        //
+        // This also means pot_scope is necessary but not sufficient on such a
+        // network: the web family never obtains a url to scope a token onto.
         const orderedClients = opts.poToken
-            ? ['MWEB', 'ANDROID', 'IOS', 'TV', 'ANDROID_VR', 'WEB']
-            : ['TV', 'MWEB', 'ANDROID', 'IOS', 'ANDROID_VR', 'WEB'];
+            ? ['MWEB', 'WEB', 'IOS', 'ANDROID_VR', 'TV', 'ANDROID']
+            : ['TV', 'ANDROID_VR', 'MWEB', 'WEB', 'IOS', 'ANDROID'];
         // 2026 Jio sn-gwpa-cived gates TV too — caller may exclude TV on 403 retry (ANDROID+pot or WEB_SAFARI).
         // Keep const orderedClients for test regex; apply caller overrides via effective list.
         let effectiveOrderedClients = [...orderedClients];
@@ -754,7 +771,18 @@ class YouTubeResolver {
         let used_legacy_progressive = false;
         // A retry that already got a short legacy stream refuses the fallback
         // entirely: better to fail loudly than to re-download the same 99s.
-        const allow_legacy_progressive = !opts.avoidLegacyProgressive;
+        // Refuse a legacy-progressive fallback ONLY when this attempt is the
+        // same client that already produced a short stream. The truncation we
+        // are recovering from is a SABR *window* — a property of the response,
+        // not of the muxed container — so the same itag 18 served by a
+        // different client can be complete. Refusing the format outright
+        // (the old behaviour) meant that once any attempt truncated, no client
+        // could ever deliver a file, which is strictly worse for the user than a
+        // complete 360p track that plays to the end.
+        const truncated_client = String(opts.truncatedClient || opts.truncated_client || '').toUpperCase();
+        const refuse_legacy_for_this_client =
+            Boolean(opts.avoidLegacyProgressive) && (!truncated_client || truncated_client === String(winningClient || '').toUpperCase());
+        const allow_legacy_progressive = !refuse_legacy_for_this_client;
 
         if (typeof info.chooseFormat === 'function') {
             // rodio 0.22.2 lacks opus — prefer m4a/mp4 (itag 140) over webm/opus to avoid DecodeError
