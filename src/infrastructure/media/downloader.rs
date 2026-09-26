@@ -96,6 +96,9 @@ pub enum DownloaderError {
     #[error("Download not found: {0}")]
     DownloadNotFound(Uuid),
 
+    #[error("Invalid download state: {0}")]
+    InvalidState(String),
+
     #[error("Invalid or unsupported URL: {0}")]
     InvalidUrl(String),
 
@@ -313,8 +316,8 @@ fn sanitize_filename(name: &str) -> String {
     if RESERVED.contains(&lower.as_str()) {
         return format!("{}_{}", trimmed, "track");
     }
-    if trimmed.len() > 200 {
-        trimmed.truncate(200);
+    if trimmed.chars().count() > 200 {
+        trimmed = trimmed.chars().take(200).collect();
         trimmed = trimmed.trim_end_matches(['.', '_', ' ']).to_string();
         if trimmed.is_empty() {
             return "audio_track".to_string();
@@ -665,8 +668,8 @@ impl Downloader {
         active: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
     ) -> Result<(), DownloaderError> {
         let host = job.stream_url.split('/').nth(2).unwrap_or("unknown");
-        let url_snip = if job.stream_url.len() > 160 {
-            format!("{}…", &job.stream_url[..160])
+        let url_snip = if job.stream_url.chars().count() > 160 {
+            format!("{}…", job.stream_url.chars().take(160).collect::<String>())
         } else {
             job.stream_url.clone()
         };
@@ -1472,6 +1475,18 @@ impl Downloader {
             ),
         }
 
+        // Keep the effective user-visible path separate from the internal path.
+        // On Android this may be replaced with the public Download/Auralis path.
+        //
+        // The `mut` is only exercised inside the `#[cfg(target_os = "android")]`
+        // block below, so on every other target this binding is never mutated and
+        // rustc's default-on `unused_mut` fires — which is an error in CI, where
+        // clippy runs with `-D warnings`. Scoped to non-Android rather than
+        // allowed unconditionally so a genuinely unused mutation on Android
+        // would still be caught.
+        #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
+        let mut completion_path = job.output_path.to_string_lossy().to_string();
+
         // MediaStore Publishing on Android
         #[cfg(target_os = "android")]
         {
@@ -1495,6 +1510,7 @@ impl Downloader {
                         // path so `download:completed` shows the Files-visible location.
                         state.output_path = Some(pub_path.clone());
                     }
+                    completion_path = pub_path;
                     info!(download_id = %id, public = %pub_path, internal = %job.output_path.display(), "Published download to Download/Auralis");
                 } else {
                     warn!(download_id = %id, src = %job.output_path.display(), "MediaStore publish returned None — keeping internal path");
@@ -1506,7 +1522,7 @@ impl Downloader {
         {
             let mut guard = active.write().await;
             if let Some(state) = guard.get_mut(&id) {
-                state.complete(job.output_path.to_string_lossy().to_string());
+                state.complete(completion_path);
             }
         }
 
@@ -1545,29 +1561,68 @@ impl Downloader {
     pub async fn pause(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Pausing download");
 
-        if let Some(handle) = self.tasks.write().await.remove(&id) {
+        // Await the aborted task before touching the staging file. Without this,
+        // pause/cancel can race the writer and truncate bytes it is still using.
+        // Take the handle out under the lock, then await it with the lock
+        // released. `if let Some(h) = self.tasks.write().await.remove(&id)`
+        // would keep the write guard alive until the end of the whole `if let`
+        // (temporaries in the scrutinee live for the entire expression), so the
+        // `await` below would run while holding it. The task being aborted may
+        // itself want `tasks.write()` to deregister on completion, and then both
+        // sides wait forever.
+        let handle = self.tasks.write().await.remove(&id);
+        if let Some(handle) = handle {
             handle.abort();
+            let _ = handle.await;
+        }
+
+        let status = {
+            let downloads = self.active_downloads.read().await;
+            let state = downloads
+                .get(&id)
+                .ok_or(DownloaderError::DownloadNotFound(id))?;
+            state.status
+        };
+
+        if status == DownloadStatus::Paused {
+            return Ok(());
+        }
+        if !matches!(status, DownloadStatus::Queued | DownloadStatus::Downloading) {
+            return Err(DownloaderError::InvalidState(format!(
+                "cannot pause download in {status} state"
+            )));
         }
 
         let staging_path = {
             let jobs = self.jobs.read().await;
-            jobs.get(&id).map(|j| j.staging_path.clone())
+            jobs.get(&id)
+                .map(|job| job.staging_path.clone())
+                .ok_or_else(|| {
+                    DownloaderError::InvalidState(format!("download {id} has no job record"))
+                })?
         };
+        let downloaded = self
+            .active_downloads
+            .read()
+            .await
+            .get(&id)
+            .map(|state| state.downloaded_bytes)
+            .unwrap_or(0);
 
-        let downloaded = {
-            let downloads = self.active_downloads.read().await;
-            downloads.get(&id).map(|s| s.downloaded_bytes)
-        };
-
-        if let (Some(path), Some(bytes)) = (staging_path, downloaded) {
-            if let Ok(f) = tokio::fs::OpenOptions::new().write(true).open(&path).await {
-                let _ = f.set_len(bytes).await;
+        if downloaded > 0 {
+            if let Ok(file) = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&staging_path)
+                .await
+            {
+                let _ = file.set_len(downloaded).await;
             }
         }
 
         let mut downloads = self.active_downloads.write().await;
         if let Some(state) = downloads.get_mut(&id) {
-            state.pause();
+            state.status = DownloadStatus::Paused;
+            state.updated_at = Utc::now();
         }
 
         Ok(())
@@ -1577,23 +1632,28 @@ impl Downloader {
     pub async fn resume(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Resuming download");
 
-        let start = {
-            let downloads = self.active_downloads.read().await;
-            downloads
-                .get(&id)
-                .ok_or(DownloaderError::DownloadNotFound(id))?
-                .downloaded_bytes
-        };
-
-        {
-            let mut downloads = self.active_downloads.write().await;
-            if let Some(state) = downloads.get_mut(&id) {
-                if state.status == DownloadStatus::Paused {
-                    state.status = DownloadStatus::Downloading;
-                    state.updated_at = Utc::now();
-                }
-            }
+        if !self.jobs.read().await.contains_key(&id) {
+            return Err(DownloaderError::InvalidState(format!(
+                "download {id} has no job record"
+            )));
         }
+
+        let start = {
+            let mut downloads = self.active_downloads.write().await;
+            let state = downloads
+                .get_mut(&id)
+                .ok_or(DownloaderError::DownloadNotFound(id))?;
+            if state.status != DownloadStatus::Paused {
+                return Err(DownloaderError::InvalidState(format!(
+                    "cannot resume download in {} state",
+                    state.status
+                )));
+            }
+            let start = state.downloaded_bytes;
+            state.status = DownloadStatus::Downloading;
+            state.updated_at = Utc::now();
+            start
+        };
 
         self.spawn_stream(id, start).await;
         Ok(())
@@ -1603,14 +1663,40 @@ impl Downloader {
     pub async fn cancel(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Cancelling download");
 
-        if let Some(handle) = self.tasks.write().await.remove(&id) {
+        // Take the handle out under the lock, then await it with the lock
+        // released. `if let Some(h) = self.tasks.write().await.remove(&id)`
+        // would keep the write guard alive until the end of the whole `if let`
+        // (temporaries in the scrutinee live for the entire expression), so the
+        // `await` below would run while holding it. The task being aborted may
+        // itself want `tasks.write()` to deregister on completion, and then both
+        // sides wait forever.
+        let handle = self.tasks.write().await.remove(&id);
+        if let Some(handle) = handle {
             handle.abort();
+            let _ = handle.await;
+        }
+
+        let status = {
+            let downloads = self.active_downloads.read().await;
+            let state = downloads
+                .get(&id)
+                .ok_or(DownloaderError::DownloadNotFound(id))?;
+            state.status
+        };
+
+        if status == DownloadStatus::Cancelled {
+            return Ok(());
+        }
+        if matches!(status, DownloadStatus::Completed | DownloadStatus::Failed) {
+            return Err(DownloaderError::InvalidState(format!(
+                "cannot cancel download in {status} state"
+            )));
         }
 
         let paths = {
             let jobs = self.jobs.read().await;
             jobs.get(&id)
-                .map(|j| (j.staging_path.clone(), j.output_path.clone()))
+                .map(|job| (job.staging_path.clone(), job.output_path.clone()))
         };
 
         if let Some((staging, output)) = paths {
@@ -1705,6 +1791,84 @@ impl Downloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_download_progress_id_matches_job_id() {
+        let dir = std::env::temp_dir().join(format!("auralis_dl_id_test_{}", Uuid::new_v4()));
+        let downloader = Downloader::new(dir.clone());
+        let request = StreamDownload {
+            stream_url: "http://127.0.0.1:1/test.wav".to_string(),
+            title: "Identity Test".to_string(),
+            artist: None,
+            album: None,
+            platform: "direct".to_string(),
+            format: AudioFormat::Wav,
+            ext: "wav".to_string(),
+            total_bytes: None,
+            thumbnail: None,
+            headers: None,
+            expected_duration_secs: None,
+        };
+
+        let job_id = downloader
+            .download(request)
+            .await
+            .expect("test download should be accepted");
+        let progress = downloader
+            .get_progress(job_id)
+            .await
+            .expect("started download should have progress");
+
+        assert_eq!(
+            progress.id, job_id,
+            "serialized progress ID must match the downloader job ID"
+        );
+
+        if let Some(handle) = downloader.tasks.write().await.remove(&job_id) {
+            handle.abort();
+            let _ = handle.await;
+        }
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_resume_rejects_non_paused_download() {
+        let dir = std::env::temp_dir().join(format!("auralis_dl_state_test_{}", Uuid::new_v4()));
+        let downloader = Downloader::new(dir.clone());
+        let id = Uuid::new_v4();
+        let job = DownloadJob {
+            stream_url: "https://example.com/audio.mp3".to_string(),
+            title: "Audio".to_string(),
+            artist: None,
+            album: None,
+            output_path: dir.join("audio.mp3"),
+            staging_path: dir.join("audio.part"),
+            thumbnail: None,
+            headers: None,
+            expected_duration_secs: None,
+            total_bytes: None,
+            format: AudioFormat::Mp3,
+            ext: "mp3".to_string(),
+        };
+        let mut progress = DownloadProgress::with_id(
+            id,
+            "https://example.com/audio.mp3".to_string(),
+            "Audio".to_string(),
+            AudioFormat::Mp3,
+        );
+        progress.status = DownloadStatus::Downloading;
+        downloader.jobs.write().await.insert(id, job);
+        downloader
+            .active_downloads
+            .write()
+            .await
+            .insert(id, progress);
+
+        let result = downloader.resume(id).await;
+
+        assert!(matches!(result, Err(DownloaderError::InvalidState(_))));
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
 
     #[tokio::test]
     async fn test_downloader_cleanup_and_prune() {
@@ -1805,6 +1969,15 @@ mod tests {
         assert_eq!(sanitize_filename("../../etc/passwd"), "etc_passwd");
         assert_eq!(sanitize_filename("AUX"), "AUX_track");
         assert_eq!(sanitize_filename("COM1"), "COM1_track");
+    }
+
+    #[test]
+    fn test_sanitize_filename_unicode_boundary() {
+        let name = "é".repeat(201);
+        let sanitized = sanitize_filename(&name);
+
+        assert_eq!(sanitized.chars().count(), 200);
+        assert!(!sanitized.is_empty());
     }
 
     #[test]
