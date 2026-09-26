@@ -344,6 +344,14 @@ fn with_attached_env<T>(
 /// The global `Context` (the Android `Activity`) registered by `JNI_OnLoad`.
 #[cfg(target_os = "android")]
 fn service_context() -> Option<JObject<'static>> {
+    // Must come first: `android_context()` panics when the global is empty, and
+    // `panic = "abort"` turns that into a process abort. This path runs on
+    // playback start, so an unseeded context would kill the app rather than
+    // merely disabling the notification bridge.
+    if !crate::android_context_seeded() {
+        warn!("Android context not seeded yet; background service bridge unavailable for now");
+        return None;
+    }
     let ctx = ndk_context::android_context().context();
     if ctx.is_null() {
         warn!("Android context unavailable; background service bridge disabled");

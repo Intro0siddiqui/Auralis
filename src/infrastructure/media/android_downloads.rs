@@ -60,8 +60,31 @@ const PUBLIC_RELATIVE_PATH: &str = "Download/Auralis";
 #[cfg(target_os = "android")]
 const PUBLIC_ABSOLUTE_DIR: &str = "/storage/emulated/0/Download/Auralis";
 
-/// Chunk size for the `OutputStream.write([B)` loop. A local-ref array per
-/// chunk on a permanently attached thread, so keep it modest.
+/// JNI signature of `ContentResolver.query`, used by
+/// [`cached_copy_for_path`] to find a published row by display name.
+///
+/// It lives here rather than inline because it is 141 characters and rustfmt
+/// cannot break a string literal. That is not a cosmetic concern: one
+/// unbreakable over-long line makes rustfmt abandon **the whole enclosing
+/// item**, so for as long as this literal sat inside `cached_copy_for_path`
+/// that function was never formatted at all — which is how a 228-column
+/// statement and a column-25 indent survived in a file whose
+/// `cargo fmt --check` was green. Moving the literal out of the function body
+/// is what puts the function back under rustfmt's control; keep it out.
+#[cfg(target_os = "android")]
+const SIG_RESOLVER_QUERY: &str = "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;";
+
+/// Chunk size for the `OutputStream.write([B)` loop.
+///
+/// This is a *copy* buffer, sized so a re-read after a failure redoes at most
+/// 64 KiB. It has nothing to do with JNI local references: a small chunk does
+/// **not** mean few of them. `jni` 0.21's `JObject` has no `Drop` impl, so a
+/// local reference lives until the local reference frame that created it
+/// exits, and here that frame is the whole publish (see [`with_attached_env`]).
+/// Halving the chunk halves the pinned Java heap but leaves the *count* of
+/// live references exactly the same. Bounding the references is
+/// [`copy_into_media_store`]'s job, and it does it per chunk with
+/// `DeleteLocalRef` rather than by shrinking this constant.
 #[cfg(target_os = "android")]
 const COPY_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -121,9 +144,23 @@ pub fn publish_to_downloads(src_path: &Path) -> Option<String> {
 
 #[cfg(target_os = "android")]
 fn sdk_int(env: &mut JNIEnv<'_>) -> i32 {
-    env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
-        .map(|v| v.i().unwrap_or(26))
-        .unwrap_or(26)
+    match env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I") {
+        Ok(value) => value.i().unwrap_or(26),
+        Err(e) => {
+            // A failed field lookup leaves a Java exception *pending*, and
+            // every JNI call made while one is pending is undefined behaviour
+            // — including the `getContentResolver` call a few lines below. So
+            // the fallback cannot just swallow the error: draining here is what
+            // keeps "assume API 26" from turning into UB on the way down.
+            let drained = take_pending_exception(env);
+            warn!(
+                error = %e,
+                exception = %drained.as_deref().unwrap_or("none"),
+                "Could not read Build.VERSION.SDK_INT; assuming API 26, which takes the legacy publish path"
+            );
+            26
+        }
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -139,7 +176,7 @@ fn publish_inner(src_path: &Path, display_name: &str, mime: &str) -> Result<Stri
 
     with_attached_env(|env| {
         let sdk = sdk_int(env);
-        let ctx = service_context().ok_or_else(|| "no android context".to_string())?;
+        let ctx = service_context()?;
 
         // resolver = ctx.getContentResolver()
         let resolver = env
@@ -465,6 +502,34 @@ fn delete_pending_row<'local>(
 ///   thrown exception as the bare string `JavaException`, and
 /// * the `update`/`delete` calls that follow a failure are only legal once the
 ///   exception is gone.
+///
+/// # The order is the whole point of this function
+///
+/// The JNI spec sanctions a short list of calls while an exception is pending:
+/// `ExceptionOccurred`, `ExceptionDescribe`, `ExceptionClear`, `ExceptionCheck`,
+/// `FatalError`, the local-frame and local/global-ref functions (so
+/// `DeleteLocalRef` is on it too) and the monitor/UTF-string ones.
+/// `CallObjectMethod` and `GetStringUTFChars` are **not** on that list. A debug
+/// or CheckJNI build aborts the process outright ("JNI ... called with pending
+/// exception"); a release build has undefined behaviour. So the order must be
+///
+/// 1. `exception_describe` — the Java stack trace to logcat, the only place a
+///    release build shows it,
+/// 2. `exception_occurred` — take the throwable,
+/// 3. `exception_clear` — **before** touching the throwable,
+/// 4. only then `toString()` and `GetStringUTFChars`.
+///
+/// Clearing first does not invalidate the throwable: it is an ordinary Java
+/// object held by the local reference taken in step 2, and the reference keeps
+/// it alive and strongly reachable across the `ExceptionClear`. That ordering
+/// is what ART's own exception logging does, and it is the only ordering in
+/// which step 4 is defined at all.
+///
+/// If the clear itself fails we return `None` immediately. An exception that
+/// stays pending makes *every* subsequent JNI call in this file undefined
+/// behaviour, so the one thing that is still safe to do — nothing — is all we
+/// do. [`with_attached_env`] re-checks and clears once more before the thread
+/// goes back to the VM.
 #[cfg(target_os = "android")]
 fn take_pending_exception(env: &mut JNIEnv<'_>) -> Option<String> {
     match env.exception_check() {
@@ -472,38 +537,57 @@ fn take_pending_exception(env: &mut JNIEnv<'_>) -> Option<String> {
         // `Ok(false)`, or a failure of the check itself: nothing to drain.
         _ => return None,
     }
-    // ExceptionDescribe writes the Java stack trace to logcat, the only place
-    // a release build shows it.
+    // Steps 1-3: every call in this block is on the permitted list.
     let _ = env.exception_describe();
     let throwable = env.exception_occurred().ok();
-    let text = match throwable {
-        Some(throwable) => {
-            let called = env
-                .call_method(&throwable, "toString", "()Ljava/lang/String;", &[])
-                .ok();
-            match called.and_then(|value| value.l().ok()) {
-                Some(obj) if !obj.is_null() => {
-                    let text = JString::from(obj);
-                    // Bind the Result before the block ends: as a tail expression
-                    // it would be dropped *after* `text`, but `JavaStr`'s Drop
-                    // borrows the JString it came from.
-                    let extracted = match env.get_string(&text) {
-                        Ok(java) => Some(java.into()),
-                        Err(_) => None,
-                    };
-                    extracted
-                }
-                _ => None,
+    if let Err(e) = env.exception_clear() {
+        warn!(
+            error = %e,
+            "Could not clear the pending Java exception; not calling toString, because every other JNI call is undefined behaviour while one is pending"
+        );
+        return None;
+    }
+    // Step 4: nothing is pending any more, so calling Java is legal.
+    let throwable = throwable?;
+    let text = match env.call_method(&throwable, "toString", "()Ljava/lang/String;", &[]) {
+        Ok(value) => match value.l() {
+            Ok(obj) if !obj.is_null() => {
+                let text = JString::from(obj);
+                // Bind the Result before the block ends: as a tail expression
+                // it would be dropped *after* `text`, but `JavaStr`'s Drop
+                // borrows the JString it came from.
+                let extracted = match env.get_string(&text) {
+                    Ok(java) => Some(java.into()),
+                    Err(_) => None,
+                };
+                // Same reason, and safe here precisely because the exception was
+                // already cleared: `DeleteLocalRef` is permitted with one
+                // pending. Bounded (two refs per drained exception) but free,
+                // and this helper runs on every failure path in the file.
+                let _ = env.delete_local_ref(text);
+                extracted
             }
-        }
-        None => None,
+            _ => None,
+        },
+        Err(_) => None,
     };
-    let _ = env.exception_clear();
+    // The throwable was taken before the clear and outlived it, so its local
+    // reference can be released here. The spec is explicit that the reference
+    // `ExceptionOccurred` hands back "must be deleted", and this frame is the
+    // whole publish — on a thread that was already attached it is never popped.
+    let _ = env.delete_local_ref(throwable);
     text
 }
 
 /// `Uri.toString()` plus the row id parsed from it. Log-only; both are needed
 /// to act on a row by hand from an adb shell.
+///
+/// Also drains. `toString` and `GetStringUTFChars` are not on the JNI
+/// permitted-while-an-exception-is-pending list, so this helper must not leave
+/// a throw behind for its caller to trip over: it makes no further JNI call
+/// after a failed one, which means the drain below is the *first* call made
+/// after the failure and is therefore legal. On the success path it costs one
+/// extra JNI call (`ExceptionCheck`, which returns false) and does nothing.
 #[cfg(target_os = "android")]
 fn describe_uri(env: &mut JNIEnv<'_>, uri: &JObject<'_>) -> (String, String) {
     let text = match env.call_method(uri, "toString", "()Ljava/lang/String;", &[]) {
@@ -516,12 +600,22 @@ fn describe_uri(env: &mut JNIEnv<'_>, uri: &JObject<'_>) -> (String, String) {
                     Ok(java) => java.into(),
                     Err(_) => String::new(),
                 };
+                // `text` is no longer borrowed, so the local reference can go
+                // back. Bounded (one per publish) but free, and it is the same
+                // "a frame that may never pop" problem the copy loop has.
+                let _ = env.delete_local_ref(text);
                 extracted
             }
             _ => String::new(),
         },
         Err(_) => String::new(),
     };
+    if let Some(exception) = take_pending_exception(env) {
+        warn!(
+            exception = %exception,
+            "Drained a pending Java exception while describing a MediaStore uri"
+        );
+    }
     let id = text
         .rsplit('/')
         .find(|segment| !segment.is_empty())
@@ -617,6 +711,11 @@ fn open_output_stream<'local>(
 /// failed `close` counts as a failed copy: the row is only published when the
 /// provider confirmed the whole write, and the internal copy (the one the
 /// library plays) is untouched either way.
+///
+/// The per-chunk Java array is deleted as soon as it has been written, on the
+/// success *and* the failure path. This is the only loop in the file that
+/// allocates a local reference per iteration; see the comment at the delete for
+/// why the frame it lives in is the whole publish.
 #[cfg(target_os = "android")]
 fn copy_into_media_store(
     env: &mut JNIEnv<'_>,
@@ -644,14 +743,29 @@ fn copy_into_media_store(
             break;
         }
         let chunk = match env.byte_array_from_slice(&buf[..n]) {
-            Ok(chunk) => chunk,
+            Ok(chunk) => JObject::from(chunk),
             Err(e) => {
                 result = Err(format!("byte_array_from_slice: {e}"));
                 break;
             }
         };
-        let chunk = JObject::from(chunk);
-        if let Err(e) = env.call_method(os, "write", "([B)V", &[JValue::Object(&chunk)]) {
+        // `jni` 0.21's `JObject` has no `Drop` impl, so this local reference
+        // stays live until the local reference frame that created it is
+        // popped — and the frame here is the whole publish (a
+        // `attach_current_thread` scope that, on a thread which was already
+        // attached, is never popped at all). A 100 MB track would therefore
+        // pin ~100 MB of Java heap and hold ~1600 local references live
+        // simultaneously, and a `Vec` of 64 KiB chunks would do the same
+        // because chunk *size* does not bound reference *count*.
+        //
+        // `DeleteLocalRef` is one of the few calls the JNI spec permits while
+        // an exception is pending, so releasing here is legal on the error
+        // path too. That is why the `write` result is bound to a local instead
+        // of being `?`-ed: an early return would skip the delete. `chunk` is
+        // moved into `delete_local_ref` and must not be touched after it.
+        let written = env.call_method(os, "write", "([B)V", &[JValue::Object(&chunk)]);
+        let _ = env.delete_local_ref(chunk);
+        if let Err(e) = written {
             result = Err(format!("write to MediaStore row: {e}"));
             break;
         }
@@ -1008,20 +1122,45 @@ fn with_attached_env<T>(
     // Outer safety net: the publish paths drain a pending exception before
     // every follow-up JNI call, but a thread that hands back to Java with one
     // still pending makes the *next* JNI call on that thread undefined
-    // behaviour, so nothing may leave here with one.
-    if guard.exception_check().unwrap_or(false) {
+    // behaviour, so nothing may leave here with one. A failed *check* is
+    // treated as "there might be one": `ExceptionClear` with nothing pending is
+    // a documented no-op, so assuming the worst is free and keeps the invariant.
+    if guard.exception_check().unwrap_or(true) {
         let _ = guard.exception_clear();
     }
     Some(res)
 }
 
+/// The Android `Application` context as a JNI object.
+///
+/// `Result` rather than `Option` so the caller can say *why* there is none: a
+/// release build has no logcat, and the error string is the only evidence that
+/// survives to the `warn!` in [`publish_to_downloads`].
+///
+/// Two different failures live behind this call, and only one of them is ours
+/// to handle:
+///
+/// * `ndk_context::android_context()` is
+///   `unsafe { ANDROID_CONTEXT.expect("android context was not initialized") }`
+///   — it **panics** when the crate's global was never seeded. `src/lib.rs`
+///   seeds it best-effort and only warns when it cannot (`init_android_context`
+///   deliberately returns `Ok(())` after a `warn!`), so this is genuinely
+///   reachable: a download completing before `setup` runs, or playback starting
+///   first. The release profile sets `panic = "abort"`, so that is a process
+///   abort, and `catch_unwind` cannot intercept an abort, so nothing in this
+///   file can make that case survivable. It has to be fixed where the seeding
+///   happens; this function can only refuse to make it worse.
+/// * the seeded pointer being null. `ndk_context` is only ever handed a real
+///   leaked global ref by `try_seed`, so this is not expected — but a null
+///   `jobject` handed to `getContentResolver` is a `NullPtr` at best, so it is
+///   reported rather than wrapped into a `JObject` and passed on.
 #[cfg(target_os = "android")]
-fn service_context() -> Option<JObject<'static>> {
+fn service_context() -> Result<JObject<'static>, String> {
     let ctx = ndk_context::android_context().context();
     if ctx.is_null() {
-        return None;
+        return Err("android context jobject is null: ndk_context was never seeded".into());
     }
-    Some(unsafe { JObject::from_raw(ctx as jni::sys::jobject) })
+    Ok(unsafe { JObject::from_raw(ctx as jni::sys::jobject) })
 }
 
 /// Fallback: if `File::open(path)` fails for a `Download/Auralis` or `content://`
@@ -1041,15 +1180,22 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     with_attached_env(|env| -> Result<std::path::PathBuf, String> {
-        let ctx = service_context().ok_or("no context")?;
+        let ctx = service_context()?;
         let resolver = env
-            .call_method(&ctx, "getContentResolver", "()Landroid/content/ContentResolver;", &[])
+            .call_method(
+                &ctx,
+                "getContentResolver",
+                "()Landroid/content/ContentResolver;",
+                &[],
+            )
             .map_err(|e| e.to_string())?
             .l()
             .map_err(|e| e.to_string())?;
         // Resolve uri: if path already content:// parse, else query MediaStore by display_name
         let uri_obj = if path.starts_with("content://") {
-            let uri_class = env.find_class("android/net/Uri").map_err(|e| e.to_string())?;
+            let uri_class = env
+                .find_class("android/net/Uri")
+                .map_err(|e| e.to_string())?;
             let j_str = env.new_string(path).map_err(|e| e.to_string())?;
             env.call_static_method(
                 uri_class,
@@ -1071,7 +1217,9 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
                 .l()
                 .map_err(|e| e.to_string())?;
             let j_display = env.new_string(&display).map_err(|e| e.to_string())?;
-            let j_sel = env.new_string("display_name=?").map_err(|e| e.to_string())?;
+            let j_sel = env
+                .new_string("display_name=?")
+                .map_err(|e| e.to_string())?;
             let arr = env
                 .new_object_array(1, "java/lang/String", &j_display)
                 .map_err(|e| e.to_string())?;
@@ -1080,7 +1228,7 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
                 .call_method(
                     &resolver,
                     "query",
-                    "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+                    SIG_RESOLVER_QUERY,
                     &[
                         JValue::Object(&ext_uri),
                         JValue::Object(&proj),
@@ -1101,11 +1249,23 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
                 .z()
                 .map_err(|e| e.to_string())?;
             if !has_row {
-                env.call_method(&cursor, "close", "()V", &[]).map_err(|e| e.to_string())?;
+                env.call_method(&cursor, "close", "()V", &[])
+                    .map_err(|e| e.to_string())?;
                 return Err(format!("no MediaStore entry for {display}"));
             }
+            // The `_id` column name is built *before* the call rather than in
+            // the argument list: `new_string` only takes `&JNIEnv`, so the
+            // borrow would be fine either way, but a `JNIEnv` call nested in
+            // another `JNIEnv` call's arguments is exactly the shape that hides
+            // a type error, and this one was 158 columns wide.
+            let j_id_col = env.new_string("_id").map_err(|e| e.to_string())?;
             let id_col = env
-                .call_method(&cursor, "getColumnIndex", "(Ljava/lang/String;)I", &[JValue::Object(&env.new_string("_id").map_err(|e| e.to_string())?.into())])
+                .call_method(
+                    &cursor,
+                    "getColumnIndex",
+                    "(Ljava/lang/String;)I",
+                    &[JValue::Object(&j_id_col.into())],
+                )
                 .map_err(|e| e.to_string())?
                 .i()
                 .map_err(|e| e.to_string())?;
@@ -1114,21 +1274,40 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
                 .map_err(|e| e.to_string())?
                 .j()
                 .map_err(|e| e.to_string())?;
-            env.call_method(&cursor, "close", "()V", &[]).map_err(|e| e.to_string())?;
+            env.call_method(&cursor, "close", "()V", &[])
+                .map_err(|e| e.to_string())?;
             // Build content uri: content://media/external/downloads/<id>
-                        let base = env
+            let j_base = env
+                .new_string("content://media/external/downloads")
+                .map_err(|e| e.to_string())?;
+            let base = env
                 .call_static_method(
                     "android/net/Uri",
                     "parse",
                     "(Ljava/lang/String;)Landroid/net/Uri;",
-                    &[JValue::Object(&env.new_string("content://media/external/downloads").map_err(|e| e.to_string())?.into())],
+                    &[JValue::Object(&j_base.into())],
                 )
                 .map_err(|e| e.to_string())?
                 .l()
                 .map_err(|e| e.to_string())?;
-            let builder_obj = env.call_method(&base, "buildUpon", "()Landroid/net/Uri$Builder;", &[]).map_err(|e| e.to_string())?.l().map_err(|e| e.to_string())?;
-            env.call_method(&builder_obj, "appendPath", "(Ljava/lang/String;)Landroid/net/Uri$Builder;", &[JValue::Object(&JObject::from(env.new_string(id.to_string()).map_err(|e| e.to_string())?))]).map_err(|e| e.to_string())?;
-            let uri_result = env.call_method(&builder_obj, "build", "()Landroid/net/Uri;", &[]).map_err(|e| e.to_string())?.l().map_err(|e| e.to_string())?;
+            let builder_obj = env
+                .call_method(&base, "buildUpon", "()Landroid/net/Uri$Builder;", &[])
+                .map_err(|e| e.to_string())?
+                .l()
+                .map_err(|e| e.to_string())?;
+            let j_id = JObject::from(env.new_string(id.to_string()).map_err(|e| e.to_string())?);
+            env.call_method(
+                &builder_obj,
+                "appendPath",
+                "(Ljava/lang/String;)Landroid/net/Uri$Builder;",
+                &[JValue::Object(&j_id)],
+            )
+            .map_err(|e| e.to_string())?;
+            let uri_result = env
+                .call_method(&builder_obj, "build", "()Landroid/net/Uri;", &[])
+                .map_err(|e| e.to_string())?
+                .l()
+                .map_err(|e| e.to_string())?;
             uri_result
         };
         if uri_obj.is_null() {
@@ -1154,21 +1333,30 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
             .map_err(|e| e.to_string())?
             .l()
             .map_err(|e| e.to_string())?;
-        let j_cache_name = env.new_string("auralis_play_cache").map_err(|e| e.to_string())?;
+        let j_cache_name = env
+            .new_string("auralis_play_cache")
+            .map_err(|e| e.to_string())?;
         let cache_dir_obj = env
             .new_object(
                 "java/io/File",
                 "(Ljava/io/File;Ljava/lang/String;)V",
-                &[JValue::Object(&cache_file_obj), JValue::Object(&j_cache_name.into())],
+                &[
+                    JValue::Object(&cache_file_obj),
+                    JValue::Object(&j_cache_name.into()),
+                ],
             )
             .map_err(|e| e.to_string())?;
-        env.call_method(&cache_dir_obj, "mkdirs", "()Z", &[]).map_err(|e| e.to_string())?;
+        env.call_method(&cache_dir_obj, "mkdirs", "()Z", &[])
+            .map_err(|e| e.to_string())?;
         let j_display2 = env.new_string(&display).map_err(|e| e.to_string())?;
         let cache_file = env
             .new_object(
                 "java/io/File",
                 "(Ljava/io/File;Ljava/lang/String;)V",
-                &[JValue::Object(&cache_dir_obj), JValue::Object(&j_display2.into())],
+                &[
+                    JValue::Object(&cache_dir_obj),
+                    JValue::Object(&j_display2.into()),
+                ],
             )
             .map_err(|e| e.to_string())?;
         let cache_path_j = env
@@ -1182,33 +1370,46 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
             .map_err(|e| e.to_string())?;
         // FileOutputStream
         let fos = env
-            .new_object("java/io/FileOutputStream", "(Ljava/io/File;)V", &[JValue::Object(&cache_file)])
+            .new_object(
+                "java/io/FileOutputStream",
+                "(Ljava/io/File;)V",
+                &[JValue::Object(&cache_file)],
+            )
             .map_err(|e| e.to_string())?;
-        let _buf_class = env.find_class("java/io/InputStream").map_err(|e| e.to_string())?;
-        // 64KB buffer
-        let j_buf = env.new_byte_array(64 * 1024).map_err(|e| e.to_string())?;
-        let j_buf_raw = j_buf.as_raw();
+        let _buf_class = env
+            .find_class("java/io/InputStream")
+            .map_err(|e| e.to_string())?;
+        // One 64 KiB Java buffer, allocated once and refilled in place by
+        // `read`. `JObject::from` wraps the single local reference that
+        // `new_byte_array` made — it does not create a second one — so this is
+        // not a per-iteration reference and does not need deleting. The
+        // per-iteration `JObject::from_raw` calls it replaces were views of that
+        // same reference, so they leaked nothing either, but they were `unsafe`,
+        // twice per iteration, aliasing a reference another binding still owned
+        // (which `from_raw`'s contract forbids), and they read exactly like the
+        // leak they were not.
+        let j_buf = JObject::from(env.new_byte_array(64 * 1024).map_err(|e| e.to_string())?);
         loop {
-            let j_buf_obj = unsafe { JObject::from_raw(j_buf_raw) };
             let n = env
-                .call_method(&is, "read", "([B)I", &[JValue::Object(&j_buf_obj)])
+                .call_method(&is, "read", "([B)I", &[JValue::Object(&j_buf)])
                 .map_err(|e| e.to_string())?
                 .i()
                 .map_err(|e| e.to_string())?;
             if n <= 0 {
                 break;
             }
-            let j_buf_obj2 = unsafe { JObject::from_raw(j_buf_raw) };
             env.call_method(
                 &fos,
                 "write",
                 "([BII)V",
-                &[JValue::Object(&j_buf_obj2), JValue::Int(0), JValue::Int(n)],
+                &[JValue::Object(&j_buf), JValue::Int(0), JValue::Int(n)],
             )
             .map_err(|e| e.to_string())?;
         }
-        env.call_method(&fos, "close", "()V", &[]).map_err(|e| e.to_string())?;
-        env.call_method(&is, "close", "()V", &[]).map_err(|e| e.to_string())?;
+        env.call_method(&fos, "close", "()V", &[])
+            .map_err(|e| e.to_string())?;
+        env.call_method(&is, "close", "()V", &[])
+            .map_err(|e| e.to_string())?;
         Ok(std::path::PathBuf::from(cache_path))
     })
     .and_then(|r| r.ok())

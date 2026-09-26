@@ -765,6 +765,14 @@ fn with_attached_env<T>(
 
 #[cfg(target_os = "android")]
 fn service_context() -> Option<jni::objects::JObject<'static>> {
+    // Must come first: `android_context()` panics when the global is empty, and
+    // `panic = "abort"` makes that a process abort. The `is_null()` check below
+    // is therefore unreachable for the un-seeded case — this flag is the only
+    // thing standing between a failed seed and a dead app.
+    if !crate::android_context_seeded() {
+        tracing::warn!("Android context not seeded yet; skipping JNI path");
+        return None;
+    }
     let ctx = ndk_context::android_context().context();
     if ctx.is_null() {
         return None;

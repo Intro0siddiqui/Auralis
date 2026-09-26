@@ -431,6 +431,27 @@ mod android_jni {
         tracing::debug!("ndk_context seeded from ActivityThread.currentApplication()");
         true
     }
+
+    /// Whether the `ndk-context` global has been seeded.
+    ///
+    /// `ndk_context::android_context()` is literally
+    /// `unsafe { ANDROID_CONTEXT.expect("android context was not initialized") }`
+    /// — it panics when the global is empty, *before* any null check the caller
+    /// might write can run. This crate builds with `panic = "abort"`, so that
+    /// panic is a process abort, not a recoverable error. Anything that only
+    /// wants the context opportunistically (a notification bridge, a
+    /// MediaStore publish) must ask here first and degrade, rather than
+    /// discovering the answer the expensive way.
+    pub fn is_seeded() -> bool {
+        SEEDED.load(Ordering::SeqCst)
+    }
+}
+
+/// Whether the Android `ndk-context` global has been seeded — see
+/// [`android_jni::is_seeded`] for why asking is mandatory rather than defensive.
+#[cfg(target_os = "android")]
+pub(crate) fn android_context_seeded() -> bool {
+    android_jni::is_seeded()
 }
 
 /// The runtime invokes `JNI_OnLoad` once when the library is loaded, before any
