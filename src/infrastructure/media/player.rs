@@ -68,8 +68,12 @@ pub struct AudioPlayer {
     /// `start_at_index`), and that ordering is otherwise unobservable headlessly:
     /// a successful start needs an audio output device, and a failed one leaves
     /// no stamp behind to inspect.
+    // Behind a `Mutex` rather than a bare `Option` so a test can install it
+    // through `&self` — `AudioPlayer` is only ever used behind a shared
+    // reference (Tauri's `State<'_, AudioPlayer>`), so a seam needing `&mut`
+    // would not be reachable from a realistic test setup.
     #[cfg(test)]
-    start_observer: Option<Arc<dyn Fn(Option<usize>) + Send + Sync>>,
+    start_observer: Arc<std::sync::Mutex<Option<Arc<dyn Fn(Option<usize>) + Send + Sync>>>>,
 }
 
 // SAFETY: `AudioPlayer` is a bag of `Arc<RwLock<_>>` / `Arc<Mutex<_>>`
@@ -146,7 +150,7 @@ impl AudioPlayer {
             play_started_at: Arc::new(RwLock::new(None)),
             track_duration: Arc::new(RwLock::new(Duration::ZERO)),
             #[cfg(test)]
-            start_observer: None,
+            start_observer: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -389,7 +393,15 @@ impl AudioPlayer {
         #[cfg(test)]
         {
             let index = *self.current_index.read().await;
-            if let Some(observe) = self.start_observer.as_ref() {
+            // Clone the observer out and drop the guard before calling it: the
+            // closure locks its own `Mutex`, and holding two locks across a
+            // callback is how a test deadlocks instead of failing.
+            let observe = self
+                .start_observer
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone());
+            if let Some(observe) = observe {
                 observe(index);
             }
         }
@@ -1529,8 +1541,8 @@ mod tests {
     fn record_start_indices(player: &AudioPlayer) -> Arc<std::sync::Mutex<Vec<Option<usize>>>> {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorder = Arc::clone(&seen);
-        player.start_observer = Some(Arc::new(move |index| {
-            recorder.lock().unwrap().push(index);
+        *player.start_observer.lock().expect("observer mutex") = Some(Arc::new(move |index| {
+            recorder.lock().expect("recorder mutex").push(index);
         }));
         seen
     }
