@@ -906,7 +906,9 @@ mod tests {
             "measured {measured} should be a ~287s track, not the decoder's 92s"
         );
         assert_eq!(facts.decoded_secs, Some(92));
-        assert_ne!(f64::from(facts.decoded_secs.unwrap()), measured);
+        // `f64: From<u64>` is deliberately not implemented (the conversion would
+        // be lossy above 2^53), so this cast is the only correct spelling.
+        assert_ne!(facts.decoded_secs.unwrap() as f64, measured);
     }
 
     #[test]

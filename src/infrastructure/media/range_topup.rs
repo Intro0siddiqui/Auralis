@@ -578,11 +578,13 @@ mod tests {
                 if let Ok(mut log) = self.seen.lock() {
                     log.push(head);
                 }
-                let Some(response) = self
-                    .responses
-                    .get(served)
-                    .or_else(|| self.responses.last())
-                else {
+                // Bound before the `let ... else` on purpose: a method chain
+                // inside a let-else is formatted differently by old and new
+                // rustfmt (1.63 splits it, current stable joins it), which
+                // would make `cargo fmt --check` disagree with a local run.
+                // A plain binding is stable across both.
+                let served_response = self.responses.get(served).or_else(|| self.responses.last());
+                let Some(response) = served_response else {
                     return;
                 };
                 served += 1;
