@@ -62,6 +62,14 @@ pub struct AudioPlayer {
     /// When the current playback session started.
     play_started_at: Arc<RwLock<Option<Instant>>>,
     track_duration: Arc<RwLock<Duration>>,
+    /// Test-only observer, called with the queue index in effect at the moment a
+    /// start is attempted. `next` / `previous` have to move the index *before*
+    /// starting so the commit's duration repair lands on the incoming track (see
+    /// `start_at_index`), and that ordering is otherwise unobservable headlessly:
+    /// a successful start needs an audio output device, and a failed one leaves
+    /// no stamp behind to inspect.
+    #[cfg(test)]
+    start_observer: Option<Arc<dyn Fn(Option<usize>) + Send + Sync>>,
 }
 
 // SAFETY: `AudioPlayer` is a bag of `Arc<RwLock<_>>` / `Arc<Mutex<_>>`
@@ -71,6 +79,10 @@ pub struct AudioPlayer {
 // behind `Arc` + synchronization primitives, so sharing `&AudioPlayer`
 // across threads (as Tauri's `State` requires) is sound. No `&mut self`
 // aliasing is exposed.
+//
+// The one non-`Arc` field, `start_observer`, is `#[cfg(test)]` and so absent
+// from every build this impl actually governs; it is `Send + Sync` by its own
+// trait bounds regardless. Keep that true if it is ever promoted to a real field.
 unsafe impl Send for AudioPlayer {}
 unsafe impl Sync for AudioPlayer {}
 
@@ -109,8 +121,10 @@ struct EstablishedStart {
     /// the decoder's (see [`reconcile_duration`]).
     duration: Duration,
     /// The decoder's own claim, kept so the commit can tell "the library said so"
-    /// from "the decoder corrected it". The mirrored copies of the track are
-    /// only re-stamped in the second case — see [`AudioPlayer::commit_start`].
+    /// from "the decoder had something to say". The mirrored copies are re-stamped
+    /// whenever the decoder spoke at all — see [`AudioPlayer::commit_start`],
+    /// which documents why that is not the same thing as "the decoder corrected
+    /// it", and why the distinction does not change the published value.
     decoded: Option<Duration>,
 }
 
@@ -131,6 +145,8 @@ impl AudioPlayer {
             play_anchor: Arc::new(RwLock::new(None)),
             play_started_at: Arc::new(RwLock::new(None)),
             track_duration: Arc::new(RwLock::new(Duration::ZERO)),
+            #[cfg(test)]
+            start_observer: None,
         })
     }
 
@@ -272,11 +288,22 @@ impl AudioPlayer {
     /// publish and so may only refresh the length of what is already current.
     ///
     /// The mirrored copies (`current_track.duration_secs` and the queue entry at
-    /// `current_index`) are re-stamped only when the *decoder* had an opinion to
-    /// correct them with. Without one they already hold the library's value, and
-    /// the queue entry is a different track anyway while `next` / `previous` are
-    /// between `play_track` and their own index update — overwriting it there
-    /// would corrupt a track that is still current until they land.
+    /// `current_index`) are re-stamped whenever the decoder had *any* opinion.
+    /// That is deliberately not "only when the decoder corrected the library":
+    /// without an opinion `duration` is the library's value, which is exactly
+    /// what both copies already hold — `play_track` receives the queue entry as
+    /// its `Track`, and `reconcile_duration` never lowers a value — so the extra
+    /// guard would change no byte. With one, stamping is the whole point: the
+    /// decoder is the only thing that can raise a placeholder duration, and the
+    /// queue is a copy that has to follow or the UI disagrees with the player
+    /// bar.
+    ///
+    /// The queue entry is re-stamped at whatever `current_index` names *at this
+    /// moment*, which is why every caller moves the index before starting the
+    /// track: [`AudioPlayer::start_at_index`] for `next` / `previous` and
+    /// `commands::playback::play` for a direct play. Pointing at the outgoing
+    /// track instead re-stamped the track just left with the incoming track's
+    /// length, and left the track now playing without its own repair.
     async fn commit_start(&self, track: Option<Track>, start: &EstablishedStart) {
         let mirror_secs = start.decoded.map(|_| start.duration.as_secs() as u32);
 
@@ -317,13 +344,60 @@ impl AudioPlayer {
     /// `track_duration` and the queue still describing the previous track, rather
     /// than leaving the player bar pointing at a song that never played.
     ///
-    /// The queue index is deliberately not written here — `next` and `previous`
-    /// own it, and set it only after this returns `Ok`.
+    /// The queue index is not written here. Its caller owns it, and it owns it
+    /// *before* calling: the commit inside this method re-stamps the entry at
+    /// `current_index`, so that index has to name the incoming track by then. See
+    /// `start_at_index`, which is how `next` / `previous` do it.
     pub async fn play_track(&self, track: Track) -> Result<(), PlayerError> {
         info!(track_id = %track.id, title = %track.title, "Starting track playback");
         let library_duration = Duration::from_secs(track.duration_secs as u64);
         let start = self.start_sink(&track.file_path, library_duration).await?;
         self.commit_start(Some(track), &start).await;
+        Ok(())
+    }
+
+    /// Point the queue at `idx` and start `track` there. Used by `next` and
+    /// `previous`, which is where a transition's index is decided.
+    ///
+    /// The index moves **before** the start, because the commit that closes a
+    /// successful start re-stamps a decoder-repaired duration onto the entry at
+    /// `current_index`, and that must be the incoming track. Setting it
+    /// afterwards meant the stamp landed on the outgoing track's entry on every
+    /// ordinary transition (auto-advance included): the track just left was
+    /// re-stamped with the new track's length, and the track now playing never
+    /// received its own repair in the queue at all.
+    ///
+    /// `previous_index` is the caller's already-read copy of the outgoing index,
+    /// passed in rather than re-read here so the rollback cannot pick up a value
+    /// somebody else wrote while the start was in flight. `play_track` is
+    /// transactional — on `Err` it has published nothing, so `current_track` still
+    /// describes the previous track and leaving the index forward would highlight
+    /// one entry in the queue while the player bar shows another. Both the
+    /// forward and the wrapping case (`next` off the end, `previous` off the
+    /// start) take this same path, so the rollback is the only thing that
+    /// distinguishes them.
+    async fn start_at_index(
+        &self,
+        idx: usize,
+        previous_index: Option<usize>,
+        track: &Track,
+    ) -> Result<(), PlayerError> {
+        *self.current_index.write().await = Some(idx);
+
+        // Test-only: the index as the start sees it, immediately before
+        // `play_track` — see the `start_observer` field.
+        #[cfg(test)]
+        {
+            let index = *self.current_index.read().await;
+            if let Some(observe) = self.start_observer.as_ref() {
+                observe(index);
+            }
+        }
+
+        if let Err(e) = self.play_track(track.clone()).await {
+            *self.current_index.write().await = previous_index;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -645,9 +719,9 @@ impl AudioPlayer {
             Some(idx) => {
                 let track = queue[idx].clone();
                 drop(queue);
-                // Only update current_index after play_track succeeds to avoid divergence
-                self.play_track(track.clone()).await?;
-                *self.current_index.write().await = Some(idx);
+                // Index first, rolled back on a failed start — the commit's
+                // duration repair has to land on this track's entry.
+                self.start_at_index(idx, current_idx, &track).await?;
                 // Maintain shuffle history (visited stack) for exhaust/previous
                 if shuffle {
                     self.record_shuffle_history(current_idx, idx).await;
@@ -721,9 +795,9 @@ impl AudioPlayer {
             Some(idx) => {
                 let track = queue[idx].clone();
                 drop(queue);
-                // Only update index after successful play
-                self.play_track(track.clone()).await?;
-                *self.current_index.write().await = Some(idx);
+                // Same ordering as `next`: index first so the commit's duration
+                // repair lands on this track's entry, rolled back if it fails.
+                self.start_at_index(idx, current_idx, &track).await?;
                 Ok(Some(track))
             }
             None => Ok(None),
@@ -1371,11 +1445,19 @@ mod tests {
         );
     }
 
-    /// With no decoder opinion there is nothing to correct the mirrored copies
-    /// *with*: the queue entry at `current_index` still belongs to the track that
-    /// is current until `next` / `previous` land their own index update, and
-    /// stamping it with the incoming track's length would corrupt a track that is
-    /// still current.
+    /// With no decoder opinion there is nothing new to say about the length, so
+    /// the commit must not reach outside the track it was given. The queue entry
+    /// at `current_index` is a *copy* that can be some other track entirely — a
+    /// bare `play(path)` has no queue identity at all — and restamping it here
+    /// would be a write nobody asked for.
+    ///
+    /// This test seeds the index as the previous track's rather than the
+    /// incoming one's, which is now a caller bug rather than a `next` /
+    /// `previous` state; it is kept because the guard it pins is exactly the
+    /// protection a bare-path commit needs. The ordering that keeps `next` /
+    /// `previous` out of this situation is pinned separately, by
+    /// `next_moves_the_queue_index_before_starting_the_track` and its two
+    /// siblings.
     #[tokio::test]
     async fn commit_start_without_a_decoder_opinion_leaves_the_queue_entry_alone() {
         let player = AudioPlayer::new().unwrap();
@@ -1435,6 +1517,162 @@ mod tests {
             .expect("a bare-path commit must not clear the current track");
         assert_eq!(current.id, previous.id);
         assert_eq!(current.duration_secs, 300);
+    }
+
+    /// Attach a recorder for the queue index in effect at each start attempt, and
+    /// hand back the log.
+    ///
+    /// This is the only seam that can show which entry a transition's commit
+    /// would re-stamp: a *successful* start needs a rodio output device, and a
+    /// failed one publishes nothing at all, so neither the committed state nor
+    /// the queue tells you what the index was while the start was in flight.
+    fn record_start_indices(player: &AudioPlayer) -> Arc<std::sync::Mutex<Vec<Option<usize>>>> {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        player.start_observer = Some(Arc::new(move |index| {
+            recorder.lock().unwrap().push(index);
+        }));
+        seen
+    }
+
+    /// The forward transition, and the regression this pins: `next` used to call
+    /// `play_track` first and move the index afterwards, so during the commit the
+    /// index still named the *outgoing* track. Its queue entry was re-stamped with
+    /// the incoming track's length and the track that ended up playing never
+    /// received its own repair — on every ordinary transition, auto-advance
+    /// included.
+    ///
+    /// The start is made to fail (the queued track's path does not exist) so this
+    /// runs with no audio hardware; the observer reports the index at the moment
+    /// the start was attempted, which is the value the commit would have read.
+    /// The rollback is asserted in the same breath, because a failed start that
+    /// left the index forward would highlight one entry while the player bar
+    /// still showed another.
+    #[tokio::test]
+    async fn next_moves_the_queue_index_before_starting_the_track() {
+        let player = AudioPlayer::new().unwrap();
+        seed_previous_state(&player).await;
+        let seen = record_start_indices(&player);
+
+        let err = player
+            .next_internal(false)
+            .await
+            .expect_err("the queued track's file does not exist, so the start must fail");
+        assert!(
+            matches!(&err, PlayerError::FileError(_)),
+            "expected a FileError, got {err:?}"
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some(1)],
+            "next must move the queue index to the incoming track before starting it, \
+             otherwise the commit re-stamps the outgoing track's entry"
+        );
+        assert_eq!(
+            player.get_current_index().await,
+            Some(0),
+            "a failed start must leave the index on the track the player still describes"
+        );
+    }
+
+    /// The same ordering where `next` wraps off the end of the queue to index 0.
+    /// Covered separately because the outgoing track is then the *last* entry: the
+    /// old ordering stamped the tail of the queue while the track actually
+    /// playing was the head, which the forward case cannot show.
+    #[tokio::test]
+    async fn next_wrapping_to_the_start_moves_the_index_before_starting_the_track() {
+        let player = AudioPlayer::new().unwrap();
+        seed_previous_state(&player).await;
+        player.set_current_index(Some(1)).await;
+        player.set_repeat_mode(RepeatMode::All).await;
+        let seen = record_start_indices(&player);
+
+        let err = player
+            .next_internal(false)
+            .await
+            .expect_err("the wrapped-to track's file does not exist, so the start must fail");
+        assert!(
+            matches!(&err, PlayerError::FileError(_)),
+            "expected a FileError, got {err:?}"
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some(0)],
+            "a wrapped next must point the index at the wrapped-to track before starting it"
+        );
+        assert_eq!(
+            player.get_current_index().await,
+            Some(1),
+            "a failed start must leave the index on the track the player still describes"
+        );
+    }
+
+    /// `previous` carried the identical bug and needs the identical ordering; its
+    /// rollback matters as much, since going back to an unplayable track would
+    /// otherwise leave the highlight on that track while the player bar showed
+    /// the one before it.
+    #[tokio::test]
+    async fn previous_moves_the_queue_index_before_starting_the_track() {
+        let player = AudioPlayer::new().unwrap();
+        seed_previous_state(&player).await;
+        player.set_current_index(Some(1)).await;
+        let seen = record_start_indices(&player);
+
+        let err = player
+            .previous()
+            .await
+            .expect_err("the previous track's file does not exist, so the start must fail");
+        assert!(
+            matches!(&err, PlayerError::FileError(_)),
+            "expected a FileError, got {err:?}"
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some(0)],
+            "previous must move the queue index to the incoming track before starting it, \
+             otherwise the commit re-stamps the outgoing track's entry"
+        );
+        assert_eq!(
+            player.get_current_index().await,
+            Some(1),
+            "a failed start must leave the index on the track the player still describes"
+        );
+    }
+
+    /// `previous` wrapping from the head of the queue to the tail under
+    /// `RepeatAll`, so the target index is neither the current one nor the
+    /// neighbouring one. Same ordering, same rollback, and the only remaining
+    /// combination of (method × wrap-around) that the three tests above leave
+    /// unpinned.
+    #[tokio::test]
+    async fn previous_wrapping_to_the_end_moves_the_index_before_starting_the_track() {
+        let player = AudioPlayer::new().unwrap();
+        seed_previous_state(&player).await;
+        player.set_repeat_mode(RepeatMode::All).await;
+        let seen = record_start_indices(&player);
+
+        let err = player
+            .previous()
+            .await
+            .expect_err("the wrapped-to track's file does not exist, so the start must fail");
+        assert!(
+            matches!(&err, PlayerError::FileError(_)),
+            "expected a FileError, got {err:?}"
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some(1)],
+            "a wrapped previous must point the index at the wrapped-to track before starting it"
+        );
+        assert_eq!(
+            player.get_current_index().await,
+            Some(0),
+            "a failed start must leave the index on the track the player still describes"
+        );
     }
 
     #[tokio::test]
