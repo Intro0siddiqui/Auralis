@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { coreMethods } from '../../ui/js/modules/core.js';
 import { downloadMethods } from '../../ui/js/modules/downloads.js';
+import { applyPoTokenToUrl } from '../../ui/js/modules/pot_scope.js';
 
 // ── helpers extracted verbatim from youtube.js so tests don't need a WebView ──
 function isDirectAudio(url) { return /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|webm)(\?.*)?$/i.test(url); }
@@ -437,58 +438,76 @@ describe('PlayerController queue pre-rendered HTML & observer cleanup', () => {
     });
 });
 
-describe('pot-for-TV (YAD 7C4-TAWg7QA / Sx8z0U0lkjQ regression)', () => {
+// Video IDs are kept because this is where the behaviour was first seen on a
+// Jio IPv6 residential line. The expectation has since been INVERTED, and the
+// reason matters: the token this app can mint is a BotGuard/WEB one, and a PO
+// token is platform-bound. Carrying it on a TV (or ios/android_vr) URL puts a
+// foreign token on a request that is sent with a client-matched User-Agent, and
+// googlevideo answers 403 Forbidden at byte 0 with an empty text/plain body.
+// The old test asserted the opposite because it exercised a hand-written *copy*
+// of the append logic rather than the real code path, so it passed no matter
+// what actually shipped.
+describe('pot is not carried on a non-web client url (TV / YAD 7C4-TAWg7QA lineage)', () => {
+    it('a web-minted token stays off a TV url', () => {
+        const fakeToken = 'TEST_POT_TOKEN_6h_CACHE_123';
+        const googlevideoUrl = 'https://rr1---sn-gwpa-cived.googlevideo.com/videoplayback?expire=1234567890&ei=test&ip=2409%3A40c4%3A35b%3Ab681%3A8000%3A%3A&itag=140&c=TV&cplayer=UNIPLAYER&pot_placeholder=0';
+        const r = applyPoTokenToUrl(googlevideoUrl, { winningClient: 'TV', token: fakeToken, tokenIsWebBound: true });
+        assert.equal(r.action, 'no-token', 'TV must not receive a Web-bound token');
+        assert.ok(!r.url.includes('pot='), `web token leaked onto a TV url: ${r.url}`);
+        assert.equal(new URL(r.url).searchParams.get('itag'), '140', 'other params must survive');
+    });
+
+    it('strips a pot that the vendored decipher already put on a TV url', () => {
+        const fakeToken = 'TEST_POT_TOKEN_6h_CACHE_123';
+        const withPot = 'https://rr1---sn-gwpa-cived.googlevideo.com/videoplayback?itag=140&c=TV&pot=' + fakeToken;
+        const r = applyPoTokenToUrl(withPot, { winningClient: 'TV', token: fakeToken, tokenIsWebBound: true });
+        assert.equal(r.action, 'stripped');
+        assert.ok(!r.url.includes('pot='), r.url);
+    });
+
+    it('still carries a token the user supplied in Settings, even on TV', () => {
+        // We did not mint that one, so it may legitimately be a TV/iOS token and
+        // it is not ours to second-guess.
+        const url = 'https://rr1---sn-gwpa-cived.googlevideo.com/videoplayback?itag=140&c=TV';
+        const r = applyPoTokenToUrl(url, { winningClient: 'TV', token: 'USER_SUPPLIED', tokenIsWebBound: false });
+        assert.equal(r.action, 'attached');
+        assert.equal(new URL(r.url).searchParams.get('pot'), 'USER_SUPPLIED');
+    });
+});
+
+describe('pot placement in youtube.js and the vendored decipher', () => {
     const ytPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/youtube.js');
     const vendorPath = path.resolve(path.dirname(ytPath), '../vendor/youtubei.esm.mjs');
 
-    it('fake resolve mints token and appends &pot= to googlevideo URL for winningClient TV', () => {
-        // Simulate youtube.js pot append logic (defensive manual append for googlevideo)
-        function appendPot(streamUrl, potVal) {
-            if (!streamUrl || !potVal) return streamUrl;
-            if (streamUrl.includes('pot=')) return streamUrl;
-            try {
-                const u = new URL(streamUrl);
-                if (u.hostname.includes('googlevideo.com') || u.hostname.includes('youtube.com')) {
-                    u.searchParams.set('pot', potVal);
-                    return u.toString();
-                }
-            } catch (_) {
-                if (!streamUrl.includes('pot=')) return streamUrl + (streamUrl.includes('?') ? '&' : '?') + 'pot=' + encodeURIComponent(potVal);
-            }
-            return streamUrl;
-        }
-
-        // Fake minted token
-        const fakeToken = 'TEST_POT_TOKEN_6h_CACHE_123';
-        const winningClient = 'TV';
-        const googlevideoUrl = 'https://rr1---sn-gwpa-cived.googlevideo.com/videoplayback?expire=1234567890&ei=test&ip=2409%3A40c4%3A35b%3Ab681%3A8000%3A%3A&itag=140&id=o-ABC123&source=youtube&requiressl=yes&mh=xyz&mm=31%2C29&mn=sn-gwpa-cived&ms=au%2Crdu&mv=m&mvi=1&pl=24&initcwndbps=1280000&spn=1&vprv=1&mime=audio%2Fmp4&cnr=14&c=TV&cver=2.20250101&cplayer=UNIPLAYER&cbrand=google&cbrandft=1&cbr=SAMSUNG&cbrver=21.0&cmodel=SM-G998B&cplatform=mobile&csn=1&pot_placeholder=0&n=abc123&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cvprv%2Cmime%2Cns%2Ccnr%2Csparams%2Cpot';
-
-        // Simulate resolve that would have used TV client because no poToken initially, then minted
-        assert.equal(winningClient, 'TV', 'winningClient should be TV for Jio IPv6 residential path');
-
-        const withPot = appendPot(googlevideoUrl, fakeToken);
-        assert.ok(withPot.includes('pot='), 'googlevideo URL must contain pot param after append');
-        const u = new URL(withPot);
-        assert.equal(u.searchParams.get('pot'), fakeToken, 'pot value must match minted token');
-        assert.ok(u.hostname.includes('googlevideo.com'), 'hostname must be googlevideo');
-        // Ensure pot is searchable via has('pot')
-        assert.equal(u.searchParams.has('pot'), true);
-
-        // Verify original URL without pot would be rejected on sn-gwpa-cived 2026-02 Jio CGNAT without pot
-        const before = new URL(googlevideoUrl);
-        assert.equal(before.searchParams.has('pot'), false, 'original URL has no pot');
-    });
-
-    it('youtube.js source unconditionally appends pot (Appended pot / searchParams.set)', () => {
+    it('youtube.js delegates pot placement to the tested pot_scope module', () => {
         const src = fs.readFileSync(ytPath, 'utf8');
-        // Must contain unconditional pot append logic
-        const hasPotSet = src.includes("searchParams.set('pot'") || src.includes('searchParams.set("pot"') || src.includes("Appended pot");
-        assert.ok(hasPotSet, 'youtube.js must contain searchParams.set(\'pot\' or Appended pot comment');
-        // Ensure the defensive append is not gated behind sabr check in youtube.js
-        // The pot append block should exist outside any sabr guard
-        assert.ok(src.includes("Appended pot to googlevideo URL"), 'youtube.js should contain Appended pot log comment');
-        // pot logic should handle both opts.poToken and opts.po_token
-        assert.ok(src.includes("opts.poToken") && src.includes("opts.po_token"), 'youtube.js pot logic must handle both poToken variants');
+        // The decision used to be inline and unconditional, which is what put a
+        // Web/BotGuard token on ios/android_vr URLs and earned a 403 at byte 0.
+        // It now lives in modules/pot_scope.js so it can be unit-tested; this
+        // test only asserts the delegation exists and still handles both
+        // spellings of the option. The behaviour itself is covered by
+        // scripts/tests/pot_scope.test.js, which imports the real module.
+        assert.ok(
+            src.includes("import('./modules/pot_scope.js')"),
+            'youtube.js must import modules/pot_scope.js for the pot decision'
+        );
+        assert.ok(
+            src.includes('applyPoTokenToUrl'),
+            'youtube.js must delegate to applyPoTokenToUrl'
+        );
+        assert.ok(
+            src.includes('tokenIsWebBound = true'),
+            'youtube.js must record that a token it minted itself is Web-bound'
+        );
+        assert.ok(
+            src.includes('opts.poToken') && src.includes('opts.po_token'),
+            'youtube.js pot logic must handle both poToken spellings'
+        );
+        // The old unconditional append must be gone from youtube.js itself.
+        assert.ok(
+            !src.includes("u.searchParams.set('pot'"),
+            "youtube.js must not append pot inline any more (it is pot_scope.js's job)"
+        );
     });
 
     it('vendor youtubei.esm.mjs no longer guards pot on sabr', () => {

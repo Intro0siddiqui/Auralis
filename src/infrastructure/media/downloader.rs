@@ -1173,10 +1173,32 @@ impl Downloader {
         // atom, so a half-downloaded file still "validates" and used to be
         // renamed + reported as completed (and played as silence afterwards).
         // Decide completeness from the byte count, never from metadata alone.
-        let staged_bytes = tokio::fs::metadata(&job.staging_path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
+        // This MUST stay the true on-disk length, never `downloaded_bytes`.
+        //
+        // `range_topup::top_up` appends with `append(true)`, which writes at the
+        // real end-of-file regardless of the `start` it is given, and it grants
+        // a `200` response the "no range needed" exception when `start == 0`.
+        // Both are only sound while `start` is the file's real length: a `200`
+        // from byte 0 would otherwise be appended after existing bytes and
+        // reproduce exactly the corruption the top-up validation exists to
+        // prevent. `have` further down likewise advances by the clamped `added`,
+        // not by the progress counter. Do not "simplify" this to the counter.
+        //
+        // A stat failure is a hard error rather than `unwrap_or(0)`: reporting
+        // a non-empty file as empty would both re-admit that whole-object
+        // append and skip the completeness checks below.
+        let staged_bytes = match tokio::fs::metadata(&job.staging_path).await {
+            Ok(m) => m.len(),
+            Err(e) => {
+                return Err(DownloaderError::IoError(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "{}: cannot stat the staged file to decide whether it is complete: {e}",
+                        job.staging_path.display()
+                    ),
+                )));
+            }
+        };
         let short_by_advertised =
             total_bytes.is_some_and(|t| t > 0 && staged_bytes + COMPLETE_TOLERANCE_BYTES < t);
         let short_by_duration = match (total_bytes, expected_duration_secs) {

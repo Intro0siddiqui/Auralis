@@ -306,6 +306,12 @@ class YouTubeResolver {
         // Mint happens regardless of winningClient (before actions.execute) and even when caller passed TV preference
         // without token (opts.poToken empty) — visitorData-bound cache via generatePoTokenForVideo (nativeFetchPo for jnn-pa + interpreter_url).
         let client = null;
+        // True when the token in play is one WE minted (or read from our own
+        // cache). Those come from WebPoMinter, i.e. a BotGuard/WEB token, and a PO
+        // token is platform-bound: only web-family clients honour it. A token the
+        // user typed into Settings is left alone — that one may legitimately be an
+        // iOS/Android token, so we must not assume anything about it.
+        let tokenIsWebBound = false;
         if (!opts.poToken && !opts.po_token) {
             try {
                 const poMod = await import('./modules/po_token.js').catch(() => import('./po_token.js')).catch(() => null);
@@ -320,6 +326,7 @@ class YouTubeResolver {
                     const cached = getCachedPoToken ? getCachedPoToken(videoId, vdForCache) : null;
                     if (cached) {
                         opts = { ...opts, poToken: cached.poToken, po_token: cached.poToken, visitorData: cached.visitorData || vdForCache || opts.visitorData, visitor_data: cached.visitorData || vdForCache };
+                        tokenIsWebBound = true;
                         console.log(`[YouTubeResolver] Using cached PO token for ${videoId}`);
                     } else if (generatePoTokenForVideo) {
                         const tmpClient = await this._client(opts);
@@ -327,6 +334,7 @@ class YouTubeResolver {
                         if (minted?.poToken) {
                             opts = { ...opts, poToken: minted.poToken, po_token: minted.poToken, visitorData: minted.visitorData || vdForCache || opts.visitorData, visitor_data: minted.visitorData || vdForCache };
                             if (setCachedPoToken) setCachedPoToken(videoId, minted);
+                            tokenIsWebBound = true;
                             console.log(`[YouTubeResolver] Minted PO token for ${videoId}`);
                         } else {
                             console.warn(`[YouTubeResolver] No PO token minted for ${videoId} — will try TV/ANDROID_VR fallback`);
@@ -947,24 +955,23 @@ class YouTubeResolver {
             } catch (_) {}
         }
 
-        // Ensure pot is appended as &pot= on googlevideo URL via Player.decipher (youtubei.esm.mjs)
-        // Player.decipher already appends pot when session.player.po_token is set; add defensive manual append
-        // so Jio IPv6 residential (no datacenter proxy) succeeds even if Player version lags.
-        if (streamUrl && (opts.poToken || opts.po_token)) {
-            const potVal = opts.poToken || opts.po_token;
-            // Player.decipher path already handled pot when po_token bound to session; verify via URL
-            if (!streamUrl.includes('pot=')) {
-                try {
-                    const u = new URL(streamUrl);
-                    // Only append for googlevideo hosts (avoid polluting other URLs)
-                    if (u.hostname.includes('googlevideo.com') || u.hostname.includes('youtube.com')) {
-                        u.searchParams.set('pot', potVal);
-                        streamUrl = u.toString();
-                        console.log(`[YouTubeResolver] Appended pot to googlevideo URL for ${videoId}`);
-                    }
-                } catch (_) {
-                    if (!streamUrl.includes('pot=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + 'pot=' + encodeURIComponent(potVal);
-                }
+        // A PO token is *platform-bound* — see modules/pot_scope.js. Attaching
+        // the BotGuard/WEB token we mint to an `ios`/`android`/`android_vr` URL
+        // makes googlevideo answer 403 at byte 0, because the client-matched UA
+        // (uaMap below) is then sent against a foreign token. The decision lives
+        // in a dependency-free module so it is unit-tested, not just asserted.
+        {
+            const { applyPoTokenToUrl } = await import('./modules/pot_scope.js');
+            const applied = applyPoTokenToUrl(streamUrl, {
+                winningClient: winningClient,
+                token: opts.poToken || opts.po_token || null,
+                tokenIsWebBound: tokenIsWebBound,
+            });
+            streamUrl = applied.url;
+            if (applied.action === 'attached') {
+                console.log(`[YouTubeResolver] Appended pot to ${winningClient} googlevideo URL for ${videoId}`);
+            } else if (applied.action === 'stripped') {
+                console.warn(`[YouTubeResolver] Stripped pot from a ${winningClient} URL for ${videoId}: ${applied.detail}`);
             }
         }
 
