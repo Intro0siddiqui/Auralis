@@ -874,11 +874,19 @@ describe('YouTube Search & Streaming Integration', () => {
     it('downloads.js only rotates to a client the report proves can serve audio', async () => {
         // Real per-client report from the device (v2.6.43, track BElct8HWkp8):
         // only IOS and ANDROID_VR handed out audio urls; ANDROID was SABR-only
-        // and MWEB/TV/WEB came back UNPLAYABLE. Rotating into any of those just
-        // burns a download (the SABR-only one ends on a 403 for muxed itag 18).
+        // and MWEB/TV/WEB came back UNPLAYABLE. Rotating into the SABR-only one
+        // burns a download (it ends on a 403 for muxed itag 18).
+        //
+        // The UNPLAYABLE three were lumped in with it here, and that lumping was
+        // the defect. "Returned nothing on this attempt" and "provably cannot
+        // ever serve" are different facts, and only the second is safe to make
+        // permanent — see the 2026-09-27 hsXKOsnptw4 measurement quoted in the
+        // next test. So this test now pins the half that is real (the SABR-only
+        // client is never asked) and asserts the corrected behaviour for the
+        // half that was not.
         const report = [
             { client: 'IOS', status: 'OK', audioWithUrl: 2, adaptiveWithUrl: 20 },
-            { client: 'ANDROID', status: 'OK', audioWithUrl: 0, adaptiveWithUrl: 0, sabrStreamingUrl: true },
+            { client: 'ANDROID', status: 'OK', audioWithUrl: 0, adaptive: 25, adaptiveWithUrl: 0, progressiveWithUrl: 0, sabrStreamingUrl: true },
             { client: 'ANDROID_VR', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 22 },
             { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0 },
             { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0 },
@@ -915,11 +923,344 @@ describe('YouTube Search & Streaming Integration', () => {
         assert.equal(calls.length, 1, 'exactly one retry expected');
         assert.equal(calls[0].client, 'ANDROID_VR', 'must retry with a client that handed out audio urls');
 
-        // Attempt 2: ANDROID_VR truncated as well and only WEB is left, which the
-        // report shows as UNPLAYABLE -> stop instead of burning another download.
+        // Attempt 2: ANDROID_VR truncated too, and only WEB is left. WEB's record
+        // is UNPLAYABLE with no formats at all, which establishes nothing about
+        // the client beyond this attempt — so it is a legitimate last resort, and
+        // the budget is what stops the chain, not the client list.
         ({ obj, calls } = makeCtx(['IOS', 'ANDROID_VR']));
         await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: truncated });
-        assert.equal(calls.length, 0, 'must not rotate into a client the report proves cannot serve audio');
+        assert.equal(calls.length, 1, 'a merely-empty client stays eligible');
+        assert.equal(calls[0].client, 'WEB', 'the only client left is asked before giving up');
+
+        // ...and the SABR-only client is never asked, even when it is the single
+        // remaining candidate. That is the half of the original assertion that
+        // was correct: ANDROID described 25 adaptive formats and served a url on
+        // none of them, answering with SABR metadata instead. That is a fact
+        // about the client, not about the attempt.
+        const sabrOnly = report.map((e) => (e.client === 'WEB' ? { ...e, status: 'OK', audioWithUrl: 0, adaptive: 18, adaptiveWithUrl: 0, progressiveWithUrl: 0, sabrStreamingUrl: true } : e));
+        const sabrObj = {
+            ...downloadMethods,
+            _pendingDownloadContexts: new Map(),
+            extractErrorMessage: (p) => p.error || '',
+            showToast: () => {},
+            getDownloadOptions: () => ({}),
+            downloadResolvedTrack: async () => { throw new Error('must not be called'); },
+        };
+        sabrObj._autoRetryBudget = new Map([['BElct8HWkp8', { attempts: 1, triedClients: ['IOS', 'ANDROID_VR'] }]]);
+        sabrObj._pendingDownloadContexts.set('dl1', {
+            key: 'BElct8HWkp8',
+            resolved: { client: 'ANDROID_VR', orderedClients: ordered, retryClients: ['ANDROID'], client_report: sabrOnly },
+            opts: {}, originalUrl: 'https://youtu.be/BElct8HWkp8', format: 'm4a', _retrying: false,
+        });
+        await sabrObj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: truncated });
+        assert.equal(sabrObj._autoRetryBudget.get('BElct8HWkp8').attempts, 1,
+            'a proven-dead-end candidate must not spend an attempt');
+    });
+
+    // ── "resolved empty" is not a property of the client ────────────────────
+    //
+    // The measurement that forced this split, device report 2026-09-27, track
+    // hsXKOsnptw4: the SAME client answered twice, minutes apart, on the SAME
+    // video —
+    //
+    //   resolve #1   ANDROID  a0/p1   (adaptive 0, progressive 1)  audio-with-url 0
+    //   resolve #2   ANDROID  a30/p1  (adaptive 30, progressive 1) audio-with-url 30
+    //
+    // `a` = adaptive, `p` = progressive, exactly as the report prints them. So a
+    // zero is not a property of the client. The old predicate called it one, and
+    // because rotation is a search over candidates, one zero was enough to burn
+    // ANDROID for the whole track: on the next attempt every better client was
+    // already in `tried`, ANDROID was the only one left, the predicate refused
+    // it, and the retry reported a dead end with a usable client sitting there.
+    const HX_VID = 'hsXKOsnptw4';
+    // Ordered the way the resolver emits it with a token present: SERVABLE,
+    // then TOKEN_FREE, then UNMINTABLE. Asserted only as a fixture here — the
+    // ordering itself is owned by youtube.js and pinned there.
+    const HX_ORDERED = ['MWEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
+    const err403 = 'HTTP 403 Forbidden [rr1---sn-gwpa-civey.googlevideo.com] body: (empty body), start_byte=0';
+    const errTrunc = 'Truncated download: only 75s of 216s of audio is actually present (>66% missing).';
+
+    // One retry attempt on a shared per-track budget, returning the options the
+    // resolver was actually asked with. Driving the real method rather than a
+    // copy of its predicate is deliberate: a test that re-implements the rule it
+    // is checking has already shipped one defect in this file (the pot-for-TV
+    // case, AGENTS.md v2.6.50).
+    const attemptOnce = async ({ key, winner, report, ordered, tried, attempts, sel, error, optsIn = {} }) => {
+        const seen = [];
+        const obj = {
+            ...downloadMethods,
+            _pendingDownloadContexts: new Map(),
+            extractErrorMessage: (p) => p.error || '',
+            showToast: () => {},
+            getDownloadOptions: () => ({}),
+            downloadResolvedTrack: async (r, f, o) => { seen.push({ client: r.client, opts: o }); return { id: 'next' }; },
+        };
+        obj._autoRetryBudget = new Map([[key, { attempts, triedClients: tried.slice(), forcedLegacy: false, forcedOpus: false }]]);
+        obj._pendingDownloadContexts.set('dl1', {
+            key,
+            resolved: { client: winner, orderedClients: ordered, client_report: report, selection: sel || { itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true } },
+            opts: optsIn, originalUrl: `https://youtu.be/${key}`, format: 'm4a', _retrying: false,
+        });
+        global.window = global.window || {};
+        global.window.AuralisYouTube = {
+            resolve: async (_u, o) => ({ kind: 'track', stream_url: 'https://x/', client: o.forceClient, client_report: report }),
+        };
+        await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error });
+        return { seen, budget: obj._autoRetryBudget.get(key) };
+    };
+
+    it('a client that merely resolved empty stays eligible on a later attempt', async () => {
+        // Resolve #1 as the device recorded it: ANDROID answered a0/p1.
+        const emptyRead = [
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'ANDROID_VR', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 21, progressiveWithUrl: 0 },
+            { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'IOS', status: 'OK', audioWithUrl: 2, adaptiveWithUrl: 20, progressiveWithUrl: 0 },
+            // a0/p1 — described one progressive format and served a url on none.
+            // No SABR endpoint, so it established nothing about the client.
+            { client: 'ANDROID', status: 'OK', adaptive: 0, progressive: 1, adaptiveWithUrl: 0, audioWithUrl: 0, progressiveWithUrl: 0, sabrStreamingUrl: false },
+        ];
+
+        // Every client that could be preferred is already used, so ANDROID is the
+        // only candidate left. It came back empty, which is not a reason to spend
+        // an attempt on nothing and give up — it is a reason to try LAST, and
+        // there is nothing better left to try.
+        let { seen } = await attemptOnce({
+            key: HX_VID, winner: 'ANDROID_VR', report: emptyRead, ordered: HX_ORDERED,
+            tried: ['ANDROID_VR', 'MWEB', 'TV', 'IOS'], attempts: 2, error: err403,
+        });
+        assert.equal(seen.length, 1, 'an empty reading must not be read as a dead end');
+        assert.equal(seen[0].client, 'ANDROID', 'the only unused client must be asked');
+
+        // ...and it must not be *excluded* from the resolve either. Deferring a
+        // client is a preference; if it also reached excludeClients the
+        // de-prioritisation would have hardened back into the same permanent
+        // veto, one layer down.
+        assert.ok(!(seen[0].opts.excludeClients || []).includes('ANDROID'),
+            'a deferred client must not be handed to the resolver as excluded');
+
+        // Resolve #2, minutes later, same client, same video: a30/p1, thirty
+        // adaptive formats all carrying urls. The track's budget is shared, and
+        // this resolve sees the full 30 — so a client is never written off on
+        // the strength of one reading.
+        const fullRead = [
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'ANDROID_VR', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 21, progressiveWithUrl: 0 },
+            { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'IOS', status: 'OK', audioWithUrl: 2, adaptiveWithUrl: 20, progressiveWithUrl: 0 },
+            { client: 'ANDROID', status: 'OK', adaptive: 30, progressive: 1, adaptiveWithUrl: 30, audioWithUrl: 30, progressiveWithUrl: 0, sabrStreamingUrl: true },
+        ];
+        ({ seen } = await attemptOnce({
+            key: HX_VID, winner: 'ANDROID_VR', report: fullRead, ordered: HX_ORDERED,
+            tried: ['ANDROID_VR', 'MWEB', 'TV', 'IOS'], attempts: 2, error: err403,
+        }));
+        assert.equal(seen.length, 1);
+        assert.equal(seen[0].client, 'ANDROID', 'the client that now has 30 audio urls is the one to ask');
+
+        // The preference is not gone, only the veto. Two candidates must be left
+        // for this to mean anything — one servable, one deferred — or there is
+        // nothing to prefer between and the assertion would pass either way.
+        // The report is the a0/p1 one, so ANDROID is the deferred candidate and
+        // IOS is the servable one, on the same attempt.
+        ({ seen } = await attemptOnce({
+            key: HX_VID, winner: 'ANDROID_VR', report: emptyRead, ordered: HX_ORDERED,
+            tried: ['ANDROID_VR', 'MWEB', 'TV'], attempts: 2, error: err403,
+        }));
+        assert.equal(seen.length, 1);
+        assert.equal(seen[0].client, 'IOS',
+            'a client that handed out urls must still be preferred over an empty-reading one');
+    });
+
+    it('a client proven unable to serve a class is still excluded', async () => {
+        // The real report from the device, 2026-09-27, track yF9nmg_jHNs, which
+        // exhausted four attempts:
+        const report = [
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'WEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            // IOS: real urls for adaptive audio, and a positive record that it has
+            // NONE for the other two classes — progressiveWithUrl 0, opusWithUrl 0.
+            { client: 'IOS', status: 'OK', audioWithUrl: 2, adaptiveWithUrl: 24, progressiveWithUrl: 0, audioOnlyWithUrl: 2, opusWithUrl: 0, sabrStreamingUrl: true },
+            { client: 'ANDROID_VR', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 26, progressiveWithUrl: 1, audioOnlyWithUrl: 4, opusWithUrl: 2, sabrStreamingUrl: true },
+            { client: 'ANDROID', status: 'OK', audioWithUrl: 0, adaptive: 25, adaptiveWithUrl: 0, progressiveWithUrl: 0, sabrStreamingUrl: true },
+        ];
+        const ordered = ['MWEB', 'WEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
+
+        // (i) The muxed rung is gated on the winner actually HAVING a muxed url.
+        // A 403 on IOS's adaptive audio must not spend an attempt re-resolving
+        // the class IOS's own record proves it does not offer.
+        let { seen } = await attemptOnce({
+            key: 'yF9nmg_jHNs', winner: 'IOS', report, ordered, tried: ['IOS'], attempts: 1, error: err403,
+            sel: { client: 'IOS', itag: 140, ext: 'm4a', audioOnly: true, legacyProgressive: false },
+        });
+        assert.equal(seen.length, 1);
+        assert.equal(seen[0].opts.forceLegacyProgressive, undefined,
+            'IOS reports progressiveWithUrl=0, so the muxed rung must not fire for it');
+        assert.equal(seen[0].client, 'ANDROID_VR', 'rotate to a client that has other classes');
+
+        // (ii) The opus rung picks on what each client actually offers. IOS
+        // reports opusWithUrl=0, so it must never be the one asked for opus.
+        ({ seen } = await attemptOnce({
+            key: 'yF9nmg_jHNs', winner: 'ANDROID_VR', report, ordered,
+            tried: ['ANDROID_VR'], attempts: 2, error: errTrunc,
+            sel: { client: 'ANDROID_VR', itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true },
+        }));
+        assert.equal(seen.length, 1);
+        assert.equal(seen[0].opts.forceOpusAudio, true, 'both other classes have failed, so the opus rung is the right one');
+        assert.equal(seen[0].client, 'ANDROID_VR', 'ANDROID_VR is the only client with opusWithUrl>0, so it is the one asked');
+        assert.notEqual(seen[0].client, 'IOS', 'IOS reports opusWithUrl=0 and must not be re-asked for opus');
+
+        // (iii) The counter branch of "proven dead": described formats, no url on
+        // any of them, and no SABR endpoint either. That is a positive record
+        // about the client, so it is never rotated into even as a last resort.
+        // ANDROID above is exactly this shape (adaptive 25, nothing served).
+        // ANDROID is the only candidate left, so this is the case where a veto
+        // actually costs a download. Its record is the strongest negative the
+        // resolver can emit: the adapter returned a 25-entry adaptive table and
+        // not one url on any of it.
+        const withAndroidLast = [
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'ANDROID_VR', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'IOS', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'ANDROID', status: 'OK', audioWithUrl: 0, adaptive: 25, adaptiveWithUrl: 0, progressiveWithUrl: 0, sabrStreamingUrl: false },
+        ];
+        // Ordered to match the fixture exactly. An unlisted client would be a
+        // candidate with "no evidence either way", which is eligible by design —
+        // so a stray name here would test the wrong branch.
+        const androidLastOrdered = ['MWEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
+        const budget = { attempts: 1, triedClients: ['MWEB', 'ANDROID_VR', 'TV', 'IOS'], forcedLegacy: false, forcedOpus: false };
+        const calls = [];
+        const obj = {
+            ...downloadMethods,
+            _pendingDownloadContexts: new Map(),
+            extractErrorMessage: (p) => p.error || '',
+            showToast: () => {},
+            getDownloadOptions: () => ({}),
+            downloadResolvedTrack: async () => { throw new Error('must not be asked'); },
+        };
+        obj._autoRetryBudget = new Map([['proven', budget]]);
+        obj._pendingDownloadContexts.set('dl1', {
+            key: 'proven',
+            resolved: { client: 'IOS', orderedClients: androidLastOrdered, client_report: withAndroidLast, selection: { itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true } },
+            opts: {}, originalUrl: 'https://youtu.be/proven', format: 'm4a', _retrying: false,
+        });
+        global.window = global.window || {};
+        global.window.AuralisYouTube = { resolve: async (_u, o) => { calls.push(o); return { kind: 'track', stream_url: 'https://x/', client: o.forceClient }; } };
+        await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: errTrunc });
+        assert.equal(calls.length, 0, 'a client that described formats and served none must never be asked');
+        assert.equal(budget.attempts, 1, 'and it must not spend an attempt');
+    });
+
+    it('the retry still terminates, and never excludes every client', async () => {
+        // The hard guarantee this change had to keep. Emptiness became a
+        // preference, so clients are now re-askable — which means the client list
+        // can no longer be what stops the chain. `MAX_AUTO_RETRIES` has to be.
+        //
+        // Worst case for that: one client with urls and every other client
+        // coming back empty, forever. The empty ones are re-asked, `tried` grows
+        // by one per failure, and the budget has to be the thing that ends it.
+        const report = [
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'ANDROID_VR', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+            { client: 'IOS', status: 'OK', audioWithUrl: 2, adaptiveWithUrl: 20, progressiveWithUrl: 0 },
+            { client: 'ANDROID', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+        ];
+        const ordered = ['MWEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
+        const budget = { attempts: 0, triedClients: [], forcedLegacy: false, forcedOpus: false };
+        const chosen = [];
+        let winner = 'IOS';
+
+        // Six failures, six chances to keep going.
+        for (let i = 0; i < 6; i++) {
+            const seen = [];
+            const obj = {
+                ...downloadMethods,
+                _pendingDownloadContexts: new Map(),
+                extractErrorMessage: (p) => p.error || '',
+                showToast: () => {},
+                getDownloadOptions: () => ({}),
+                downloadResolvedTrack: async (r, f, o) => { seen.push({ client: r.client, opts: o }); return { id: 'next' }; },
+            };
+            obj._autoRetryBudget = new Map([['loop', budget]]);
+            obj._pendingDownloadContexts.set('dl' + i, {
+                key: 'loop',
+                resolved: { client: winner, orderedClients: ordered, client_report: report, selection: { itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true } },
+                opts: {}, originalUrl: 'https://youtu.be/loop', format: 'm4a', _retrying: false,
+            });
+            global.window = global.window || {};
+            global.window.AuralisYouTube = { resolve: async (_u, o) => ({ kind: 'track', stream_url: 'https://x/', client: o.forceClient, client_report: report }) };
+            // Snapshot before the call: the handler pushes the failed winner onto
+            // `tried` itself, so reading it afterwards would compare against a
+            // set that has since grown.
+            const triedBefore = budget.triedClients.slice();
+            await obj._handle403AutoRetry({ id: 'dl' + i, status: 'failed', error: err403 });
+            if (!seen.length) break;
+            winner = seen[0].client;
+            chosen.push({ ...seen[0], triedBefore });
+        }
+
+        assert.equal(chosen.length, 3, 'exactly MAX_AUTO_RETRIES attempts, then the chain ends');
+        // Rotation begins AFTER the client that just failed, so with IOS winning
+        // the order is ANDROID, MWEB, ANDROID_VR — and each appears once, which is
+        // what shows `tried` still stops an immediate repeat of the same client.
+        assert.deepEqual(chosen.map((c) => c.client), ['ANDROID', 'MWEB', 'ANDROID_VR'],
+            'each re-askable client is used once, in rotation order — `tried` still prevents a repeat');
+        // Never exclude every client: the resolver must always be left with the
+        // client being asked, so `excludeClients` can neither contain it nor
+        // cover the whole list.
+        for (const c of chosen) {
+            const ex = c.opts.excludeClients || [];
+            assert.ok(!ex.includes(c.client), 'the client being asked must not also be excluded');
+            assert.ok(ex.length < ordered.length, 'excluding every client leaves the resolver nothing to try');
+            // Excluding only the ones already asked is the point: anything else
+            // must stay available, or a rotation that is merely a reorder would
+            // quietly become "pick one and shut the rest out".
+            assert.ok(c.triedBefore.every((cl) => ex.includes(cl)),
+                'every client already asked must be excluded from the next resolve');
+        }
+
+        // The boundary case the guard exists for: all but one client already
+        // tried. That last one must still be asked — a resolver asked to rotate
+        // with everything excluded has nothing left to do but fail.
+        const { seen } = await attemptOnce({
+            key: 'lastone', winner: 'MWEB', report, ordered,
+            tried: ['MWEB', 'ANDROID_VR', 'TV', 'ANDROID'], attempts: 2, error: err403,
+        });
+        assert.equal(seen.length, 1, 'the one remaining client must still be used');
+        assert.equal(seen[0].client, 'IOS', 'and it must be the one asked');
+        assert.equal((seen[0].opts.excludeClients || []).length, 4, 'the other four are excluded');
+        assert.ok(!(seen[0].opts.excludeClients || []).includes('IOS'), 'which must not include the client being asked');
+
+        // The saturated case: the only state where the guard can actually differ.
+        // Every client is already in `tried`, so handing the resolver that whole
+        // list as `excludeClients` would leave it an empty pool — and, worse,
+        // would name the very client being asked, contradicting forceClient.
+        //
+        // It is reachable only through the muxed/opus rungs, because plain
+        // rotation returns early when no candidate is left. That is also why the
+        // plain loop above cannot pin the guard: `tried` never reaches the full
+        // list there, so the loop passes whether or not the guard exists. A
+        // mutation deleting the guard went undetected until this case existed.
+        const opusReport = [
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0 },
+            { client: 'ANDROID_VR', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 26, progressiveWithUrl: 1, opusWithUrl: 2 },
+            { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0 },
+            { client: 'IOS', status: 'OK', audioWithUrl: 2, adaptiveWithUrl: 24, progressiveWithUrl: 0, opusWithUrl: 0 },
+            { client: 'ANDROID', status: 'OK', audioWithUrl: 0, adaptive: 25, adaptiveWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0, sabrStreamingUrl: true },
+        ];
+        const opusOrdered = ['MWEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
+        const saturated = await attemptOnce({
+            key: 'saturated', winner: 'ANDROID_VR', report: opusReport, ordered: opusOrdered,
+            tried: ['MWEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'], attempts: 2, error: errTrunc,
+            sel: { client: 'ANDROID_VR', itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true },
+        });
+        assert.equal(saturated.seen.length, 1, 'a saturated tried-set must not stop the opus rescue');
+        assert.equal(saturated.seen[0].client, 'ANDROID_VR', 'the only client offering opus is still asked');
+        assert.deepEqual(saturated.seen[0].opts.excludeClients || [],
+            [],
+            'every client is in `tried`, so the exclusion must be dropped rather than handed over empty-handed');
     });
 
     it('a client serving audio through the muxed progressive url counts as servable', async () => {
@@ -1283,10 +1624,37 @@ describe('YouTube Search & Streaming Integration', () => {
         // (all advertised bytes arrive, the media is still short), so the top-up
         // must hang off it rather than off the byte accounting gate.
         assert.ok(dsrc.includes('range_topup::top_up'), 'downloader must be able to request the bytes after a short file');
-        assert.ok(
-            /verify_decoded_duration\([\s\S]{0,4000}range_topup::top_up/.test(dsrc),
-            'the range top-up must be triggered by the decoded-duration verdict'
-        );
+        // The top-up must be reachable ONLY from the not-accepted path. The
+        // previous form of this assertion was a 4000-character proximity window
+        // between `verify_decoded_duration` and `range_topup::top_up`, which is
+        // exactly the kind of assertion that encodes an accident of file layout
+        // rather than a requirement: when NEW-03 moved the verdict into
+        // `gather_forensics` (a different function) the window broke with nothing
+        // behavioural having changed, and it read as a real failure.
+        //
+        // What actually has to hold is structural, and is stable under refactor:
+        // within `run_stream`, the accept-and-keep branch must be decided BEFORE
+        // the top-up call, and the top-up must sit in the `else` of that decision.
+        const rsStart = dsrc.indexOf('    async fn run_stream(');
+        assert.ok(rsStart > 0, 'run_stream must exist');
+        const runStream = dsrc.slice(rsStart, dsrc.indexOf('\n    async fn ', rsStart + 1) > 0
+            ? dsrc.indexOf('\n    async fn ', rsStart + 1)
+            : dsrc.length);
+        const acceptAt = runStream.indexOf('== Acceptance::Accept');
+        // Anchor on the call, not the bare path: a comment above the top-up
+        // mentions `range_topup::top_up` by name, and matching that would
+        // resolve to the explanation rather than to the call site.
+        const topUpAt = runStream.indexOf('super::range_topup::top_up(');
+        assert.ok(acceptAt > 0 && topUpAt > 0, 'run_stream must decide acceptance and be able to top up');
+        assert.ok(acceptAt < topUpAt,
+            'the top-up must be reached only from the not-accepted path, so acceptance is decided first');
+        // ...and structurally, not merely by ordering: the top-up lives in the
+        // `else` arm of that decision. Without the `else` the two would be
+        // sequential and the ordering assertion above would pass while a
+        // recovered file still fell through into the top-up.
+        const between = runStream.slice(acceptAt, topUpAt);
+        assert.ok(/\}\s*else\s*\{/.test(between),
+            'the top-up must be gated by an else arm on the acceptance decision');
         // The decoder is not trusted: the container and a full decode decide.
         assert.ok(dsrc.includes('inspect_container') && dsrc.includes('inspect_content'),
             'a short verdict must be checked against the container and the decoded content');

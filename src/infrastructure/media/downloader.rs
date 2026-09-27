@@ -8,6 +8,8 @@
 //! are required — resolution of user-facing URLs (YouTube, SoundCloud, …) is
 //! the frontend's responsibility; this layer only fetches bytes.
 
+use super::completeness::verify_decoded_duration;
+use super::forensics::{inspect_container, inspect_content, ContainerFacts, ContentFacts, Verdict};
 use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
 use chrono::Utc;
 use lofty::file::{AudioFile, FileType};
@@ -161,6 +163,32 @@ const MIN_DURATION_FOR_BITRATE_CHECK: u32 = 20;
 /// Bytes/second floor used **only** when neither the resolver nor the server
 /// gave a size: ≈32 kbps. Used to catch "the stream just stopped" truncations.
 const MIN_BYTES_PER_SEC_FALLBACK: u64 = 4_000;
+
+/// A decoded length or a container sample table that covers less than this
+/// fraction of the expected track counts as short. Deliberately the same
+/// threshold `completeness.rs` uses, so the decoder's gate and the
+/// container/content cross-check cannot disagree about what "short" means. The
+/// *audible* check below deliberately does not use it — see
+/// [`MIN_AUDIBLE_RATIO`].
+const MIN_COVERAGE_RATIO: f64 = 0.9;
+
+/// The audible fraction below which an otherwise complete file is still refused.
+///
+/// `audible_secs` is the position of the last sample above the silence
+/// threshold, not a length. It therefore cannot be *required*: a track whose
+/// last 10 % is a legitimate fade-out is complete, and demanding audible audio
+/// for 90 % of it sent real downloads through four pointless range-top-up
+/// rounds. It can still **veto**, because a server-side window keeps serving
+/// container and silence long after it stops serving audio — the one shape where
+/// the byte count is complete, the sample table describes the full track, and
+/// the file is still not the track.
+///
+/// Both device measurements of that window sit at roughly a third of the track
+/// (99 s of 287 s; 75 s of 216 s), so half clears them with room to spare while
+/// leaving any plausible silent tail alone. This is an **inference** from those
+/// two samples, not a measured constant: the length check above is the
+/// load-bearing one, and this only has to tell a fade-out from a window.
+const MIN_AUDIBLE_RATIO: f64 = 0.5;
 
 /// Remove query parameters that cap the response window (`range`, `range2`).
 ///
@@ -511,6 +539,245 @@ pub async fn validate_audio_file_async(
     .map_err(|e| format!("Task join error for validate_audio_file: {e}"))?
 }
 
+// ---------------------------------------------------------------------------
+// Completeness cross-check (container structure + decoded content)
+// ---------------------------------------------------------------------------
+
+/// Everything the completeness gate needs from one on-disk file.
+///
+/// The three inspections are bundled because they answer a single question —
+/// *is this file whole?* — and because every one of them is a full read or a
+/// full decode of the file.
+struct ForensicReport {
+    container: ContainerFacts,
+    content: ContentFacts,
+    /// `completeness::verify_decoded_duration`'s verdict.
+    ///
+    /// Kept only for the unparseable-container case, where no structural
+    /// evidence exists and the decoder's own number is all that is left. It is
+    /// the least trustworthy of the three, so it never gets the last word
+    /// anywhere else.
+    decoded: Result<Option<u64>, String>,
+}
+
+/// What the cross-check concluded about a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Acceptance {
+    /// Proven whole: keep it.
+    Accept,
+    /// Not proven whole. `reason` names the single signal that decided, so the
+    /// failure shown to the user is attributable rather than vague.
+    Reject(&'static str),
+}
+
+// The reject reasons are `const`s rather than literals inline in `acceptance`
+// for two reasons. They are long enough that an unbreakable literal would push
+// its line past `max_width`, and rustfmt gives up on an item it cannot fit —
+// which would silently take the whole gate out of the `cargo fmt --check` gate.
+// And a test can assert against the very same value production returns, so a
+// reworded message cannot quietly stop being the one the test checks.
+const REASON_MISSING_BYTES: &str = "the sample table references bytes the file does not contain";
+const REASON_SHORT_TABLE: &str = "the container itself describes a shorter track than the \
+                                   resolver expected, so the server sent a windowed object \
+                                   and reported it as complete";
+const REASON_SHORT_AUDIO: &str = "every advertised byte arrived but the decoded audio is \
+                                  shorter than the track";
+const REASON_SILENT_TAIL: &str = "the bytes and the decoded length are complete but audio \
+                                 stops well before the end, which is the signature of a \
+                                 server-side window rather than of a whole file";
+const REASON_UNPARSABLE: &str = "the container could not be parsed and the decoder agrees \
+                                  it is short";
+
+/// Does this measured length cover the expected track?
+///
+/// `expected_secs == 0.0` means no expectation was available, and a
+/// measurement cannot prove shortness against nothing, so it does not veto.
+///
+/// What an **absent** measurement means is deliberately not decided here:
+/// `forensics::ContentFacts::measured_secs` returns `None` exactly when no
+/// decoder could be built, and its own documentation says a caller "must fall
+/// back to its other evidence" — so the decision belongs to `acceptance`, which
+/// has the other evidence in hand.
+fn covers(value: f64, expected_secs: f64) -> bool {
+    if expected_secs <= 0.0 {
+        return true;
+    }
+    value >= expected_secs * MIN_COVERAGE_RATIO
+}
+
+/// Cross-check the container and the decoded content of one file.
+///
+/// The **order** is the whole point, and it is what NEW-04 turned over:
+///
+/// 1. Bytes, from the sample table. Exact, needs no decoding, and
+///    `Verdict::Truncated` is a hard no.
+/// 2. Container coverage — does the table describe the full track?
+/// 3. Decoded length — [`ContentFacts::measured_secs`], the length from
+///    actually iterating the sample stream. Not `audible_secs`: that is a
+///    *position*, so a track that fades out at the end failed a check it should
+///    have passed, and burned four range-top-up rounds trying to add audio the
+///    file already had.
+/// 4. Audible position — consulted last, and only to **veto**.
+///
+/// Step 4 has to stay. A server-side window is the shape where steps 1-3 all
+/// pass: every advertised byte arrived, the sample table describes the whole
+/// track, and the decoded stream is the right length — because what arrived
+/// after the cutoff is silence. Promoting `measured_secs` without keeping this
+/// veto would have silently deleted the only check that catches it.
+fn acceptance(report: &ForensicReport, expected_secs: f64) -> Acceptance {
+    match report.container.verdict.as_ref() {
+        // The sample table references bytes the file does not have. No amount
+        // of decoded audio makes that whole.
+        Some(Verdict::Truncated { .. }) => return Acceptance::Reject(REASON_MISSING_BYTES),
+        Some(Verdict::Complete) => {}
+        // `Verdict::Unknown` and an absent verdict mean the same thing: the box
+        // walker read nothing — a file over `forensics::MAX_INSPECT_BYTES`, or a
+        // container it does not parse. `forensics` documents that as "keep your
+        // previous behaviour", and the previous behaviour is the decoder's
+        // verdict, so that is what decides here.
+        _ => {
+            return match &report.decoded {
+                Ok(_) => Acceptance::Accept,
+                Err(_) => Acceptance::Reject(REASON_UNPARSABLE),
+            }
+        }
+    }
+
+    // The table is `Some` whenever the verdict is — `inspect_container` only
+    // reports one from a structure whose duration it read — so an absent table
+    // here is not a measurement question, it is an absence of evidence, and an
+    // absence of evidence does not pass a completeness gate.
+    if !report
+        .container
+        .table_secs
+        .is_some_and(|table| covers(table, expected_secs))
+    {
+        return Acceptance::Reject(REASON_SHORT_TABLE);
+    }
+
+    // A measurement that exists must cover the track. One that does not exist
+    // abstains: `measured_secs() == None` means the sample stream could not be
+    // walked at all, and `forensics` is explicit that this "never means empty"
+    // and that a caller must fall back to its other evidence — which here is
+    // the sample table's byte accounting, and that is exact.
+    //
+    // So that fallback is unreachable in production, and deliberately so: this
+    // function is only called once `verify_decoded_duration` reported the file
+    // short, and that call builds its decoder the same way `inspect_content`
+    // does, so a decoder exists by the time we get here.
+    if report
+        .content
+        .measured_secs()
+        .is_some_and(|measured| !covers(measured, expected_secs))
+    {
+        return Acceptance::Reject(REASON_SHORT_AUDIO);
+    }
+
+    // Supporting evidence, and the only thing that can reject a file whose
+    // bytes and decoded length are both complete.
+    if report
+        .content
+        .audible_secs
+        .is_some_and(|audible| audible < expected_secs * MIN_AUDIBLE_RATIO)
+    {
+        return Acceptance::Reject(REASON_SILENT_TAIL);
+    }
+
+    Acceptance::Accept
+}
+
+/// Gather container structure, decoded content and the decoder's own verdict in
+/// a **single blocking hop**.
+///
+/// `inspect_container` reads up to 192 MB into memory, and both decoder passes
+/// walk the whole stream. Inline in the async download task that is seconds of a
+/// Tokio worker held for each of them, and a download is not the only task on
+/// that runtime.
+///
+/// The hop is also what makes the post-append recompute affordable: the facts
+/// have to be re-derived after *every* append, so re-deriving them inline
+/// would block the runtime once per top-up round instead of once.
+///
+/// A join failure yields default facts, which read as `Verdict::None` — the
+/// unparseable-container path — and a `decoded` of `Err`, so a lost task
+/// refuses the file rather than waving it through.
+async fn gather_forensics(
+    path: &Path,
+    ext: &str,
+    expected_duration_secs: Option<u32>,
+) -> ForensicReport {
+    let path_buf = path.to_path_buf();
+    let ext_owned = ext.to_string();
+    let joined = tokio::task::spawn_blocking(move || ForensicReport {
+        container: inspect_container(&path_buf),
+        content: inspect_content(&path_buf, &ext_owned),
+        decoded: verify_decoded_duration(&path_buf, &ext_owned, expected_duration_secs),
+    })
+    .await;
+    match joined {
+        Ok(report) => report,
+        Err(join_err) => {
+            warn!(error = %join_err, path = %path.display(), "Forensics did not complete");
+            ForensicReport {
+                container: ContainerFacts::default(),
+                content: ContentFacts::default(),
+                decoded: Err(format!(
+                    "forensic inspection task did not complete: {join_err}"
+                )),
+            }
+        }
+    }
+}
+
+/// What one completed HTTP response did to the stream and the retry budget.
+///
+/// Split out as its own function because the defect it fixes (DL-05) was a
+/// *hole in the branch structure*, not bad arithmetic, and the branch structure
+/// is the only thing a unit test can pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamStep {
+    /// Bytes arrived — the retry budget resets.
+    Progress,
+    /// The read failed or stalled part way through.
+    Interrupted,
+    /// A clean early end, with bytes provably still outstanding.
+    Short { advertised: u64 },
+    /// A clean end that delivered nothing and proves nothing is outstanding.
+    ///
+    /// Still an error. A silent response is not evidence that the object ended,
+    /// and treating it as one is the other half of the infinite loop: with an
+    /// advertised length of zero, both "all bytes received" (`total > 0`) and
+    /// "bytes still outstanding" (`total > current`) are false, so a zero-byte
+    /// response fell through every branch and the loop asked again, forever.
+    NoProgress,
+}
+
+/// Classify what one finished response did.
+///
+/// The order is load-bearing: bytes that arrived are progress *even if* the read
+/// afterwards failed, because the next request resumes from the real on-disk
+/// length. Everything else that delivered nothing is an error.
+fn classify_response(
+    bytes_in_this_request: u64,
+    stream_interrupted: bool,
+    total_bytes: Option<u64>,
+    current_downloaded: u64,
+) -> StreamStep {
+    if bytes_in_this_request > 0 {
+        return StreamStep::Progress;
+    }
+    if stream_interrupted {
+        return StreamStep::Interrupted;
+    }
+    match total_bytes {
+        Some(advertised) if advertised > current_downloaded => StreamStep::Short { advertised },
+        // A zero advertised length, an advertised length already satisfied, or
+        // no advertised length at all: in every one of those, "bytes still
+        // outstanding" cannot be shown and yet nothing arrived.
+        _ => StreamStep::NoProgress,
+    }
+}
+
 impl Downloader {
     /// Create a new downloader that writes files into `output_dir`.
     pub fn new(output_dir: PathBuf) -> Self {
@@ -738,6 +1005,24 @@ impl Downloader {
 
         loop {
             chunk_iteration += 1;
+
+            // An advertised length of zero describes no object, so no byte
+            // count can ever satisfy it: the completion check below requires
+            // `total > 0`, and "bytes still outstanding" requires
+            // `total > current_downloaded`, which is false for zero. A
+            // zero-byte body is not an error either, so the loop asked again and
+            // again with nothing changing. Reject it here, before any request,
+            // so the job ends with a reason instead of hanging. `total_bytes`
+            // can reach zero from the resolver, from `clen` in the URL, or from
+            // a `Content-Range`/`Content-Length` in a response, so the check
+            // lives where all three are already in scope.
+            if total_bytes == Some(0) {
+                return Err(DownloaderError::DownloadFailed(format!(
+                    "Server advertised a zero-length object [{host} url={url_snip}] — there is \
+                     nothing to download, so the transfer was stopped \
+                     (end_reason={end_reason}, chunk_iteration={chunk_iteration})"
+                )));
+            }
 
             // Check if full stream byte length is already reached
             if let Some(total) = total_bytes {
@@ -1091,36 +1376,67 @@ impl Downloader {
 
             let _ = file.flush().await;
 
-            if bytes_in_this_request > 0 {
-                consecutive_errors = 0; // Successful progress made!
-            } else if stream_interrupted {
-                consecutive_errors += 1;
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    return Err(DownloaderError::HttpError(format!(
-                        "Stream interrupted and max consecutive errors ({MAX_CONSECUTIVE_ERRORS}) reached [{host}] ({current_downloaded}/{:?} bytes)",
-                        total_bytes
-                    )));
+            // Every response that delivered nothing has to consume retry
+            // budget. Before `classify_response` the two zero-byte cases that
+            // could not prove bytes were outstanding fell through to the
+            // completion check, matched nothing there, and asked again — the
+            // server being silent was read as "the object ended" when it
+            // proved nothing of the kind.
+            match classify_response(
+                bytes_in_this_request,
+                stream_interrupted,
+                total_bytes,
+                current_downloaded,
+            ) {
+                StreamStep::Progress => consecutive_errors = 0, // Successful progress made!
+                StreamStep::Interrupted => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        return Err(DownloaderError::HttpError(format!(
+                            "Stream interrupted and max consecutive errors ({MAX_CONSECUTIVE_ERRORS}) reached [{host}] ({current_downloaded}/{:?} bytes)",
+                            total_bytes
+                        )));
+                    }
+                    continue;
                 }
-                continue;
-            } else if total_bytes.is_some_and(|t| t > current_downloaded) {
-                // The server closed the connection cleanly but still owes us
-                // bytes. That is NOT the end of the stream — resume via Range
-                // until the retry budget is spent, then fail honestly.
-                consecutive_errors += 1;
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    return Err(DownloaderError::DownloadFailed(format!(
-                        "Incomplete download: server ended the stream at {current_downloaded} of {} bytes after {MAX_CONSECUTIVE_ERRORS} resume attempts (end_reason={end_reason}, host={host}) — file not saved",
-                        total_bytes.unwrap_or(0)
-                    )));
+                StreamStep::Short { advertised } => {
+                    // The server closed the connection cleanly but still owes us
+                    // bytes. That is NOT the end of the stream — resume via Range
+                    // until the retry budget is spent, then fail honestly.
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        return Err(DownloaderError::DownloadFailed(format!(
+                            "Incomplete download: server ended the stream at {current_downloaded} of {advertised} bytes after {MAX_CONSECUTIVE_ERRORS} resume attempts (end_reason={end_reason}, host={host}) — file not saved"
+                        )));
+                    }
+                    warn!(
+                        download_id = %id,
+                        downloaded = current_downloaded,
+                        total = ?total_bytes,
+                        consecutive_errors = consecutive_errors,
+                        "Stream ended early with bytes still outstanding — resuming via Range"
+                    );
+                    continue;
                 }
-                warn!(
-                    download_id = %id,
-                    downloaded = current_downloaded,
-                    total = ?total_bytes,
-                    consecutive_errors = consecutive_errors,
-                    "Stream ended early with bytes still outstanding — resuming via Range"
-                );
-                continue;
+                StreamStep::NoProgress => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        return Err(DownloaderError::DownloadFailed(format!(
+                            "No progress: the server ended the response without sending any bytes \
+                             ({current_downloaded}/{:?} bytes) after {MAX_CONSECUTIVE_ERRORS} \
+                             attempts (end_reason={end_reason}, host={host}) — file not saved",
+                            total_bytes
+                        )));
+                    }
+                    warn!(
+                        download_id = %id,
+                        downloaded = current_downloaded,
+                        total = ?total_bytes,
+                        consecutive_errors = consecutive_errors,
+                        "Response delivered no bytes — treating it as a failed attempt and retrying"
+                    );
+                    continue;
+                }
             }
 
             // Check if full stream has been reached:
@@ -1145,25 +1461,16 @@ impl Downloader {
                     continue;
                 }
             } else {
-                // total_bytes is unknown
-                if bytes_in_this_request > 0 {
-                    // Try to request next range to see if more bytes exist
-                    info!(
-                        download_id = %id,
-                        downloaded = current_downloaded,
-                        "Chunk completed with unknown total_bytes; probing next range for remaining bytes"
-                    );
-                    continue;
-                } else {
-                    // Zero bytes in this request and clean EOF -> stream is finished!
-                    info!(
-                        download_id = %id,
-                        downloaded = current_downloaded,
-                        "Stream reached clean EOF with no additional bytes — proceeding to validation"
-                    );
-                    end_reason = "clean-eof-size-unknown";
-                    break;
-                }
+                // total_bytes is unknown, and this response delivered bytes.
+                // A zero-byte response never reaches here: `classify_response`
+                // returns `NoProgress` for it, which consumes retry budget
+                // rather than treating silence as the end of the object.
+                info!(
+                    download_id = %id,
+                    downloaded = current_downloaded,
+                    "Chunk completed with unknown total_bytes; probing next range for remaining bytes"
+                );
+                continue;
             }
         }
 
@@ -1279,47 +1586,53 @@ impl Downloader {
         // a file that only holds the first minute. The decoder's own duration
         // counts the samples that are really present (the same number the
         // player shows), and is the only trustworthy completeness signal.
-        if let Err(truncation) = super::completeness::verify_decoded_duration(
-            &job.staging_path,
-            &job.ext,
-            expected_duration_secs,
-        ) {
+        //
+        // All three inspections happen in one `spawn_blocking` hop: reading the
+        // container (up to 192 MB) and walking the decoded stream twice are
+        // seconds of a Tokio worker each, and a download is not the only task on
+        // that runtime. The decoder's verdict still decides *whether* to run
+        // them; `acceptance` decides what they mean.
+        //
+        // The three arguments are bound to short names first. A `gather_forensics(…)`
+        // call spelled out in full sits right on the `fn_call_width` boundary, and
+        // rustfmt 1.63 and current stable disagree about how to break a method
+        // chain that lands there — which is a `cargo fmt --check` failure that
+        // only CI can see. Short names keep the call well inside the width.
+        let staging = &job.staging_path;
+        let ext = &job.ext;
+        let dur = expected_duration_secs;
+        let initial = gather_forensics(staging, ext, dur).await;
+        if let Some(truncation) = initial.decoded.as_ref().err().cloned() {
             // A decoder's opinion of a file's length is not evidence. Real
             // device data (v2.6.44, track BElct8HWkp8) showed the opposite: a
             // 21.4 MB muxed file that holds 596 kbps x 287 s of media was
             // rejected because rodio reported 99 s for it. So ask the container
-            // instead, and only treat the download as short when the container
-            // agrees it is short.
-            use super::forensics::{inspect_container, inspect_content, Verdict};
-            let facts = inspect_container(&job.staging_path);
-            let content = inspect_content(&job.staging_path, &job.ext);
+            // and the decoded content instead, and only treat the download as
+            // short when they agree.
             let expected_secs = f64::from(expected_duration_secs.unwrap_or(0));
-            let near_expected = |secs: Option<f64>| match (secs, expected_secs) {
-                (Some(value), exp) if exp > 0.0 => value >= exp * 0.9,
-                (Some(_), _) => true,
-                (None, _) => false,
-            };
-            // "Whole" means: the sample table says the audio runs the full length,
-            // every byte it references is present, and there is audible audio for
-            // essentially all of it. Anything less is not proven complete.
-            let container_says_whole =
-                facts.verdict == Some(Verdict::Complete) && near_expected(facts.table_secs);
-            let content_says_whole = near_expected(content.audible_secs);
             warn!(
                 download_id = %id,
-                container = %facts.summary(),
-                content = %content.summary(),
+                container = %initial.container.summary(),
+                content = %initial.content.summary(),
                 expected_duration = ?expected_duration_secs,
                 "Decoder reported a short file; container and content were inspected"
             );
 
-            if container_says_whole && content_says_whole {
+            // `latest` is what the failure below describes, so it is refreshed
+            // after every append: the file changed, and facts about the bytes it
+            // used to hold are not facts about the file. Reusing the report
+            // gathered here would judge the pre-append state forever, which is
+            // how the recovery path used to accept (or refuse) a file it had
+            // never looked at again.
+            let mut latest = initial;
+
+            if acceptance(&latest, expected_secs) == Acceptance::Accept {
                 // The decoder under-reported: keep the file. Its own duration is
                 // the truth here, and the library scanner will store that.
                 warn!(
                     download_id = %id,
-                    container = %facts.summary(),
-                    content = %content.summary(),
+                    container = %latest.container.summary(),
+                    content = %latest.content.summary(),
                     "Container and decoded audio both cover the full track - keeping the file despite the decoder's short verdict"
                 );
             } else {
@@ -1327,7 +1640,11 @@ impl Downloader {
                 let mut topup_log: Vec<String> = Vec::new();
                 let mut last_topup_error: Option<String> = None;
                 let mut have = staged_bytes;
-                let mut recovered_secs: Option<u64> = None;
+                // A plain flag rather than `Option<ForensicReport>`: `latest` is
+                // already the accepted report when this is set, and keeping it
+                // owned means the failure below can describe the same facts
+                // without a second copy.
+                let mut recovered = false;
                 for round in 1..=MAX_TOPUP_ROUNDS {
                     match super::range_topup::top_up(
                         &client,
@@ -1343,20 +1660,26 @@ impl Downloader {
                             have += added;
                             topup_log
                                 .push(format!("round {round}: +{added} bytes (file now {have})"));
-                            match super::completeness::verify_decoded_duration(
-                                &job.staging_path,
-                                &job.ext,
-                                expected_duration_secs,
-                            ) {
-                                Ok(secs) => {
-                                    recovered_secs = secs;
-                                    break;
-                                }
-                                Err(still_short) => {
-                                    topup_log
-                                        .push(format!("round {round}: still short: {still_short}"));
-                                }
+                            // The bytes are on disk, so every fact gathered
+                            // before this append now describes a file that no
+                            // longer exists. Re-derive all three, off the
+                            // runtime thread, and judge the new state — the
+                            // append is the only thing that can make a windowed
+                            // object whole, so a pre-append verdict here would
+                            // refuse a file the top-up just finished.
+                            let report = gather_forensics(staging, ext, dur).await;
+                            let verdict = acceptance(&report, expected_secs);
+                            latest = report;
+                            if let Acceptance::Reject(why) = verdict {
+                                topup_log.push(format!("round {round}: still not whole: {why}"));
+                                continue;
                             }
+                            topup_log.push(format!(
+                                "round {round}: the appended file is whole ({})",
+                                latest.content.summary()
+                            ));
+                            recovered = true;
+                            break;
                         }
                         Err(why) => {
                             last_topup_error = Some(why);
@@ -1364,13 +1687,15 @@ impl Downloader {
                         }
                     }
                 }
-                if let Some(secs) = recovered_secs {
+                if recovered {
                     warn!(
                         download_id = %id,
-                        decoded_secs = secs,
                         bytes = have,
+                        measured = ?latest.content.measured_secs(),
+                        container = %latest.container.summary(),
+                        content = %latest.content.summary(),
                         host = %host,
-                        "Range top-up recovered a windowed (SABR-style) partial download"
+                        "Range top-up completed the file; the appended bytes were re-verified against the container and the decoded audio"
                     );
                 } else {
                     let have_now = tokio::fs::metadata(&job.staging_path)
@@ -1385,8 +1710,8 @@ impl Downloader {
                         expected_duration = ?expected_duration_secs,
                         end_reason = %end_reason,
                         host = %host,
-                        container = %facts.summary(),
-                        content = %content.summary(),
+                        container = %latest.container.summary(),
+                        content = %latest.content.summary(),
                         "Refusing to save a short download"
                     );
                     let itag =
@@ -1407,17 +1732,25 @@ impl Downloader {
                     //  * the container describes the full track but bytes are
                     //    missing -> a genuinely interrupted transfer, which the
                     //    range top-up above just failed to complete.
-                    let explanation = if facts.table_secs.map(|t| t < expected_secs * 0.9)
-                        == Some(true)
+                    //
+                    // Read off `latest`, i.e. the state after the last append —
+                    // describing the pre-append file here would report a byte
+                    // count the user cannot go and look at. The threshold is the
+                    // same `MIN_COVERAGE_RATIO` the gate above used, so the
+                    // wording cannot drift away from the decision it explains.
+                    let container = &latest.container;
+                    let explanation = if container
+                        .table_secs
+                        .is_some_and(|t| t < expected_secs * MIN_COVERAGE_RATIO)
                     {
                         "The container itself only describes a short track, so the server sent a windowed object and reports it as complete (this is the SABR behaviour, not a broken transfer)"
-                    } else if matches!(facts.verdict, Some(Verdict::Truncated { .. })) {
+                    } else if matches!(&container.verdict, Some(Verdict::Truncated { .. })) {
                         "The container describes the full track but the file is missing bytes the sample table references, so the transfer was interrupted"
                     } else {
                         "The container could not be parsed, so the decoder's verdict could not be checked"
                     };
-                    let facts_summary = facts.summary();
-                    let content_summary = content.summary();
+                    let facts_summary = container.summary();
+                    let content_summary = latest.content.summary();
                     cleanup_staging_file(&job.staging_path).await;
                     return Err(DownloaderError::DownloadFailed(format!(
                         "{truncation} [{explanation}. received {have_now} bytes of {clen} \
@@ -1828,6 +2161,795 @@ impl Downloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    // ---------------------------------------------------------------------
+    // Fixtures for the completeness cross-check
+    // ---------------------------------------------------------------------
+
+    /// A temp file that removes itself, so a failing assertion cannot leave a
+    /// stray directory behind for the next run to trip over.
+    struct TempFile {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TempFile {
+        fn new(tag: &str, bytes: &[u8]) -> TempFile {
+            let dir = std::env::temp_dir().join(format!(
+                "auralis_dl_{tag}_{}_{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            let path = dir.join("probe.m4a");
+            std::fs::write(&path, bytes).expect("write probe file");
+            TempFile { dir, path }
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A `ContentFacts` shaped the way `forensics::inspect_content` builds it:
+    /// the decoder's claim, plus the sample stream that was really iterated.
+    ///
+    /// Deliberately built with the same arithmetic as production, including
+    /// deriving `audible_secs` from the audible sample count, so a test cannot
+    /// assert a relationship the real code would not hold.
+    fn content_facts(sample_rate: u32, total_samples: u64, audible_samples: u64) -> ContentFacts {
+        ContentFacts {
+            decoded_secs: Some(total_samples / u64::from(sample_rate.max(1))),
+            audible_secs: Some(audible_samples as f64 / f64::from(sample_rate.max(1))),
+            sample_rate,
+            total_samples,
+            audible_samples,
+        }
+    }
+
+    /// An `MP4` whose single audio track declares a 4-minute sample table, and
+    /// `media_bytes` of the media data that table points at.
+    ///
+    /// This is the only shape that can drive `Verdict::Complete` /
+    /// `Verdict::Truncated` from a test: `forensics::inspect_container` answers
+    /// `None` for anything it cannot walk as MP4, and the cross-check routes
+    /// that case to the decoder instead — which would leave the container half
+    /// of the gate untested.
+    fn synthetic_mp4(media_bytes: usize) -> Vec<u8> {
+        fn box_of(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::with_capacity(payload.len() + 8);
+            out.extend_from_slice(&((payload.len() + 8) as u32).to_be_bytes());
+            out.extend_from_slice(kind);
+            out.extend_from_slice(payload);
+            out
+        }
+
+        const CHUNK_OFFSET: u32 = 1000;
+        const SAMPLE_BYTES: u32 = 4096;
+        const SAMPLES: u32 = 2;
+        // 4 minutes of audio at a 48 kHz timescale, i.e. a table that only a
+        // complete file can satisfy.
+        const TABLE_UNITS: u32 = 48_000 * 240;
+
+        // stts: one run of `SAMPLES` samples of `TABLE_UNITS / SAMPLES` each.
+        let mut stts = vec![0u8, 0, 0, 0];
+        stts.extend_from_slice(&1u32.to_be_bytes());
+        stts.extend_from_slice(&SAMPLES.to_be_bytes());
+        stts.extend_from_slice(&(TABLE_UNITS / SAMPLES).to_be_bytes());
+
+        // stsc: from chunk 1, `SAMPLES` samples per chunk.
+        let mut stsc = vec![0u8, 0, 0, 0];
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+        stsc.extend_from_slice(&SAMPLES.to_be_bytes());
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+
+        // stsz: a uniform sample size, so no per-sample table is needed.
+        let mut stsz = vec![0u8, 0, 0, 0];
+        stsz.extend_from_slice(&SAMPLE_BYTES.to_be_bytes());
+        stsz.extend_from_slice(&SAMPLES.to_be_bytes());
+
+        // stco: one chunk, at CHUNK_OFFSET.
+        let mut stco = vec![0u8, 0, 0, 0];
+        stco.extend_from_slice(&1u32.to_be_bytes());
+        stco.extend_from_slice(&CHUNK_OFFSET.to_be_bytes());
+
+        let stbl = box_of(
+            b"stbl",
+            &[
+                box_of(b"stts", &stts),
+                box_of(b"stsc", &stsc),
+                box_of(b"stsz", &stsz),
+                box_of(b"stco", &stco),
+            ]
+            .concat(),
+        );
+
+        // mdhd: timescale 48000, duration TABLE_UNITS.
+        let mut mdhd = vec![0u8, 0, 0, 0];
+        mdhd.extend_from_slice(&0u32.to_be_bytes());
+        mdhd.extend_from_slice(&0u32.to_be_bytes());
+        mdhd.extend_from_slice(&48_000u32.to_be_bytes());
+        mdhd.extend_from_slice(&TABLE_UNITS.to_be_bytes());
+        mdhd.extend_from_slice(&0u16.to_be_bytes());
+
+        let minf = box_of(b"minf", &stbl);
+        let mdia = box_of(b"mdia", &[box_of(b"mdhd", &mdhd), minf].concat());
+
+        // hdlr: handler_type "soun" marks this as the audio track.
+        let mut hdlr = vec![0u8, 0, 0, 0];
+        hdlr.extend_from_slice(&0u32.to_be_bytes());
+        hdlr.extend_from_slice(b"soun");
+
+        let trak = box_of(b"trak", &[box_of(b"hdlr", &hdlr), mdia].concat());
+        let moov = box_of(b"moov", &trak);
+
+        let mut file = moov;
+        while file.len() < CHUNK_OFFSET as usize {
+            file.push(0);
+        }
+        file.resize(CHUNK_OFFSET as usize + media_bytes, 0u8);
+        file
+    }
+
+    /// A report describing a container that is complete and whose table claims
+    /// `table_secs`, plus the given decoded content.
+    fn complete_container_report(table_secs: f64, content: ContentFacts) -> ForensicReport {
+        ForensicReport {
+            container: ContainerFacts {
+                container: "mp4-stbl",
+                audio_track_found: true,
+                table_secs: Some(table_secs),
+                declared_secs: Some(table_secs),
+                verdict: Some(Verdict::Complete),
+                ..Default::default()
+            },
+            content,
+            decoded: Ok(None),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // NEW-04 — the gate must compare length before audible position
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_complete_track_that_ends_in_silence_is_accepted() {
+        // The defect NEW-04 fixes. A 240 s track whose last stretch is silence:
+        // every advertised byte arrived, the sample table covers the track, and
+        // the decoded stream is the full 240 s. The old rule read
+        // `near_expected(content.audible_secs)` — *audible audio for 90 % of the
+        // track* — so anything past a 24 s outro was "unproven", cost four
+        // pointless range-top-up rounds, and was ultimately refused.
+        //
+        // The fixtures below all sit well inside what the old rule rejected, so
+        // each one is a case the old gate demonstrably refused and the new one
+        // demonstrably keeps.
+        for audible in [144.0_f64, 132.0] {
+            let report = complete_container_report(
+                240.0,
+                content_facts(48_000, 240 * 48_000, (audible * 48_000.0) as u64),
+            );
+            assert!(
+                audible < 240.0 * 0.9,
+                "fixture with {audible}s of audible audio must be one the old 90% \
+                 audible rule refused, or it proves nothing"
+            );
+            assert_eq!(
+                acceptance(&report, 240.0),
+                Acceptance::Accept,
+                "a legitimate silent tail is not a truncation: {}",
+                report.content.summary()
+            );
+        }
+
+        // The exact old threshold, pinned because it is the boundary the old
+        // rule was written around and the new one no longer consults.
+        let boundary =
+            complete_container_report(240.0, content_facts(48_000, 240 * 48_000, 216 * 48_000));
+        assert_eq!(acceptance(&boundary, 240.0), Acceptance::Accept);
+    }
+
+    #[test]
+    fn the_measured_216_of_75_second_device_case_is_still_rejected() {
+        // The 2026-09-27 device download, `yF9nmg_jHNs`: all advertised bytes
+        // received, `end_reason=all-advertised-bytes-received`, then HTTP 416
+        // on every range mechanism. The container claimed `table=216.3s` while
+        // only `decoded=75s measured=54.4s` of audio was really there.
+        //
+        // Promotion of `measured_secs` must not have softened this: the measured
+        // length is short, so the file is refused whatever the container says.
+        let report =
+            complete_container_report(216.3, content_facts(48_000, 54 * 48_000, 54 * 48_000));
+        let verdict = acceptance(&report, 216.0);
+        assert_eq!(
+            verdict,
+            Acceptance::Reject(REASON_SHORT_AUDIO),
+            "the 216s-vs-75s case must keep being refused: {}",
+            report.content.summary()
+        );
+    }
+
+    #[test]
+    fn a_windowed_object_with_complete_bytes_is_still_rejected() {
+        // The shape only the audible signal can catch, and the one that would
+        // have been lost if acceptance had simply moved to `measured_secs`:
+        // every advertised byte arrived, the sample table describes the whole
+        // track, the decoded stream is the *right length* — because what came
+        // after the cutoff was silence.
+        //
+        // 99 s of 287 s is the measured v2.6.44 device ratio, so this is not a
+        // shape that was invented to make the test pass.
+        let audible_secs = 99.0_f64;
+        let report = complete_container_report(
+            287.0,
+            content_facts(44_100, 287 * 44_100, (audible_secs * 44_100.0) as u64),
+        );
+        let verdict = acceptance(&report, 287.0);
+        assert_eq!(
+            verdict,
+            Acceptance::Reject(REASON_SILENT_TAIL),
+            "a windowed object must keep being refused even when every byte arrived: {}",
+            report.content.summary()
+        );
+    }
+
+    #[test]
+    fn length_is_judged_before_the_audible_position() {
+        // The two signals must not be collapsed into one. A file whose decoded
+        // length is short is rejected whatever its audible position says, and a
+        // file whose decoded length covers the track is judged on audible
+        // position only as a veto.
+        let expected = 240.0;
+
+        // Short measured length, and audible is *fine* (the whole thing is
+        // loud). Still rejected — the length signal came first.
+        let short_but_loud =
+            complete_container_report(240.0, content_facts(48_000, 60 * 48_000, 60 * 48_000));
+        assert!(
+            matches!(acceptance(&short_but_loud, expected), Acceptance::Reject(_)),
+            "a loud but short file is still short: {}",
+            short_but_loud.content.summary()
+        );
+
+        // Long enough, and the audible tail is 10 % of the track: accepted, so
+        // the veto does not fire on a fade-out.
+        let long_fading =
+            complete_container_report(240.0, content_facts(48_000, 240 * 48_000, 216 * 48_000));
+        assert_eq!(acceptance(&long_fading, expected), Acceptance::Accept);
+
+        // Long enough, and audio stops at 20 % of the track: vetoed.
+        let long_but_windowed =
+            complete_container_report(240.0, content_facts(48_000, 240 * 48_000, 48 * 48_000));
+        assert!(
+            matches!(
+                acceptance(&long_but_windowed, expected),
+                Acceptance::Reject(_)
+            ),
+            "a 20 % audible tail is not a fade-out: {}",
+            long_but_windowed.content.summary()
+        );
+    }
+
+    #[test]
+    fn a_short_container_table_is_refused_before_anything_else() {
+        // The server sent a window and called it the whole object: the sample
+        // table itself describes a short track. Nothing about the decoded audio
+        // can make that acceptable.
+        let report =
+            complete_container_report(75.0, content_facts(48_000, 75 * 48_000, 75 * 48_000));
+        let verdict = acceptance(&report, 216.0);
+        assert_eq!(verdict, Acceptance::Reject(REASON_SHORT_TABLE),);
+    }
+
+    #[test]
+    fn missing_bytes_the_sample_table_references_are_refused() {
+        // The one signal that is exact and needs no decoding.
+        let report = ForensicReport {
+            container: ContainerFacts {
+                container: "mp4-stbl",
+                audio_track_found: true,
+                table_secs: Some(240.0),
+                missing_bytes: Some(4096),
+                verdict: Some(Verdict::Truncated {
+                    missing_bytes: 4096,
+                }),
+                ..Default::default()
+            },
+            content: content_facts(48_000, 240 * 48_000, 240 * 48_000),
+            decoded: Ok(None),
+        };
+        assert_eq!(
+            acceptance(&report, 240.0),
+            Acceptance::Reject(REASON_MISSING_BYTES),
+        );
+    }
+
+    #[test]
+    fn an_unparseable_container_falls_back_to_the_decoder_verbatim() {
+        // `forensics::inspect_container` returns no verdict for a WebM, an
+        // oversized file, or any layout it cannot walk, and documents that as
+        // "keep your previous behaviour". The previous behaviour is the
+        // decoder's verdict — so both directions are pinned, because silently
+        // turning the fallback into a blanket accept (or a blanket reject)
+        // would change what an Opus download is allowed to do.
+        let undecodable = ForensicReport {
+            container: ContainerFacts {
+                container: "unknown",
+                ..Default::default()
+            },
+            content: ContentFacts::default(),
+            decoded: Ok(None),
+        };
+        assert_eq!(
+            acceptance(&undecodable, 240.0),
+            Acceptance::Accept,
+            "no structural evidence and a decoder that is happy: previous behaviour kept"
+        );
+
+        let decoder_agrees_short = ForensicReport {
+            decoded: Err("Truncated download: only 75s of 240s".to_string()),
+            ..undecodable
+        };
+        assert_eq!(
+            acceptance(&decoder_agrees_short, 240.0),
+            Acceptance::Reject(REASON_UNPARSABLE),
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_decoded_length_does_not_veto_a_complete_container() {
+        // `ContentFacts::measured_secs()` is `None` exactly when no decoder could
+        // be built. `forensics` is explicit that `None` "never means empty" and
+        // that a caller must fall back to its other evidence — which is the
+        // container's byte accounting, and that is exact.
+        let report = complete_container_report(240.0, ContentFacts::default());
+        assert_eq!(
+            report.content.measured_secs(),
+            None,
+            "the fixture really is unmeasured"
+        );
+        assert_eq!(
+            acceptance(&report, 240.0),
+            Acceptance::Accept,
+            "nothing was measured, so the length signal abstains: {}",
+            report.content.summary()
+        );
+
+        // A *present* measurement is a different matter: short is short.
+        let measured_short =
+            complete_container_report(240.0, content_facts(48_000, 12_000, 12_000));
+        assert!(matches!(
+            acceptance(&measured_short, 240.0),
+            Acceptance::Reject(_)
+        ));
+    }
+
+    // ---------------------------------------------------------------------
+    // NEW-02 — the facts must describe the file as it is *now*
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_verdict_must_be_re_derived_after_an_append() {
+        // NEW-02 in its exact shape: the container is consulted once, `top_up`
+        // appends bytes, and the pre-append facts then judge the post-append
+        // file. Here the only difference between the two states is the tail the
+        // sample table still points at, and it is the difference between
+        // refusing and saving.
+        let short = synthetic_mp4(4096);
+        let probe = TempFile::new("recompute", &short);
+        let before = gather_forensics(&probe.path, "m4a", None).await;
+        assert!(
+            matches!(before.container.verdict, Some(Verdict::Truncated { .. })),
+            "the fixture must start short: {}",
+            before.container.summary()
+        );
+        assert!(
+            matches!(acceptance(&before, 0.0), Acceptance::Reject(_)),
+            "a file missing bytes its sample table references is not whole"
+        );
+
+        // The top-up: append exactly the bytes the sample table still points at.
+        // The count is read out of the report rather than hard-coded, so this
+        // does not depend on how `forensics` computes the media-data end — only
+        // on the fact that it reports one, and reports the same one twice.
+        let missing = before
+            .container
+            .audio_data_end
+            .expect("a truncated sample table must say where its media data ends")
+            .saturating_sub(before.container.size_bytes) as usize;
+        assert!(missing > 0, "the fixture must have bytes outstanding");
+
+        // A read-resize-write rather than `append` + `write_all`: the only thing
+        // that matters here is the resulting file length, and this cannot leave a
+        // handle open across the second gather.
+        let mut with_tail = std::fs::read(&probe.path).expect("read the short file");
+        with_tail.resize(with_tail.len() + missing, 0u8);
+        std::fs::write(&probe.path, &with_tail).expect("append the missing media bytes");
+        assert_eq!(
+            with_tail.len() as u64,
+            before.container.audio_data_end.expect("audio_data_end"),
+            "the file must now reach the end the sample table points at"
+        );
+
+        let after = gather_forensics(&probe.path, "m4a", None).await;
+        assert_eq!(
+            after.container.verdict,
+            Some(Verdict::Complete),
+            "the appended file must read as complete: {}",
+            after.container.summary()
+        );
+        assert_eq!(
+            acceptance(&after, 0.0),
+            Acceptance::Accept,
+            "the same decision, applied to the re-derived facts, must accept: {}",
+            after.container.summary()
+        );
+
+        // And the point of the whole exercise: the *stale* report still says
+        // reject. Any implementation that hoisted the facts out of the top-up
+        // loop would reach that answer and never recover, even after four rounds
+        // that completed the file.
+        assert!(
+            matches!(acceptance(&before, 0.0), Acceptance::Reject(_)),
+            "reusing the pre-append facts would refuse a file the append finished"
+        );
+        assert_ne!(
+            before.container.size_bytes, after.container.size_bytes,
+            "a re-derived report must be about the new file, not the old one"
+        );
+    }
+
+    #[tokio::test]
+    async fn gather_forensics_reads_the_file_rather_than_caching_it() {
+        // The mechanism NEW-02 leans on, tested on its own: two gathers of the
+        // same path must differ once the file changes. A gatherer that memoised,
+        // or that snapshotted the size once, would pass the cross-check test
+        // above by accident.
+        let probe = TempFile::new("fresh", b"PROBE-BODY");
+        let first = gather_forensics(&probe.path, "m4a", None).await;
+        assert_eq!(first.container.size_bytes, 10);
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&probe.path)
+            .expect("open for append");
+        file.write_all(b"-AND-MORE").expect("append");
+        drop(file);
+
+        let second = gather_forensics(&probe.path, "m4a", None).await;
+        assert_eq!(
+            second.container.size_bytes, 19,
+            "the second gather must see the appended bytes"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // NEW-03 — the inspections must not run on the runtime thread
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn the_three_inspections_exist_in_exactly_one_place_and_it_is_blocking() {
+        // "Off the Tokio runtime" is a property of *where the call is written*,
+        // and there is no runtime signal a unit test can assert on directly: a
+        // blocking call on a worker thread still returns exactly the right
+        // answer. So this pins the shape the property depends on.
+        //
+        // It exists because the fix is one deleted `spawn_blocking` away from
+        // regressing, and because `inspect_container` reads up to 192 MB into
+        // memory — a regression here is a multi-second stall of every other task
+        // on the runtime, with no error and no failing test anywhere else.
+        const SOURCE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/infrastructure/media/downloader.rs"
+        );
+
+        // The test module holds the very strings it searches for, so counting
+        // them in the whole file would count this test. Only the code above the
+        // test module is production.
+        let test_module = SOURCE.find("\n#[cfg(test)]\nmod tests {");
+        let production = match test_module {
+            Some(at) => &SOURCE[..at],
+            None => SOURCE,
+        };
+        assert!(
+            test_module.is_some(),
+            "the test module marker must be findable, or this test is scanning itself"
+        );
+
+        for (name, needle) in [
+            ("inspect_container", "inspect_container("),
+            ("inspect_content", "inspect_content("),
+            ("verify_decoded_duration", "verify_decoded_duration("),
+        ] {
+            let occurrences = production.matches(needle).count();
+            assert_eq!(
+                occurrences, 1,
+                "{name} must be called from exactly one place, the blocking hop, \
+                 but production code calls it {occurrences} times — an inline \
+                 call has crept back in"
+            );
+        }
+
+        // The one place must be a `spawn_blocking` closure, and it must be
+        // `gather_forensics`, which is what `run_stream` awaits.
+        let hop_start = production
+            .find("async fn gather_forensics(")
+            .expect("gather_forensics must exist");
+        let hop_end = hop_start
+            + production[hop_start..]
+                .find("\n/// What one completed HTTP response")
+                .expect("gather_forensics must be followed by the next item");
+        let hop = &production[hop_start..hop_end];
+        assert!(
+            hop.contains("spawn_blocking"),
+            "the single call site must be inside a spawn_blocking hop"
+        );
+        // `run_stream` must reach the forensics through the hop, and it must do
+        // so at the *post-append* site too — that second call is NEW-02, and
+        // counting them keeps the two fixes from being unlinked later.
+        //
+        // The slice is `run_stream`'s own body, from its signature to the next
+        // method's doc comment. It cannot stop at the hop: `gather_forensics` is
+        // defined far *above* `run_stream`, and the two call sites sit deep
+        // inside a function that is itself several hundred lines long.
+        let stream_start = production
+            .find("    async fn run_stream(")
+            .expect("run_stream must exist");
+        let stream_end = stream_start
+            + production[stream_start..]
+                .find("\n    /// Fetch a thumbnail/cover URL")
+                .expect("run_stream must be followed by save_thumbnail");
+        let stream = &production[stream_start..stream_end];
+        assert_eq!(
+            stream
+                .matches("gather_forensics(staging, ext, dur).await")
+                .count(),
+            2,
+            "run_stream must call the blocking hop once for the initial facts and \
+             once more after each append"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // DL-05 — a zero advertised length must terminate the job
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_zero_advertised_length_is_never_a_completed_response() {
+        // The exact state that used to loop forever: with `Some(0)`, the
+        // "all bytes received" test needs `total > 0` and the "bytes still
+        // outstanding" test needs `total > current`, so a zero-byte clean EOF
+        // satisfied neither and the loop asked again with nothing changed.
+        assert_eq!(
+            classify_response(0, false, Some(0), 0),
+            StreamStep::NoProgress,
+            "a zero-length object owes nothing and delivered nothing: that is not progress"
+        );
+        assert_eq!(
+            classify_response(0, false, Some(0), 12_345),
+            StreamStep::NoProgress,
+            "the same holds once bytes are held, because 0 > 12345 is false"
+        );
+    }
+
+    #[test]
+    fn every_response_that_delivered_nothing_consumes_retry_budget() {
+        assert_eq!(
+            classify_response(4096, false, Some(10_000), 4096),
+            StreamStep::Progress,
+            "bytes arrived: the budget resets"
+        );
+        assert_eq!(
+            classify_response(4096, true, Some(10_000), 4096),
+            StreamStep::Progress,
+            "bytes that did arrive are progress even if the read then failed, \
+             because the next request resumes from the real on-disk length"
+        );
+        assert_eq!(
+            classify_response(0, true, None, 4096),
+            StreamStep::Interrupted,
+            "a stalled read is an error"
+        );
+        assert_eq!(
+            classify_response(0, false, Some(10_000), 4096),
+            StreamStep::Short { advertised: 10_000 },
+            "a clean early end with bytes provably outstanding"
+        );
+        // The two cases that used to fall through every branch and be treated
+        // as a finished stream.
+        assert_eq!(
+            classify_response(0, false, None, 4096),
+            StreamStep::NoProgress,
+            "an unknown length plus silence is not the end of the object"
+        );
+        assert_eq!(
+            classify_response(0, false, Some(4096), 4096),
+            StreamStep::NoProgress,
+            "a length already satisfied plus silence is not the end of the object"
+        );
+    }
+
+    /// A loopback origin that answers every request with one fixed response, and
+    /// counts how many requests it served.
+    ///
+    /// The count is what makes the zero-length test honest: it distinguishes
+    /// "the downloader stopped" from "the server gave up", so a downloader that
+    /// asked ten thousand times and then happened to fail would still fail.
+    struct CannedServer {
+        url: String,
+        served: Arc<AtomicUsize>,
+        running: Arc<AtomicBool>,
+        accept: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl CannedServer {
+        fn start(response: &'static str) -> CannedServer {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let port = listener.local_addr().expect("local_addr").port();
+            listener.set_nonblocking(true).expect("non-blocking");
+            let served = Arc::new(AtomicUsize::new(0));
+            let running = Arc::new(AtomicBool::new(true));
+            let accept = {
+                let served = Arc::clone(&served);
+                let running = Arc::clone(&running);
+                std::thread::spawn(move || {
+                    while running.load(Ordering::Relaxed) {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                let served = Arc::clone(&served);
+                                let running = Arc::clone(&running);
+                                std::thread::spawn(move || {
+                                    serve_one(stream, response, &served, &running);
+                                });
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+            };
+            CannedServer {
+                url: format!("http://127.0.0.1:{port}/videoplayback?itag=140&clen=0"),
+                served,
+                running,
+                accept: Some(accept),
+            }
+        }
+    }
+
+    impl Drop for CannedServer {
+        fn drop(&mut self) {
+            self.running.store(false, Ordering::Relaxed);
+            if let Some(handle) = self.accept.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Answer requests on one connection until the peer goes away. Read byte by
+    /// byte and reply per request head, because a request with a body would
+    /// otherwise be answered twice.
+    fn serve_one(
+        mut stream: std::net::TcpStream,
+        response: &'static str,
+        served: &AtomicUsize,
+        running: &AtomicBool,
+    ) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while running.load(Ordering::Relaxed) {
+            match stream.read(&mut byte) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            head.push(byte[0]);
+            if head.len() >= 4 && head[head.len() - 4..] == *b"\r\n\r\n" {
+                served.fetch_add(1, Ordering::Relaxed);
+                head.clear();
+                if stream.write_all(response.as_bytes()).is_err() {
+                    return;
+                }
+                let _ = stream.flush();
+            }
+            if head.len() > 16 * 1024 {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zero_advertised_length_fails_instead_of_retrying_forever() {
+        // The 2026-09-27 shape: the edge reports a `Content-Length: 0` object and
+        // an empty body, and the resolver's `total_bytes` is `Some(0)`. Every
+        // branch of the read loop's state machine said "keep going", so the job
+        // spun until the process was killed. It must end, with a reason.
+        const EMPTY: &str =
+            "HTTP/1.1 200 OK\r\nContent-Type: audio/mp4\r\nContent-Length: 0\r\n\r\n";
+        let server = CannedServer::start(EMPTY);
+
+        let dir = std::env::temp_dir().join(format!("auralis_dl_zero_{}", Uuid::new_v4()));
+        let downloader = Downloader::new(dir.clone());
+        let id = downloader
+            .download(StreamDownload {
+                stream_url: server.url.clone(),
+                title: "Zero Length".to_string(),
+                artist: None,
+                album: None,
+                platform: "direct".to_string(),
+                format: AudioFormat::M4a,
+                ext: "m4a".to_string(),
+                total_bytes: Some(0),
+                thumbnail: None,
+                headers: None,
+                expected_duration_secs: None,
+            })
+            .await
+            .expect("a download request should be accepted");
+
+        let progress = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(state) = downloader.get_progress(id).await {
+                    if matches!(
+                        state.status,
+                        DownloadStatus::Completed
+                            | DownloadStatus::Failed
+                            | DownloadStatus::Cancelled
+                    ) {
+                        return state;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a zero-length object must not leave the download spinning");
+
+        assert_eq!(
+            progress.status,
+            DownloadStatus::Failed,
+            "expected a failure, got {status:?}: {error:?}",
+            status = progress.status,
+            error = progress.error
+        );
+        let error = progress.error.unwrap_or_default();
+        assert!(
+            error.contains("zero-length object"),
+            "the failure must name the cause: {error}"
+        );
+        assert!(
+            !downloader
+                .get_progress(id)
+                .await
+                .expect("progress record")
+                .output_path
+                .expect("output path")
+                .exists(),
+            "nothing may be saved for an empty object"
+        );
+
+        let served = server.served.load(Ordering::Relaxed);
+        assert!(
+            served <= 1,
+            "the job must be refused before or on the first request, \
+             but the origin served {served}"
+        );
+
+        if let Some(handle) = downloader.tasks.write().await.remove(&id) {
+            handle.abort();
+            let _ = handle.await;
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[tokio::test]
     async fn test_download_progress_id_matches_job_id() {
