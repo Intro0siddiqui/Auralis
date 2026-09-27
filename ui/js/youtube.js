@@ -834,6 +834,45 @@ class YouTubeResolver {
             }
         }
 
+        // Explicit request for the muxed progressive path, used as a RESCUE by the
+        // 403 retry rather than as a default.
+        //
+        // Why it exists, from the device report of 2026-09-26: the one download
+        // that succeeded came through the muxed itag 18 from ANDROID, while the
+        // adaptive audio-only urls (itag 140) from IOS and ANDROID_VR were both
+        // refused at byte 0. `scoreFormat` ranks itag 140 highest, but that
+        // ranking was written to keep rodio away from webm/opus — it encodes
+        // decodability, not whether the CDN will serve the url. Both can be true
+        // at once and then the top-ranked format is the unusable one.
+        //
+        // Deliberately a fallback and not a re-ranking: when the adaptive url IS
+        // servable it is better audio and this code never runs. It runs only
+        // after a transfer has already been refused, so there is nothing to lose
+        // by asking for the other format class.
+        if (opts.forceLegacyProgressive || opts.force_legacy_progressive) {
+            const legacy = sd.formats && sd.formats.length ? pickLegacyProgressive(sd.formats) : null;
+            if (legacy && isDecipherable(legacy)) {
+                if (!allow_legacy_progressive) {
+                    // This client already produced a SHORT stream on the muxed
+                    // path, so asking again would re-download the same truncated
+                    // file. Fall through to normal selection and let the caller
+                    // rotate instead.
+                    console.warn(`[YouTubeResolver] forceLegacyProgressive ignored for ${videoId} (client=${winningClient}): this client already produced a short legacy stream.`);
+                } else {
+                    used_legacy_progressive = true;
+                    console.warn(`[YouTubeResolver] forceLegacyProgressive: using muxed progressive itag=${legacy.itag} for ${videoId} (client=${winningClient}) — the adaptive url was refused by the CDN.`);
+                    fmt = legacy;
+                }
+            } else {
+                // Said out loud, because it is the case that cannot be rescued:
+                // IOS reported progressive=0 on every attempt, so a client with
+                // no muxed format has nothing to fall back to and the retry must
+                // fail visibly rather than silently re-resolving the same
+                // adaptive url and 403ing again.
+                console.warn(`[YouTubeResolver] forceLegacyProgressive UNAVAILABLE for ${videoId} (client=${winningClient}): no decipherable progressive format — this client cannot be rescued.`);
+            }
+        }
+
         if (!fmt && audioCandidates.length > 0) {
             fmt = selectBestAudioFormat(audioCandidates, quality, container);
         }

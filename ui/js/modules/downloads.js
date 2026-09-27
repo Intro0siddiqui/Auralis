@@ -178,7 +178,7 @@ export const downloadMethods = {
         const key = ctx.key || p.id;
         const budgetMap = this._ensureRetryBudget();
         let budget = budgetMap.get(key);
-        if (!budget) { budget = { attempts: 0, triedClients: [] }; budgetMap.set(key, budget); }
+        if (!budget) { budget = { attempts: 0, triedClients: [], forcedLegacy: false }; budgetMap.set(key, budget); }
         const MAX_AUTO_RETRIES = 3;
         if (budget.attempts >= MAX_AUTO_RETRIES) {
             budgetMap.delete(key);
@@ -230,34 +230,67 @@ export const downloadMethods = {
             : ordered.slice();
         const fromRetry = (resolved.retryClients || []).filter(c => !tried.includes(c));
         const candidates = fromRetry.length ? fromRetry : rotated.filter(c => !tried.includes(c));
-        const nextClient = rotate ? (candidates.find(canServeAudio) || null) : null;
+
+        // Rescue BEFORE rotating away from the client that just failed.
+        //
+        // Device report 2026-09-26: the one download that succeeded arrived
+        // through the muxed progressive itag 18 from ANDROID, while the adaptive
+        // audio-only urls (itag 140) from IOS and ANDROID_VR were refused at byte
+        // 0. So when the refused url was the adaptive class, the cheapest thing
+        // to try is not a different client — it is the OTHER FORMAT from the
+        // client we already know resolves. That keeps full quality whenever the
+        // adaptive url is servable, because this only runs after a refusal.
+        //
+        // Gated on the winner actually having a progressive url, which is the
+        // measurement this class of bug hides behind: IOS reported
+        // `progressive=0` on every attempt, so it has nothing to fall back to
+        // and asking it again would just re-resolve the same refused url.
+        const winner = resolved.client || resolved.winningClient;
+        const sel = resolved.selection || {};
+        const refusedAdaptiveAudio = is403 && sel.audioOnly === true && !sel.legacyProgressive;
+        const winnerHasMuxed = winner
+            ? ((reportByClient.get(winner) || {}).progressiveWithUrl || 0) > 0
+            : false;
+        const trySameClientMuxed = refusedAdaptiveAudio && winnerHasMuxed && !budget.forcedLegacy;
+
+        const nextClient = trySameClientMuxed
+            ? winner
+            : (rotate ? (candidates.find(canServeAudio) || null) : null);
         // Every remaining client is known to be unable to hand out an audio url.
-        const deadEnd = rotate && candidates.length > 0 && !candidates.some(canServeAudio);
+        const deadEnd = rotate && !trySameClientMuxed && candidates.length > 0 && !candidates.some(canServeAudio);
         const allClients = resolved.orderedClients || [];
         // Never exclude every client — that leaves the resolver nothing to try.
-        const excludeClients = (tried.length > 0 && tried.length < allClients.length) ? tried.slice() : [];
-        if (rotate && (!nextClient || deadEnd)) {
+        // When re-asking the winner for a different format it must not also be
+        // excluded, or the two instructions contradict each other.
+        const excludeClients = (tried.length > 0 && tried.length < allClients.length)
+            ? (trySameClientMuxed ? tried.filter(c => c !== winner) : tried.slice())
+            : [];
+        if (rotate && !trySameClientMuxed && (!nextClient || deadEnd)) {
             console.warn(`[Downloads] 403/truncation auto-retry: no client left worth trying for ${p.id} (winning=${resolved.client}, deadEnd=${deadEnd})`);
             map.delete(p.id);
             return;
         }
 
         budget.attempts += 1;
+        if (trySameClientMuxed) budget.forcedLegacy = true;
         ctx._retrying = true;
         try { window.__auralisDownloadRetryingIds = window.__auralisDownloadRetryingIds || new Set(); window.__auralisDownloadRetryingIds.add(p.id); } catch (_) {}
         const shortfall = (errRaw.match(/only \d+s of \d+s|received \d+ bytes of \d+/) || [errRaw.split('\n')[0].slice(0, 80)])[0];
-        const label = isTruncated
+        const label = trySameClientMuxed
+            ? `403 on ${winner}'s adaptive stream — retrying the same client with the muxed format it also offers`
+            : isTruncated
             ? `Truncated stream (${shortfall}), re-resolving via ${nextClient || 'another client'}`
             : is403
                 ? `403 on ${resolved.client || 'TV'} (rr1---sn-gwpa-cived), retrying with ${nextClient}`
                 : `Download incomplete (${shortfall}), retrying`;
         this.showToast(`${label}… (attempt ${budget.attempts}/${MAX_AUTO_RETRIES})`, 'info', 5000);
-        console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} truncated=${isTruncated} sabr=${!!resolved.sabrFallback} nextClient=${nextClient} exclude=${JSON.stringify(excludeClients)}`);
+        console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} truncated=${isTruncated} sabr=${!!resolved.sabrFallback} nextClient=${nextClient} sameClientMuxed=${trySameClientMuxed} exclude=${JSON.stringify(excludeClients)}`);
         try {
             const baseOpts = ctx.opts || this.getDownloadOptions(document.getElementById('download-form')) || {};
             const retryOpts = { ...baseOpts };
             if (nextClient) retryOpts.forceClient = nextClient;
             if (excludeClients.length) retryOpts.excludeClients = excludeClients;
+            if (trySameClientMuxed) retryOpts.forceLegacyProgressive = true;
             // A previous attempt came back short. Refuse the legacy-progressive
             // fallback only for the client that actually truncated — the short
             // stream is a SABR window, not a property of the muxed container,

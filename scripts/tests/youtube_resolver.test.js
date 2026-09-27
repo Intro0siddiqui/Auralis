@@ -992,6 +992,80 @@ describe('YouTube Search & Streaming Integration', () => {
             'the getInfo report must record the same, or the two paths disagree');
     });
 
+    it('a byte-0 403 on an adaptive url retries the SAME client with its muxed format first', async () => {
+        // From the device report of 2026-09-26, track hsXKOsnptw4, attempt #2:
+        //   IOS CHOSEN itag=140 ext=m4a audioOnly=yes -> 403 at byte 0
+        // The successful download on the same network came through the muxed
+        // itag 18, so the cheapest retry is the other format class from the
+        // client that already resolves — not a different client. Rotating first
+        // is what burned the remaining budget on ANDROID_VR.
+        const report = [
+            { client: 'IOS', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 21, progressiveWithUrl: 1 },
+            { client: 'ANDROID_VR', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 21, progressiveWithUrl: 1 },
+            { client: 'ANDROID', status: 'OK', audioWithUrl: 0, adaptiveWithUrl: 0, progressiveWithUrl: 1, sabrStreamingUrl: true },
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
+        ];
+        const ordered = ['MWEB', 'WEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
+        const err403 = 'HTTP 403 Forbidden [rr1---sn-gwpa-civey.googlevideo.com] body: (empty body), start_byte=0';
+
+        const run = async (sel) => {
+            const calls = [];
+            const obj = {
+                ...downloadMethods,
+                _pendingDownloadContexts: new Map(),
+                extractErrorMessage: (p) => p.error || '',
+                showToast: () => {},
+                getDownloadOptions: () => ({}),
+                downloadResolvedTrack: async (r, f, o) => { calls.push({ client: r.client, forceLegacy: !!o.forceLegacyProgressive }); return { id: 'next' }; },
+            };
+            obj._autoRetryBudget = new Map([['hsXKOsnptw4', { attempts: 1, triedClients: ['IOS'], forcedLegacy: false }]]);
+            obj._pendingDownloadContexts.set('dl1', {
+                key: 'hsXKOsnptw4',
+                resolved: { client: 'IOS', orderedClients: ordered, client_report: report, selection: sel },
+                opts: {}, originalUrl: 'https://youtu.be/hsXKOsnptw4', format: 'm4a', _retrying: false,
+            });
+            global.window = global.window || {};
+            global.window.AuralisYouTube = {
+                resolve: async (_u, o) => ({ kind: 'track', stream_url: 'https://x/', client: o.forceClient, client_report: report }),
+            };
+            await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: err403 });
+            return calls;
+        };
+
+        // The refused url was adaptive audio-only and IOS does have a progressive
+        // url -> re-ask IOS for the muxed format before rotating anywhere.
+        let calls = await run({ itag: 140, ext: 'm4a', audioOnly: true, legacyProgressive: false });
+        assert.equal(calls.length, 1, 'exactly one retry expected');
+        assert.equal(calls[0].client, 'IOS', 'must re-ask the failing client, not rotate away from it');
+        assert.equal(calls[0].forceLegacy, true, 'the retry must ask for the muxed format');
+
+        // IOS reported progressive=0 on every real attempt, so it has nothing to
+        // fall back to. Re-asking would re-resolve the same refused url, so the
+        // retry must rotate instead.
+        const noMuxed = report.map((e) => (e.client === 'IOS' ? { ...e, progressiveWithUrl: 0 } : e));
+        const orig = JSON.stringify(report);
+        report.length = 0; report.push(...noMuxed);
+        calls = await run({ itag: 140, ext: 'm4a', audioOnly: true, legacyProgressive: false });
+        assert.equal(calls.length, 1, 'a 403 must still be retried');
+        assert.notEqual(calls[0].client, 'IOS', 'a client with no progressive url must not be re-asked');
+        assert.equal(calls[0].forceLegacy, false, 'no muxed fallback exists, so none may be requested');
+        report.length = 0; report.push(...JSON.parse(orig));
+
+        // Already on the muxed path: there is nothing to fall back to, so the
+        // rescue must not fire and cost an attempt.
+        calls = await run({ itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true });
+        assert.equal(calls[0] && calls[0].forceLegacy, false, 'must not ask for a fallback from a fallback');
+
+        // The resolver must honour the option rather than quietly ignoring it.
+        const ysrc = fs.readFileSync(path.join(
+            path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js'),
+            'youtube.js'), 'utf8');
+        assert.ok(/opts\.forceLegacyProgressive \|\| opts\.force_legacy_progressive/.test(ysrc),
+            'youtube.js must honour forceLegacyProgressive');
+        assert.ok(/forceLegacyProgressive UNAVAILABLE/.test(ysrc),
+            'an unrescuable client must say so, since IOS has progressive=0');
+    });
+
     it('downloader tops a windowed (SABR) partial download up with explicit ranges', () => {
         const base = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../src/infrastructure/media');
         const dsrc = fs.readFileSync(path.join(base, 'downloader.rs'), 'utf8');
