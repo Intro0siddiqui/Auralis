@@ -196,7 +196,9 @@ Notes from the audit/upgrade pass:
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 ```
-(Note: this dev machine is **Void Linux (aarch64) under proot in Termux** — `cargo check --lib` works, but linking fails: `cargo build` hits the missing `webkit2gtk-4.1`, and test binaries fail with a `__stack_chk_guard` DSO error from ring (proot loader layout). Use CI for builds/tests; locally only `cargo check` is practical.)
+(Note: this dev machine is **Void Linux (aarch64) under proot in Termux**. The toolchain is **cargo/rustc 1.63**, and **`cargo check` no longer works at all**: `Cargo.lock` is version `4`, which cargo 1.63 refuses to parse (`lock file version 4 was found, but this version of Cargo does not understand it`). So there is **no whole-crate local verification of any kind** — not check, not clippy, not test. `cargo build` additionally hits the missing `webkit2gtk-4.1`, and test binaries fail with a `__stack_chk_guard` DSO error from ring (proot loader layout).)
+
+**What *is* available locally: `rustc` 1.63 on its own.** It compiles a standalone file with no external crates, which is enough to verify pure logic by **extracting the functions and their tests verbatim** from the real source and compiling them with `rustc --test` against stubbed collaborators. The extraction must be byte-identical or a mutation is a mutation of the copy rather than of the shipped code — one regression test here passed for two versions because it asserted against its own reimplementation. This is the only local Rust verification available, and it caught a shipped bug (a copy button calling `writeText(undefined)`) the moment it was built. Prefer it over reasoning about whether a test "would" pass. `rustfmt --edition 2021` also works, and is 1.63 — older than CI's stable, see the CI-only failure modes above.
 
 ### 4.6 YouTube resolver — client strategy + per-client diagnostics (v2.6.43)
 
@@ -312,7 +314,7 @@ xvfb-run node scripts/tests/desktop_download_player_e2e.js  # player-seed E2E: i
 bash scripts/android/run_emulator_test.sh            # drives scripts/android/e2e_player_test.js over CDP 9222 (seeds /sdcard/Music → scan → play, WARN-only MediaStore)
 ```
 
-> **Local (proot/Termux) caveat**: on this dev machine `cargo test` cannot run — the test binary fails to link (`__stack_chk_guard` DSO error from ring, proot loader layout). Run tests via CI; locally stick to `cargo check --all-targets` + `cargo clippy --all-targets --all-features -- -D warnings` + `cargo fmt --check` + `node --check` / `node --test`.
+> **Local (proot/Termux) caveat — there is no local Rust verification of the crate.** `cargo check`/`clippy`/`test` all fail before doing any work: `Cargo.lock` is version `4` and cargo 1.63 cannot parse it. The `cargo check` advice that used to live in §4.4 is stale and has now been corrected there. What remains usable locally: **`rustfmt --edition 2021`**, **bare `rustc --test` on functions extracted verbatim from the real source** (the only way to check Rust logic here — see §4.4), and `node --check` / `node --test` for the frontend. Everything else is CI.
 
 ### Test Coverage
 
