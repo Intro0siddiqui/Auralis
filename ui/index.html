@@ -48,11 +48,20 @@
         </aside>
         
         <!-- Main Content Area - loaded via HTMX.
-             hx-sync="#content:replace" is REQUIRED: htmx's request queue is keyed
-             per owning element, so this initial request (owned by #content) would
-             otherwise run in parallel with a nav-item request (owned by that nav
-             item) and the slower response would win, clobbering the freshly
-             swapped view. -->
+             hx-sync="#content:replace" is REQUIRED, and it does not do what its
+             name suggests: per ui/vendor/htmx.min.js (htmx 1.9.10, char 38122)
+             the "replace" arm fires htmx:abort and FALLS THROUGH — the in-flight
+             xhr is aborted synchronously (char 47369 -> 41084 -> 38237 nulls
+             f.xhr) and the new request is created immediately (char 38238). The
+             queueing arm at char 38160 is unreachable for "replace". What the
+             attribute buys is that a nav click can reach and abort this boot
+             request, whose owner is #content rather than the clicked <a>.
+
+             That still is not sufficient, so ui/js/modules/nav_guard.js adds a
+             request-generation counter on top: hx-sync cannot see a #content
+             write that never went through htmx, cannot withdraw a response that
+             has already arrived, and being a static attribute it cannot be
+             tested. See nav_guard.js for the full trace. -->
         <main id="content" class="content" 
               hx-get="/partials/home.html" 
               hx-trigger="load" 

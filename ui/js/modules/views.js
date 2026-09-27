@@ -3,6 +3,20 @@
  * Handles loading, rendering, filtering and UI state transitions for all app views.
  */
 
+import {
+    navGuard,
+    detectPage,
+    claimContentWrite,
+    isContentWriteCurrent,
+} from './nav_guard.js';
+
+// The generation guard must be listening before htmx can issue anything.
+// htmx processes the DOM on DOMContentLoaded; this module is a deferred
+// `type="module"` script, so it is evaluated first. Registering here rather than
+// from `bindHTMXEvents()` also puts these listeners ahead of the `afterSwap`
+// handler in `core.js`, which calls `refreshCurrentView()`.
+navGuard.install();
+
 let _lastPlayTriggerTime = 0;
 let _lastPlayTrackId = null;
 export function _safePlayTrack(trackId) {
@@ -26,33 +40,23 @@ export const viewMethods = {
         const content = document.getElementById('content');
         if (!content) return;
 
-        if (content.querySelector('.page-library')) {
-            this.activeView = 'library';
-            this.loadLibraryView();
-        } else if (content.querySelector('.page-albums')) {
-            this.activeView = 'albums';
-            this.loadAlbumsView();
-        } else if (content.querySelector('.page-artists')) {
-            this.activeView = 'artists';
-            this.loadArtistsView();
-        } else if (content.querySelector('.page-downloads')) {
-            this.activeView = 'downloads';
-            this.loadDownloadView();
-        } else if (content.querySelector('.page-search')) {
-            this.activeView = 'search';
-            this.loadSearchView();
-        } else if (content.querySelector('.page-settings, #settings-view')) {
-            this.activeView = 'settings';
-            this.loadSettingsView();
-        } else if (content.querySelector('.page-playlists')) {
-            this.activeView = 'playlists';
-            this.loadPlaylistsView();
-        } else if (content.querySelector('.page-sync')) {
-            this.activeView = 'sync';
-            this.loadSyncView();
-        } else {
-            this.activeView = 'home';
-            this.loadHomeView();
+        // One shared vocabulary for "which page is on screen", so this and the
+        // generation guard in nav_guard.js can never disagree — a disagreement
+        // between the two would itself be a second cause of the swap race.
+        // `null` (empty or unrecognised `#content`) falls through to 'home',
+        // which is exactly what the previous else-branch did.
+        const page = detectPage(content) || 'home';
+        this.activeView = page;
+        switch (page) {
+            case 'library': this.loadLibraryView(); break;
+            case 'albums': this.loadAlbumsView(); break;
+            case 'artists': this.loadArtistsView(); break;
+            case 'downloads': this.loadDownloadView(); break;
+            case 'search': this.loadSearchView(); break;
+            case 'settings': this.loadSettingsView(); break;
+            case 'playlists': this.loadPlaylistsView(); break;
+            case 'sync': this.loadSyncView(); break;
+            default: this.loadHomeView(); break;
         }
     },
 
@@ -1006,8 +1010,13 @@ export const viewMethods = {
             this.showToast('No artist information available', 'info');
             return;
         }
+        // Claims a generation so this write is ordered against the htmx swaps:
+        // these two methods set `#content`'s innerHTML directly and so bypass
+        // `hx-sync` entirely.
+        const gen = claimContentWrite();
         try {
             const html = await this.invoke('get_library_tracks_html', { artist: artistName });
+            if (!isContentWriteCurrent(gen)) return;
             const content = document.getElementById('content');
             if (content) {
                 content.innerHTML = `
@@ -1035,8 +1044,10 @@ export const viewMethods = {
             this.showToast('No album information available', 'info');
             return;
         }
+        const gen = claimContentWrite();
         try {
             const html = await this.invoke('get_library_tracks_html', { album: albumName });
+            if (!isContentWriteCurrent(gen)) return;
             const content = document.getElementById('content');
             if (content) {
                 content.innerHTML = `
