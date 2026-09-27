@@ -107,13 +107,27 @@ pub fn mime_for_ext(ext: &str) -> &'static str {
 
 /// Try to publish `src_path` (already fully written internal file) to
 /// `Download/Auralis/<display_name>` via MediaStore.
+///
 /// Returns the public absolute path string (`/storage/emulated/0/Download/Auralis/...`)
-/// on success, or `None` on non-Android / sdk<26 / JNI failure (caller keeps internal).
-pub fn publish_to_downloads(src_path: &Path) -> Option<String> {
+/// on success. On failure the `Err` carries the reason — the display name, the
+/// row id, the API level and the JNI error string — rather than collapsing every
+/// distinct failure into a single `None`.
+///
+/// That distinction is the point. A `None` here produced the same "keeping
+/// internal path" log, the same `output_path`, and the same user-visible result
+/// for at least four unrelated failures: a context that could not be acquired, a
+/// `ContentResolver` that would not hand back a collection, an insert that
+/// produced no row id, and a copy that threw. Only one of those is the bug we are
+/// looking for, and a caller that cannot tell them apart cannot report them. The
+/// reason now rides out on `download:completed` so a device run diagnoses itself
+/// instead of producing another "it failed" with no cause.
+pub fn publish_to_downloads(src_path: &Path) -> Result<String, String> {
     #[cfg(not(target_os = "android"))]
     {
         let _ = src_path;
-        None
+        // Not an error: there is no public copy to make off Android, and the
+        // caller only surfaces a reason when a copy was actually attempted.
+        Err("not android: no public copy attempted".to_string())
     }
     #[cfg(target_os = "android")]
     {
@@ -129,14 +143,14 @@ pub fn publish_to_downloads(src_path: &Path) -> Option<String> {
         match publish_inner(src_path, &display_name, mime) {
             Ok(public) => {
                 info!(src = %src_path.display(), public = %public, "Published to Download/Auralis via MediaStore");
-                Some(public)
+                Ok(public)
             }
             Err(e) => {
                 // `e` already carries the display name, the row id, the API
                 // level and the JNI error string, because a release build has
                 // no logcat and this line is the only evidence that survives.
                 warn!(src = %src_path.display(), display_name = %display_name, error = %e, "MediaStore publish failed, keeping internal path");
-                None
+                Err(e)
             }
         }
     }
@@ -145,23 +159,48 @@ pub fn publish_to_downloads(src_path: &Path) -> Option<String> {
 #[cfg(target_os = "android")]
 fn sdk_int(env: &mut JNIEnv<'_>) -> i32 {
     match env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I") {
-        Ok(value) => value.i().unwrap_or(26),
+        // `unwrap_or(29)`, not 26 — see the note on the Err arm for why the
+        // direction of this default matters more than the number.
+        Ok(value) => value.i().unwrap_or(SDK_INT_FALLBACK),
         Err(e) => {
             // A failed field lookup leaves a Java exception *pending*, and
             // every JNI call made while one is pending is undefined behaviour
             // — including the `getContentResolver` call a few lines below. So
             // the fallback cannot just swallow the error: draining here is what
-            // keeps "assume API 26" from turning into UB on the way down.
+            // keeps an assumed API level from turning into UB on the way down.
             let drained = take_pending_exception(env);
             warn!(
                 error = %e,
                 exception = %drained.as_deref().unwrap_or("none"),
-                "Could not read Build.VERSION.SDK_INT; assuming API 26, which takes the legacy publish path"
+                assumed = SDK_INT_FALLBACK,
+                "Could not read Build.VERSION.SDK_INT; assuming the MediaStore publish path"
             );
-            26
+            SDK_INT_FALLBACK
         }
     }
 }
+
+/// Assumed API level when `Build.VERSION.SDK_INT` cannot be read.
+///
+/// **29, deliberately, and the direction is the whole point.** The legacy publish
+/// path (`publish_legacy`) writes through `Environment` +
+/// `WRITE_EXTERNAL_STORAGE`, and the manifest caps that permission at
+/// `maxSdk 29` — so on any API 30+ device the legacy path *cannot* succeed, and it
+/// fails silently in a release build because the only report is a `warn!` to a
+/// logcat that release builds do not emit. Assuming 26 therefore pointed the
+/// fallback at the one branch guaranteed to fail on modern hardware, and it was
+/// reachable two ways (`Err` here, and `unwrap_or` on the `Ok` arm).
+///
+/// Assuming 29 points it at the MediaStore path instead, which needs no capped
+/// permission. The cost of being wrong is confined to real API 26-28 devices
+/// (Android 8-9, 2017-2018) — vanishingly rare, and below any realistic minSdk —
+/// where a publish that would otherwise have worked now takes the MediaStore route,
+/// which API 29+ supports anyway.
+///
+/// This does not depend on the read actually failing today. A fallback that selects
+/// the branch which cannot work is a defect whether or not it is currently firing.
+#[cfg(target_os = "android")]
+const SDK_INT_FALLBACK: i32 = 29;
 
 #[cfg(target_os = "android")]
 fn publish_inner(src_path: &Path, display_name: &str, mime: &str) -> Result<String, String> {

@@ -1110,6 +1110,34 @@ describe('YouTube Search & Streaming Integration', () => {
             'the refuted claim must not remain as a comment — it is what caused the misranking');
     });
 
+    it('an unreadable SDK_INT must fall back to the publish path that can work', () => {
+        // android_downloads.rs: sdk_int() returned 26 on any failure to read
+        // Build.VERSION.SDK_INT, which routes to publish_legacy. That path writes
+        // through Environment + WRITE_EXTERNAL_STORAGE, and CI injects
+        // WRITE_EXTERNAL_STORAGE with android:maxSdkVersion="29" — so on any
+        // API 30+ device the fallback selected the one branch that cannot
+        // succeed, and it failed silently because the only report is a warn! to a
+        // logcat that release builds do not emit.
+        //
+        // This is a defect whether or not it is the current cause, so it is
+        // pinned independently of the diagnosis. The constant is cfg(android) and
+        // cannot be reached from a host test, hence the source assertion.
+        const root = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../..');
+        const asrc = fs.readFileSync(path.join(root, 'src/infrastructure/media/android_downloads.rs'), 'utf8');
+        assert.ok(/const SDK_INT_FALLBACK: i32 = 29;/.test(asrc),
+            'the assumed API level must be 29+, not 26 — 26 routes to a path that needs a permission capped at maxSdk 29');
+        assert.ok(!/unwrap_or\(26\)/.test(asrc) && !/\n\s*26\n\s*\}/.test(asrc),
+            'no remaining literal 26 fallback in sdk_int');
+
+        // And the permission cap that makes this matter must stay where it is:
+        // raising the fallback above 29 is only safe while the legacy path is
+        // still permission-capped, so a silent change to maxSdkVersion would
+        // invalidate the reasoning above.
+        const ci = fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8');
+        assert.ok(/WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/.test(ci),
+            'WRITE_EXTERNAL_STORAGE must remain capped at maxSdkVersion 29 for the fallback reasoning to hold');
+    });
+
     it('a completed download must say where the file went, and say so when it is unfindable', () => {
         // Verified on the device from the filesystem, 2026-09-27: a download
         // reported `completed` while /storage/emulated/0/Download/Auralis/ was
@@ -1134,6 +1162,18 @@ describe('YouTube Search & Streaming Integration', () => {
             'public storage must be recognised from the emitted path');
         assert.ok(/saved to /.test(dsrc) && /saved in app storage only/.test(dsrc),
             'both outcomes need distinct wording, or the row still cannot be read');
+        // ...and the REASON, not just the fact. publish_to_downloads used to
+        // collapse every distinct failure into one None, so a context failure and
+        // a missing row id produced the same visible result and the same log
+        // line. Four unrelated causes, one indistinguishable symptom.
+        assert.ok(/progress\.publish_error/.test(dsrc),
+            'the publish failure reason must reach the row, or the next run cannot diagnose itself');
+        const dlsrc = fs.readFileSync(path.join(repoRoot, 'src/infrastructure/media/downloader.rs'), 'utf8');
+        assert.ok(/note_publish_error\(/.test(dlsrc),
+            'the downloader must record the reason instead of logging and dropping it');
+        const dlmodel = fs.readFileSync(path.join(repoRoot, 'src/domain/models/download.rs'), 'utf8');
+        assert.ok(/pub publish_error: Option<String>/.test(dlmodel) && /pub fn note_publish_error/.test(dlmodel),
+            'DownloadProgress must carry the reason on its own field, separate from the download error');
     });
 
     it('downloader tops a windowed (SABR) partial download up with explicit ranges', () => {

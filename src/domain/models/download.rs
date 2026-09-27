@@ -104,6 +104,20 @@ pub struct DownloadProgress {
 
     /// Error message (if failed)
     pub error: Option<String>,
+    /// Why the public copy did not land, when it did not.
+    ///
+    /// Separate from `error`, which reports whether the *download* failed. A
+    /// download can succeed completely and still be invisible to the user, and
+    /// that combination is the one no other surface reported: the row said
+    /// "completed" while the file existed only in app-private storage. The
+    /// reason is already built inside `publish_to_downloads` (it carries the
+    /// display name, the API level and the JNI error) and was being discarded at
+    /// the `None` boundary, leaving the failure visible but not diagnosable.
+    ///
+    /// `None` when there is nothing to report — the public copy succeeded, or
+    /// this is not Android, so no public copy was attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_error: Option<String>,
 
     /// When the download was started
     pub started_at: DateTime<Utc>,
@@ -143,6 +157,7 @@ impl DownloadProgress {
             expected_duration_secs: None,
             duration_secs: None,
             error: None,
+            publish_error: None,
             started_at: now,
             updated_at: now,
             completed_at: None,
@@ -186,6 +201,15 @@ impl DownloadProgress {
         self.progress = 1.0;
         self.output_path = Some(output_path);
         self.completed_at = Some(Utc::now());
+        self.updated_at = Utc::now();
+    }
+
+    /// Record why the public copy did not land, on an otherwise completed
+    /// download. Kept separate from [`Self::fail`] because the transfer itself
+    /// succeeded — collapsing the two would report a successful download as a
+    /// failure and hide the real problem behind a red row.
+    pub fn note_publish_error(&mut self, reason: String) {
+        self.publish_error = Some(reason);
         self.updated_at = Utc::now();
     }
 
@@ -276,6 +300,57 @@ mod tests {
         assert_eq!(download.platform, "youtube");
         assert_eq!(download.status, DownloadStatus::Queued);
         assert_eq!(download.progress, 0.0);
+    }
+
+    #[test]
+    fn publish_failure_does_not_make_a_completed_download_look_failed() {
+        // The bug this exists for: a download that transferred perfectly and
+        // then could not be published to Download/Auralis. Reporting that as a
+        // failure would be a lie about the transfer AND would hide the real
+        // problem behind a red row, so the reason rides on its own field.
+        let mut d = DownloadProgress::new(
+            "https://youtu.be/hsXKOsnptw4".to_string(),
+            "GO gyal".to_string(),
+            AudioFormat::M4a,
+        );
+        assert!(d.publish_error.is_none(), "no reason before a publish");
+
+        d.complete("/data/data/com.auralis.v2/files/downloads/GO gyal.mp4".to_string());
+        d.note_publish_error("ContentResolver.insert returned no row id".to_string());
+
+        assert_eq!(d.status, DownloadStatus::Completed, "transfer succeeded");
+        assert_eq!(d.progress, 1.0);
+        assert!(d.error.is_none(), "not a download error");
+        assert_eq!(
+            d.publish_error.as_deref(),
+            Some("ContentResolver.insert returned no row id"),
+            "the reason must survive to the event"
+        );
+    }
+
+    #[test]
+    fn publish_error_is_absent_from_the_wire_when_unset() {
+        // The frontend branches on this field being absent, so `skip_serializing_if`
+        // has to hold or every progress event grows a null nobody reads.
+        let d = DownloadProgress::new(
+            "https://youtu.be/x".to_string(),
+            "t".to_string(),
+            AudioFormat::M4a,
+        );
+        let json = serde_json::to_value(&d).expect("serialize");
+        assert!(
+            json.get("publish_error").is_none(),
+            "unset publish_error must not appear in the payload"
+        );
+
+        let mut d2 = d;
+        d2.note_publish_error("boom".to_string());
+        let json2 = serde_json::to_value(&d2).expect("serialize");
+        assert_eq!(
+            json2.get("publish_error").and_then(|v| v.as_str()),
+            Some("boom"),
+            "a set publish_error must reach the frontend"
+        );
     }
 
     #[test]

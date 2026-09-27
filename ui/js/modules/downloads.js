@@ -1123,10 +1123,14 @@ export const downloadMethods = {
         // Shown only once a download has actually completed, and only when the
         // file is NOT somewhere the file manager can see. A completed download
         // the user cannot find is a failure that no other surface reports.
+        // `publish_error` carries the reason the public copy did not land, which
+        // is otherwise only ever a `warn!` into a logcat that release builds do
+        // not emit — so without this the app can say "it failed" but never why.
+        const publishError = (progress && progress.publish_error) ? String(progress.publish_error) : '';
         const destNote = (!isFailed && progress.status === 'completed')
             ? (isPublicCopy
                 ? `<div style="margin-top:4px;font-size:11px;color:var(--text-3);font-family:monospace;word-break:break-all;user-select:text">saved to ${this.escapeHtml(destDir)}</div>`
-                : `<div style="margin-top:4px;font-size:11px;color:#e8a33d;font-family:monospace;user-select:text">saved in app storage only — not visible in Files${outPath ? ' (' + this.escapeHtml(outPath) + ')' : ''}</div>`)
+                : `<div style="margin-top:4px;font-size:11px;color:#e8a33d;font-family:monospace;user-select:text">saved in app storage only — not visible in Files${outPath ? ' (' + this.escapeHtml(outPath) + ')' : ''}${publishError && !/^not android/i.test(publishError) ? '<br>publish failed: ' + this.escapeHtml(publishError) : ''}</div>`)
             : '';
         const errBlock = isFailed && errRaw
             ? `<div style="margin-top:6px;padding:8px 10px;background:rgba(255,77,79,0.08);border:1px solid rgba(255,77,79,0.25);border-radius:8px;font-family:monospace;font-size:11px;line-height:1.4;white-space:pre-wrap;word-break:break-all;user-select:text;max-height:120px;overflow:auto;color:var(--text-2)">${this.escapeHtml(errRaw)}</div>

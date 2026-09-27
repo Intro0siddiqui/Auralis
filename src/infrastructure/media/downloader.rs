@@ -1522,22 +1522,35 @@ impl Downloader {
             if !should_publish {
                 info!(download_id = %id, "Skipping MediaStore publish per use_system_downloads=false");
             } else {
-                let public = crate::infrastructure::media::android_downloads::publish_to_downloads(
+                // Carried, not logged-and-dropped. The `Err` distinguishes a
+                // context that could not be acquired from a ContentResolver that
+                // would not return a collection, an insert that produced no row
+                // id, and a copy that threw — all of which previously collapsed
+                // into one indistinguishable "keeping internal path". On a
+                // release build this string is the only surviving evidence, and
+                // the user cannot act on a file they cannot find without it.
+                match crate::infrastructure::media::android_downloads::publish_to_downloads(
                     &job.output_path,
-                );
-                if let Some(pub_path) = public {
-                    let mut guard = active.write().await;
-                    if let Some(state) = guard.get_mut(&id) {
-                        // Keep internal path for library scan dedup, but surface public
-                        // path so `download:completed` shows the Files-visible location.
-                        state.output_path = Some(pub_path.clone());
+                ) {
+                    Ok(pub_path) => {
+                        let mut guard = active.write().await;
+                        if let Some(state) = guard.get_mut(&id) {
+                            // Keep internal path for library scan dedup, but surface public
+                            // path so `download:completed` shows the Files-visible location.
+                            state.output_path = Some(pub_path.clone());
+                        }
+                        // Log before the move: `info!` borrows `pub_path`, so this
+                        // has to precede the assignment that consumes it.
+                        info!(download_id = %id, public = %pub_path, internal = %job.output_path.display(), "Published download to Download/Auralis");
+                        completion_path = pub_path;
                     }
-                    // Log before the move: `info!` borrows `pub_path`, so this
-                    // has to precede the assignment that consumes it.
-                    info!(download_id = %id, public = %pub_path, internal = %job.output_path.display(), "Published download to Download/Auralis");
-                    completion_path = pub_path;
-                } else {
-                    warn!(download_id = %id, src = %job.output_path.display(), "MediaStore publish returned None — keeping internal path");
+                    Err(reason) => {
+                        let mut guard = active.write().await;
+                        if let Some(state) = guard.get_mut(&id) {
+                            state.note_publish_error(reason.clone());
+                        }
+                        warn!(download_id = %id, src = %job.output_path.display(), reason = %reason, "MediaStore publish failed — file is app-private only");
+                    }
                 }
             }
         }
