@@ -1100,9 +1100,34 @@ export const downloadMethods = {
             row.style.borderLeft = '';
         }
         const host = (() => { try { return new URL(progress.url || '').host || ''; } catch (_) { return ''; } })();
+        // Where the file actually landed. The row never showed this, which is
+        // why a public copy that silently failed to publish looked identical to
+        // one that worked: the user saw "completed" and then could not find the
+        // file anywhere. The path is already on the event (`output_path` is
+        // overwritten with the public location when MediaStore publishing
+        // succeeds, and left as the app-private path when it does not), so this
+        // only has to classify it.
+        const outPath = (progress && progress.output_path) ? String(progress.output_path) : '';
+        const isPublicCopy = outPath.startsWith('/storage/emulated/') || outPath.startsWith('content://');
+        const destDir = (() => {
+            if (!outPath) return '';
+            if (isPublicCopy) {
+                const i = outPath.lastIndexOf('/');
+                return i > 0 ? outPath.slice(0, i) : outPath;
+            }
+            return '';
+        })();
         const subtitle = isFailed
             ? `<span style="color:#ff4d4f;font-weight:600">failed • ${host ? host + ' • ' : ''}${pct}%</span>`
             : `${this.escapeHtml(progress.status)}${host ? ' • ' + this.escapeHtml(host) : ''} • ${pct}%`;
+        // Shown only once a download has actually completed, and only when the
+        // file is NOT somewhere the file manager can see. A completed download
+        // the user cannot find is a failure that no other surface reports.
+        const destNote = (!isFailed && progress.status === 'completed')
+            ? (isPublicCopy
+                ? `<div style="margin-top:4px;font-size:11px;color:var(--text-3);font-family:monospace;word-break:break-all;user-select:text">saved to ${this.escapeHtml(destDir)}</div>`
+                : `<div style="margin-top:4px;font-size:11px;color:#e8a33d;font-family:monospace;user-select:text">saved in app storage only — not visible in Files${outPath ? ' (' + this.escapeHtml(outPath) + ')' : ''}</div>`)
+            : '';
         const errBlock = isFailed && errRaw
             ? `<div style="margin-top:6px;padding:8px 10px;background:rgba(255,77,79,0.08);border:1px solid rgba(255,77,79,0.25);border-radius:8px;font-family:monospace;font-size:11px;line-height:1.4;white-space:pre-wrap;word-break:break-all;user-select:text;max-height:120px;overflow:auto;color:var(--text-2)">${this.escapeHtml(errRaw)}</div>
                <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1134,7 +1159,7 @@ export const downloadMethods = {
         row.innerHTML = `
             <div class="track-row-info" style="min-width:0;flex:1">
                 <div class="track-row-title" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${this.escapeHtml(progress.title || progress.url || 'Downloading...')}</div>
-                <div class="track-row-subtitle">${subtitle}</div>
+                <div class="track-row-subtitle">${subtitle}</div>${destNote}
                 ${errBlock}
                 ${clientBlock}
             </div>

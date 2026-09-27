@@ -1110,6 +1110,32 @@ describe('YouTube Search & Streaming Integration', () => {
             'the refuted claim must not remain as a comment — it is what caused the misranking');
     });
 
+    it('a completed download must say where the file went, and say so when it is unfindable', () => {
+        // Verified on the device from the filesystem, 2026-09-27: a download
+        // reported `completed` while /storage/emulated/0/Download/Auralis/ was
+        // empty and no audio file existed anywhere on the sdcard. The directory's
+        // own mtime was 13 days stale, so nothing had been placed in it at all.
+        //
+        // Nothing reported that. The row rendered "completed • host • 100%" and
+        // stopped — there was no path on screen, so a publish that failed and a
+        // publish that worked were indistinguishable to the user. `output_path`
+        // is already on the event (overwritten with the public location when
+        // MediaStore publishing succeeds, left as the app-private path when it
+        // does not), so the fix is to classify and render it rather than to
+        // invent new plumbing.
+        const repoRoot = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../..');
+        const dsrc = fs.readFileSync(path.join(repoRoot, 'ui/js/modules/downloads.js'), 'utf8');
+        assert.ok(/progress\.output_path/.test(dsrc), 'the row must read output_path from the event');
+        assert.ok(/not visible in Files/.test(dsrc),
+            'a completed download that is not in public storage must say so — that is the whole defect');
+        // The public test: the two branches must be distinguished by the path
+        // itself, not by a setting the user has to know to look for.
+        assert.ok(/startsWith\('\/storage\/emulated\/'\)/.test(dsrc) && /startsWith\('content:\/\/'\)/.test(dsrc),
+            'public storage must be recognised from the emitted path');
+        assert.ok(/saved to /.test(dsrc) && /saved in app storage only/.test(dsrc),
+            'both outcomes need distinct wording, or the row still cannot be read');
+    });
+
     it('downloader tops a windowed (SABR) partial download up with explicit ranges', () => {
         const base = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../src/infrastructure/media');
         const dsrc = fs.readFileSync(path.join(base, 'downloader.rs'), 'utf8');
