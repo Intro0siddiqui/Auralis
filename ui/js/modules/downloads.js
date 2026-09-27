@@ -182,6 +182,11 @@ export const downloadMethods = {
         let budget = budgetMap.get(key);
         if (!budget) { budget = { attempts: 0, triedClients: [], forcedLegacy: false }; budgetMap.set(key, budget); }
         const MAX_AUTO_RETRIES = 3;
+        // This budget, not the client list, is what bounds the retry. Clients
+        // that merely came back empty are re-askable (see rotationRank), so the
+        // chain could otherwise revisit a client forever; the counter cannot be
+        // outrun because it is per track and incremented once per attempt
+        // regardless of which client was chosen.
         if (budget.attempts >= MAX_AUTO_RETRIES) {
             budgetMap.delete(key);
             map.delete(p.id);
@@ -198,29 +203,83 @@ export const downloadMethods = {
             const failed = resolved.client || resolved.winningClient;
             if (failed && !tried.includes(failed)) tried.push(failed);
         }
-        // A client whose own reaction record shows it cannot serve a real audio
-        // URL is a dead end: UNPLAYABLE clients returned nothing at all, and a
-        // SABR-only response exposes no adaptive url. Rotating into one of those
-        // only burns a download, so prefer an untried client that demonstrably
-        // handed out a url we can fetch.
+        const reportByClient = new Map();
+        for (const e of (resolved.client_report || [])) {
+            if (e && e.client && !reportByClient.has(e.client)) reportByClient.set(e.client, e);
+        }
+        // A client's reaction record answers two DIFFERENT questions, and the
+        // retry used to conflate them into one boolean:
         //
-        // "Servable" must count the MUXED progressive url, not just adaptive
+        //   1. "did THIS attempt hand out a url we can fetch?" — a preference.
+        //   2. "can this client EVER hand out a url?" — a disqualification.
+        //
+        // Only the second may be treated as permanent, and a record can only
+        // answer it positively. Just two shapes qualify: a SABR streaming
+        // endpoint handed back instead of CDN urls, and a full adaptive format
+        // table with not one url on any of it. Both are the resolver's own
+        // `sabr-only` / `adaptive-urls-missing` reasons, transcribed from the
+        // counters it records them from rather than from the reason strings, so
+        // a rename upstream cannot silently flip the classification.
+        //
+        // A client that answered with NOTHING — UNPLAYABLE, zero formats, no
+        // streamingData, a thrown error — has established nothing at all, and
+        // the old code read that as permanent. The device report of 2026-09-27
+        // is the measurement that makes the distinction load-bearing rather
+        // than theoretical: on track hsXKOsnptw4 the SAME client answered a0/p1
+        // on one resolve and a30/p1 on the next, minutes apart — audio-with-url
+        // went 0 -> 30 for one client on one video. So "resolved empty" is not
+        // a property of the client, and this predicate is where that assumption
+        // was being spent.
+        //
+        // It was not merely a mis-ranked candidate either. Rotation is a search
+        // over the candidate list, so one empty reading pushed ANDROID below the
+        // line; on the next attempt the better clients were already in `tried`,
+        // ANDROID was the only one left, the old predicate refused it, and the
+        // retry reported a dead end and gave up with an unused client sitting
+        // right there. One transient empty result permanently burned a client
+        // for the track.
+        //
+        // So emptiness is now a PREFERENCE, not a veto:
+        //   0 — demonstrably servable: its own record has a url on some class
+        //   1 — no evidence either way: deferred, not excluded
+        //   null — proven dead end: never asked
+        //
+        // What bounds the re-asking is `MAX_AUTO_RETRIES`. It is per track and
+        // is counted independently of how many clients exist, so making clients
+        // re-askable cannot make this loop: a skipped client that resolves
+        // empty again just fails the next attempt, and the fourth one stops.
+        const hasUrlOnAnyClass = (e) => (e.audioWithUrl || 0) > 0 || (e.progressiveWithUrl || 0) > 0;
+        // "Has a url" must count the MUXED progressive class, not just adaptive
         // audio. It did not, and that was not a cosmetic gap: on 2026-09-26 the
         // device report showed ANDROID at adaptiveWithUrl=0 / audioWithUrl=0
         // with progressive=1 — and ANDROID was the only client that completed a
         // download, serving the muxed itag 18. Scored on adaptive audio alone it
         // read as a dead end, so the retry rotated IOS -> ANDROID_VR instead,
-        // which 403'd the same way, and burned the last attempt. The filter was
-        // excluding the only client that had ever worked.
-        const reportByClient = new Map();
-        for (const e of (resolved.client_report || [])) {
-            if (e && e.client && !reportByClient.has(e.client)) reportByClient.set(e.client, e);
-        }
-        const canServeAudio = (c) => {
+        // which 403'd the same way, and burned the last attempt.
+        //
+        // The two disqualifying shapes below are the resolver's OWN definitions
+        // of a client that answered but could not serve, transcribed from where
+        // it records them (youtube.js, the `sabr-only` / `adaptive-urls-missing`
+        // reasons) rather than invented here. The one thing deliberately NOT
+        // treated as proof is "described a format and served no url for it" in
+        // general: the 2026-09-27 a0/p1 -> a30/p1 measurement on hsXKOsnptw4 has
+        // exactly that shape and it flipped. The separating detail is that the
+        // flip was progressive-only, so the second condition below is scoped to
+        // the ADAPTIVE table rather than counting progressive formats at all.
+        const provenUnservable = (e) => {
+            if (!e || hasUrlOnAnyClass(e)) return false;
+            // `sabr-only`: answered with SABR metadata instead of CDN urls.
+            if (e.sabrStreamingUrl) return true;
+            // `adaptive-urls-missing`: a real adaptive list, and not one url on
+            // any of it. The adapter returned a full format table, so this is a
+            // decision about the client rather than an absence of data.
+            return (e.adaptive || 0) > 0 && (e.adaptiveWithUrl || 0) === 0;
+        };
+        const rotationRank = (c) => {
             const e = reportByClient.get(c);
-            if (!e) return true; // no evidence either way — let it try
-            if (e.status && e.status !== 'OK') return false;
-            return (e.audioWithUrl || 0) > 0 || (e.progressiveWithUrl || 0) > 0;
+            if (!e) return 0; // no evidence either way — let it try
+            if (provenUnservable(e)) return null;
+            return hasUrlOnAnyClass(e) ? 0 : 1;
         };
         const rotate = (is403 || isTruncated);
         // Candidates: the clients after the winner first, then the rest, minus
@@ -232,6 +291,16 @@ export const downloadMethods = {
             : ordered.slice();
         const fromRetry = (resolved.retryClients || []).filter(c => !tried.includes(c));
         const candidates = fromRetry.length ? fromRetry : rotated.filter(c => !tried.includes(c));
+        // Split the candidate list by what the report actually established.
+        // `deferred` clients answered with nothing on THIS attempt and are
+        // therefore still worth asking once the demonstrably-servable ones have
+        // been used up. Note what is NOT here: they are not added to `tried` and
+        // not put in `excludeClients`. "We have no evidence this client can
+        // serve" must not become "refuse to let the resolver use it", or the
+        // de-prioritisation would silently harden back into the veto.
+        const servable = candidates.filter(c => rotationRank(c) === 0);
+        const viable = candidates.filter(c => rotationRank(c) !== null);
+        const deferred = candidates.filter(c => rotationRank(c) === 1);
 
         // Rescue BEFORE rotating away from the client that just failed.
         //
@@ -276,9 +345,12 @@ export const downloadMethods = {
             ? opusClient
             : trySameClientMuxed
             ? winner
-            : (rotate ? (candidates.find(canServeAudio) || null) : null);
-        // Every remaining client is known to be unable to hand out an audio url.
-        const deadEnd = rotate && !trySameClientMuxed && !tryOpus && candidates.length > 0 && !candidates.some(canServeAudio);
+            : (rotate ? (servable[0] || deferred[0] || null) : null);
+        // Every remaining client is PROVEN unable to hand out an audio url — not
+        // merely silent on this attempt. A candidate that merely came back empty
+        // keeps the retry alive, because the next resolve of that same client
+        // may well return real formats.
+        const deadEnd = rotate && !trySameClientMuxed && !tryOpus && candidates.length > 0 && viable.length === 0;
         const allClients = resolved.orderedClients || [];
         // Never exclude every client — that leaves the resolver nothing to try.
         // When re-asking the winner for a different format it must not also be
