@@ -337,6 +337,50 @@ class YouTubeResolver {
         // user typed into Settings is left alone — that one may legitimately be an
         // iOS/Android token, so we must not assume anything about it.
         let tokenIsWebBound = false;
+
+        // ── PO-token mint diagnostics ──────────────────────────────────────
+        //
+        // One report spans the whole resolve: the cache lookup, the mint, and
+        // the `applyPoTokenToUrl` decision at the end. It has to, because the
+        // question the owner needs answered ("can this WebView mint?") is not
+        // answerable from any one of the three, and because the two states that
+        // look identical from the outside — "no token" because minting failed,
+        // and "no token" because a good Web token was correctly withheld from a
+        // non-web client — only separate when the mint result and the placement
+        // decision are read together.
+        //
+        // Imported from its own dependency-free module rather than from
+        // `po_token.js`: if the mint module is what fails to load, the report
+        // saying so has to come from somewhere that cannot also fail.
+        const mintDiag = await import('./modules/po_diagnostics.js')
+            .catch(() => import('./po_diagnostics.js'))
+            .catch(() => null);
+        const mintReport = mintDiag ? mintDiag.createMintReport({ videoId }) : null;
+        // Attach the mint facts to a value on its way out, success or failure,
+        // so `downloads.js` can archive them either way. This is the same
+        // channel `client_report` already travels on, deliberately: one report
+        // to copy, not two.
+        const mintExtras = () => {
+            if (!mintReport || !mintDiag) return {};
+            return {
+                mint_report: mintReport,
+                mint_report_text: mintDiag.formatMintReport(mintReport),
+                mint_state: mintDiag.classifyMintOutcome(mintReport),
+            };
+        };
+        const throwWithDiag = (err) => {
+            try { Object.assign(err, mintExtras()); } catch (_) {}
+            return err;
+        };
+
+        if (opts.poToken || opts.po_token) {
+            // The caller brought the token (Settings). We mint nothing and we
+            // strip nothing, so the report must not claim either.
+            if (mintReport) {
+                mintReport.mint.tokenSource = 'user';
+                mintDiag.recordNotAttempted(mintReport, 'a token was supplied by the caller (Settings) — nothing to mint');
+            }
+        }
         if (!opts.poToken && !opts.po_token) {
             try {
                 const poMod = await import('./modules/po_token.js').catch(() => import('./po_token.js')).catch(() => null);
@@ -348,26 +392,37 @@ class YouTubeResolver {
                         const tmpForVd = await this._client(opts);
                         vdForCache = tmpForVd?.session?.context?.client?.visitorData || vdForCache;
                     } catch (_) {}
-                    const cached = getCachedPoToken ? getCachedPoToken(videoId, vdForCache) : null;
+                    const cached = getCachedPoToken ? getCachedPoToken(videoId, vdForCache, mintReport) : null;
                     if (cached) {
                         opts = { ...opts, poToken: cached.poToken, po_token: cached.poToken, visitorData: cached.visitorData || vdForCache || opts.visitorData, visitor_data: cached.visitorData || vdForCache };
                         tokenIsWebBound = true;
                         console.log(`[YouTubeResolver] Using cached PO token for ${videoId}`);
                     } else if (generatePoTokenForVideo) {
                         const tmpClient = await this._client(opts);
-                        const minted = await generatePoTokenForVideo(tmpClient, videoId).catch(() => null);
+                        const minted = await generatePoTokenForVideo(tmpClient, videoId, mintReport).catch((e) => {
+                            console.warn('[YouTubeResolver] generatePoTokenForVideo threw:', e?.message || e);
+                            return null;
+                        });
                         if (minted?.poToken) {
                             opts = { ...opts, poToken: minted.poToken, po_token: minted.poToken, visitorData: minted.visitorData || vdForCache || opts.visitorData, visitor_data: minted.visitorData || vdForCache };
-                            if (setCachedPoToken) setCachedPoToken(videoId, minted);
+                            if (setCachedPoToken) setCachedPoToken(videoId, minted, mintReport);
                             tokenIsWebBound = true;
                             console.log(`[YouTubeResolver] Minted PO token for ${videoId}`);
                         } else {
                             console.warn(`[YouTubeResolver] No PO token minted for ${videoId} — will try TV/ANDROID_VR fallback`);
                         }
+                    } else if (mintReport) {
+                        mintDiag.recordNotAttempted(mintReport, 'po_token.js loaded but exported no generatePoTokenForVideo');
                     }
+                } else if (mintReport) {
+                    // The whole mint module is unreachable. Recorded, because
+                    // "the module would not load" and "minting failed" lead to
+                    // completely different fixes and used to look the same.
+                    mintDiag.recordNotAttempted(mintReport, 'modules/po_token.js could not be imported (and neither could ../po_token.js)');
                 }
             } catch (e) {
                 console.warn('[YouTubeResolver] PO token import/mint skipped:', e?.message || e);
+                if (mintReport) mintDiag.recordNotAttempted(mintReport, `mint threw: ${e?.message || e}`);
             }
         }
         try {
@@ -865,10 +920,10 @@ class YouTubeResolver {
         }
 
         if (!info) {
-            const msg = `Failed to retrieve video stream: ${lastErr?.message || 'Video unavailable'} (videoId=${videoId}, tried 6 InnerTube clients; last status was checked via actions.execute/getInfo — client report: ${formatClientReport(clientReport)}; ensure device has network + valid YouTube cookie/PO token if age-restricted)`;
+            const msg = `Failed to retrieve video stream: ${lastErr?.message || 'Video unavailable'} (videoId=${videoId}, tried 6 InnerTube clients; last status was checked via actions.execute/getInfo — client report: ${formatClientReport(clientReport)}${mintReport ? `; mint report: ${mintDiag.formatMintReportLine(mintReport)}` : ''}; ensure device has network + valid YouTube cookie/PO token if age-restricted)`;
             console.error(`DIAGNOSTIC youtube_resolve_failed videoId=${videoId} error=${msg} lastErr=${lastErr?.message || lastErr}`);
             console.error(lastErr);
-            throw new Error(msg);
+            throw throwWithDiag(new Error(msg));
         }
 
         const bi = info.basic_info || {};
@@ -996,7 +1051,7 @@ class YouTubeResolver {
                     const err = new Error(diag);
                     err.client_report = clientReport;
                     err.client_report_text = formatClientReport(clientReport);
-                    throw err;
+                    throw throwWithDiag(err);
                 }
                 const isMuxed = Boolean(legacy.has_video);
                 used_legacy_progressive = true;
@@ -1015,7 +1070,7 @@ class YouTubeResolver {
             const err = new Error(diag);
             err.client_report = clientReport;
             err.client_report_text = formatClientReport(clientReport);
-            throw err;
+            throw throwWithDiag(err);
         }
 
         let streamUrl = fmt.url;
@@ -1072,7 +1127,7 @@ class YouTubeResolver {
                 if (!allow_legacy_progressive) {
                     const diag = `Refusing SABR-only legacy progressive (itag=${candidate.itag}) for ${videoId}: a previous attempt already produced a short stream from it. Retry with another Innertube client or set youtube_po_token/cookie in Settings.`;
                     console.error(`DIAGNOSTIC legacy_progressive_refused videoId=${videoId} itag=${candidate.itag}`);
-                    throw new Error(diag);
+                    throw throwWithDiag(new Error(diag));
                 }
                 used_legacy_progressive = true;
                 if (candidate.url) {
@@ -1173,6 +1228,11 @@ class YouTubeResolver {
                 tokenIsWebBound: tokenIsWebBound,
             });
             streamUrl = applied.url;
+            // The placement half of the mint story, and the half that decides
+            // `minted-attached` vs `minted-stripped`. Without it, "a good Web
+            // token was deliberately kept off an `ios` url" and "minting
+            // produced nothing" produce byte-identical reports.
+            if (mintReport) mintDiag.recordPotApply(mintReport, applied, winningClient);
             if (applied.action === 'attached') {
                 console.log(`[YouTubeResolver] Appended pot to ${winningClient} googlevideo URL for ${videoId}`);
             } else if (applied.action === 'stripped') {
@@ -1183,7 +1243,7 @@ class YouTubeResolver {
         if (!streamUrl) {
             const diag = `Unable to extract playable audio URL for ${videoId}: fmt keys=${fmt ? Object.keys(fmt).join(',') : 'no fmt'} url=${fmt?.url?'has url':''} cipher=${fmt?.signature_cipher||fmt?.cipher?'has cipher':''} decipher=${typeof fmt?.decipher} (winningClient=${winningClient}) — check that headers/UA match and n/s decipher succeeded; see logs above.`;
             console.error(`DIAGNOSTIC no_stream_url ${diag}`);
-            throw new Error(diag);
+            throw throwWithDiag(new Error(diag));
         }
 
         const ext = this.extFromMime(fmt.mime_type);
@@ -1272,6 +1332,10 @@ class YouTubeResolver {
             },
             client_report: clientReport,
             client_report_text: formatClientReport(clientReport),
+            // What the PO-token mint did, and where its token ended up. Same
+            // channel as `client_report` on purpose: one thing to copy, and the
+            // two are only interpretable together.
+            ...mintExtras(),
             videoId,
             originalUrl: url,
             resolveOpts: { ...opts },
