@@ -1096,6 +1096,15 @@ describe('YouTube Search & Streaming Integration', () => {
             'the getInfo report must count opus urls, or the two paths disagree');
         const dsrc = fs.readFileSync(path.join(root, 'ui/js/modules/downloads.js'), 'utf8');
         assert.ok(/opusWithUrl=\$\{/.test(dsrc), 'opusWithUrl must be visible in the device report');
+        // The user-facing 403 hint used to tell people to mint a PO token. On the
+        // one network we have data for that remedy cannot work — a Web token is
+        // platform-bound and invalid on exactly the clients (ios/android_vr) that
+        // hand out audio urls — and the capture that showed it also showed the
+        // thing that actually fixed the download: rotating to a client with a muxed
+        // url. Advice that names a dead remedy sends people down a false trail
+        // during the one test that can prove it wrong.
+        assert.ok(!/set youtube_po_token via BgUtil mint/.test(dsrc),
+            'the 403 hint must not recommend minting a token as the remedy');
         // The stale claim must not come back in a comment.
         assert.ok(!/do NOT prefer webm\/opus/.test(ysrc),
             'the refuted claim must not remain as a comment — it is what caused the misranking');

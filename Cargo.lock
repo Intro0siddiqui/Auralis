@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "auralis"
-version = "2.6.54"
+version = "2.6.55"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
