@@ -1945,7 +1945,10 @@ mod tests {
         let mut report = sample_report(&track, ResumeStrategy::FreshSinkReplay);
         report.probe = VERDICT_DRAINED_IMMEDIATE;
         file_resume_report(report);
-        let html = render_queue_html(Some(&track), &[track.clone()]);
+        // `std::slice::from_ref`, not `&[track.clone()]`: the latter is what
+        // `clippy::clone_on_copy` fires on, and CI's lint job runs
+        // `-D warnings`, so it is a build failure rather than a suggestion.
+        let html = render_queue_html(Some(&track), std::slice::from_ref(&track));
         assert!(html.contains("Resume log"), "the panel must carry the log");
         assert!(html.contains("drained_immediately"));
         reset_resume_log();
