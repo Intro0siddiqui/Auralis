@@ -52,6 +52,14 @@ export const downloadMethods = {
                 selection: resolved?.selection || null,
                 report: Array.isArray(resolved?.client_report) ? resolved.client_report : [],
                 text: resolved?.client_report_text || '',
+                // The PO-token mint report rides in the SAME entry, not a second
+                // archive. The two answers are only interpretable together: "no
+                // token on the url" means "minting failed" on one run and
+                // "a good Web token was correctly withheld from a non-web
+                // client" on the next, and those need opposite fixes.
+                mint: resolved?.mint_report || null,
+                mintText: resolved?.mint_report_text || '',
+                mintState: resolved?.mint_state || null,
                 context,
             };
             list.push(entry);
@@ -93,7 +101,12 @@ export const downloadMethods = {
                     return `  - ${r.client}: ${bits}`;
                 }).join('\n')
                 : '  - (no per-client detail)';
-            return `#${i + 1} ${e.at} "${e.title}" videoId=${e.videoId} client=${e.client} sabrFallback=${e.sabrFallback}${sel}\n${per}`;
+            // The full per-step mint block, verbatim. This is the surface the
+            // owner copies when asking "can this WebView mint a PO token?" — a
+            // summary line in the download row is not enough, because the
+            // answer is which step failed, and that lives in the step list.
+            const mint = e.mintText || '';
+            return `#${i + 1} ${e.at} "${e.title}" videoId=${e.videoId} client=${e.client} sabrFallback=${e.sabrFallback}${sel}\n${per}${mint ? `\n${mint}` : ''}`;
         }).join('\n\n');
     },
 
@@ -180,7 +193,7 @@ export const downloadMethods = {
         const key = ctx.key || p.id;
         const budgetMap = this._ensureRetryBudget();
         let budget = budgetMap.get(key);
-        if (!budget) { budget = { attempts: 0, triedClients: [], forcedLegacy: false }; budgetMap.set(key, budget); }
+        if (!budget) { budget = { attempts: 0, triedClients: [], triedClasses: [] }; budgetMap.set(key, budget); }
         const MAX_AUTO_RETRIES = 3;
         // This budget, not the client list, is what bounds the retry. Clients
         // that merely came back empty are re-askable (see rotationRank), so the
@@ -299,7 +312,6 @@ export const downloadMethods = {
         // serve" must not become "refuse to let the resolver use it", or the
         // de-prioritisation would silently harden back into the veto.
         const servable = candidates.filter(c => rotationRank(c) === 0);
-        const viable = candidates.filter(c => rotationRank(c) !== null);
         const deferred = candidates.filter(c => rotationRank(c) === 1);
 
         // Rescue BEFORE rotating away from the client that just failed.
@@ -318,76 +330,132 @@ export const downloadMethods = {
         // and asking it again would just re-resolve the same refused url.
         const winner = resolved.client || resolved.winningClient;
         const sel = resolved.selection || {};
-        const refusedAdaptiveAudio = is403 && sel.audioOnly === true && !sel.legacyProgressive;
-        const winnerHasMuxed = winner
-            ? ((reportByClient.get(winner) || {}).progressiveWithUrl || 0) > 0
-            : false;
-        const trySameClientMuxed = refusedAdaptiveAudio && winnerHasMuxed && !budget.forcedLegacy;
-
-        // Third rung: audio-only OPUS. Reached only once BOTH other classes have
-        // failed for this track — adaptive m4a refused at byte 0, and the muxed
-        // fallback arriving truncated. On the device report of 2026-09-27 that is
-        // exactly the state four attempts ran out of road in, while the same
-        // report recorded `ANDROID_VR ... opusWithUrl=2` — two audio-only opus
-        // streams with usable urls that nothing had ever asked for.
+        // The ladder is over CLASSES OF URL, and it is walked by what has already
+        // been tried — not by what the last error happened to be.
         //
-        // Gated on the client actually offering one, for the same reason the muxed
-        // rung is gated on `progressiveWithUrl`: IOS reports `opusWithUrl: 0`, so
-        // asking it would spend an attempt re-resolving a class just proven bad.
-        const muxedTruncated = isTruncated && Boolean(sel.legacyProgressive || sel.itag === 18);
-        const opusCandidates = ordered.filter((c) => ((reportByClient.get(c) || {}).opusWithUrl || 0) > 0);
-        const tryOpus = muxedTruncated && !budget.forcedOpus && opusCandidates.length > 0;
-        const opusClient = tryOpus
-            ? (opusCandidates.includes(winner) ? winner : opusCandidates[0])
+        // This is a rewrite, and the reason is a device report that showed the
+        // previous shape was unreachable. On 2026-09-27, track yF9nmg_jHNs, four
+        // attempts:
+        //
+        //   #1 ANDROID_VR itag=140 adaptive -> 403 @ byte 0
+        //   #2 ANDROID_VR itag=18  MUXED    -> 403
+        //   #3 IOS        itag=140 adaptive -> 403 @ byte 0
+        //   #4 ANDROID    itag=18  MUXED    -> truncated 75s of 216s
+        //
+        // and `ANDROID_VR ... opusWithUrl=2` was never requested. The old gate
+        // reached for opus only on an observed *truncation*, and the only
+        // truncation arrived on the last attempt the budget allows — so the one
+        // class never tried was structurally unreachable. Two of the three
+        // retries had gone to classes already proven bad: #3 re-tried adaptive
+        // after it had 403'd twice, and #4 re-tried muxed after #2.
+        //
+        // So: record the class that failed, and go to the next class nobody has
+        // tried. Client rotation becomes the LAST resort rather than a mid-ladder
+        // step, because the evidence says a byte-0 403 is not client-specific —
+        // adaptive 403'd on ANDROID_VR and IOS from two different hosts, and muxed
+        // has never once succeeded on any client.
+
+        const classOf = (s) => {
+            if (!s) return 'adaptive';
+            if (s.legacyProgressive === true || s.itag === 18) return 'muxed';
+            // Opus is `audio/webm; codecs="opus"`. Read from the reported mime
+            // rather than a new field on `selection`, so the class is derivable
+            // from what the resolver already hands us.
+            if (/opus/i.test(String(s.mime || '')) || s.ext === 'webm') return 'opus';
+            return 'adaptive';
+        };
+        // Availability comes from the per-client report, never assumed. IOS
+        // reports `progressiveWithUrl: 0` and `opusWithUrl: 0` on this video, so
+        // asking it for either would spend an attempt re-resolving a class just
+        // proven bad.
+        const offers = (c, klass) => {
+            const e = reportByClient.get(c) || {};
+            if (klass === 'opus') return (e.opusWithUrl || 0) > 0;
+            if (klass === 'muxed') return (e.progressiveWithUrl || 0) > 0;
+            return (e.audioWithUrl || 0) > 0 || (e.adaptiveWithUrl || 0) > 0;
+        };
+        // Order, and the evidence behind it:
+        //   adaptive — best when it works, so it is what the first attempt uses.
+        //   opus     — untried after four failed attempts on the other two, and
+        //              audio-only, so it pays no 360p remux the muxed rung does.
+        //   muxed    — has never succeeded: 403 once and truncated twice, across
+        //              ANDROID_VR and ANDROID. Weakest prior of the three, which
+        //              is why it is last rather than second.
+        // The adaptive-vs-opus ordering is an INFERENCE, not a measurement: both
+        // are adaptive CDN urls and may share whatever the 403 is bound to, in
+        // which case opus is refused identically and this changes nothing. What is
+        // measured is that muxed is no better than either.
+        const CLASS_ORDER = ['adaptive', 'opus', 'muxed'];
+
+        if (!Array.isArray(budget.triedClasses)) budget.triedClasses = [];
+        const failedClass = classOf(sel);
+        if (!budget.triedClasses.includes(failedClass)) budget.triedClasses.push(failedClass);
+
+        const nextClass = CLASS_ORDER.find((k) => !budget.triedClasses.includes(k)
+            && ordered.some((c) => offers(c, k))) || null;
+        const classCandidates = nextClass ? ordered.filter((c) => offers(c, nextClass)) : [];
+        // Prefer the client that just resolved — it is the one we know returns
+        // formats at all — and fall back to any client the report says offers
+        // this class.
+        const classClient = classCandidates.length
+            ? (classCandidates.includes(winner) ? winner : classCandidates[0])
             : null;
 
-        const nextClient = tryOpus
-            ? opusClient
-            : trySameClientMuxed
-            ? winner
-            : (rotate ? (servable[0] || deferred[0] || null) : null);
+        // Every class has been tried. Rotation is still allowed, but only now:
+        // it is a second opinion, not progress, and putting it earlier is what
+        // spent two of three retries re-asking classes already refused.
+        const exhausted = !nextClass;
+        const rotatedClient = (rotate && exhausted)
+            ? (servable[0] || deferred[0] || null)
+            : null;
+
+        const nextClient = classClient || rotatedClient;
         // Every remaining client is PROVEN unable to hand out an audio url — not
         // merely silent on this attempt. A candidate that merely came back empty
         // keeps the retry alive, because the next resolve of that same client
         // may well return real formats.
-        const deadEnd = rotate && !trySameClientMuxed && !tryOpus && candidates.length > 0 && viable.length === 0;
+        const deadEnd = rotate && !nextClient;
         const allClients = resolved.orderedClients || [];
         // Never exclude every client — that leaves the resolver nothing to try.
-        // When re-asking the winner for a different format it must not also be
+        // When re-asking the winner for a different class it must not also be
         // excluded, or the two instructions contradict each other.
         const excludeClients = (tried.length > 0 && tried.length < allClients.length)
-            ? ((trySameClientMuxed || tryOpus) ? tried.filter((c) => c !== nextClient) : tried.slice())
+            ? (nextClient ? tried.filter((c) => c !== nextClient) : tried.slice())
             : [];
-        if (rotate && !trySameClientMuxed && !tryOpus && (!nextClient || deadEnd)) {
-            console.warn(`[Downloads] 403/truncation auto-retry: no client left worth trying for ${p.id} (winning=${resolved.client}, deadEnd=${deadEnd})`);
+        if (rotate && !nextClient) {
+            console.warn(`[Downloads] 403/truncation auto-retry: no client left worth trying for ${p.id} (winning=${resolved.client}, deadEnd=${deadEnd}, triedClasses=${JSON.stringify(budget.triedClasses)})`);
             map.delete(p.id);
             return;
         }
 
         budget.attempts += 1;
-        if (trySameClientMuxed) budget.forcedLegacy = true;
-        if (tryOpus) budget.forcedOpus = true;
         ctx._retrying = true;
         try { window.__auralisDownloadRetryingIds = window.__auralisDownloadRetryingIds || new Set(); window.__auralisDownloadRetryingIds.add(p.id); } catch (_) {}
         const shortfall = (errRaw.match(/only \d+s of \d+s|received \d+ bytes of \d+/) || [errRaw.split('\n')[0].slice(0, 80)])[0];
-        const label = tryOpus
-            ? `Both the adaptive stream and the muxed fallback failed — trying ${opusClient}'s audio-only opus stream`
-            : trySameClientMuxed
-            ? `403 on ${winner}'s adaptive stream — retrying the same client with the muxed format it also offers`
+        const CLASS_NAME = { adaptive: 'adaptive audio', opus: 'audio-only opus', muxed: 'the muxed fallback' };
+        const label = nextClass
+            ? `${CLASS_NAME[failedClass] || failedClass} did not work — trying ${CLASS_NAME[nextClass]} from ${nextClient}`
             : isTruncated
-            ? `Truncated stream (${shortfall}), re-resolving via ${nextClient || 'another client'}`
+            ? `Truncated stream (${shortfall}), every url class has now been tried — re-resolving via ${nextClient || 'another client'}`
             : is403
-                ? `403 on ${resolved.client || 'TV'} (rr1---sn-gwpa-cived), retrying with ${nextClient}`
+                ? `403 on ${resolved.client || 'TV'} (rr1---sn-gwpa-cived), every url class has now been tried — retrying with ${nextClient}`
                 : `Download incomplete (${shortfall}), retrying`;
         this.showToast(`${label}… (attempt ${budget.attempts}/${MAX_AUTO_RETRIES})`, 'info', 5000);
-        console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} truncated=${isTruncated} sabr=${!!resolved.sabrFallback} nextClient=${nextClient} sameClientMuxed=${trySameClientMuxed} opus=${tryOpus} opusCandidates=${JSON.stringify(opusCandidates)} exclude=${JSON.stringify(excludeClients)}`);
+        console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} truncated=${isTruncated} sabr=${!!resolved.sabrFallback} failedClass=${failedClass} triedClasses=${JSON.stringify(budget.triedClasses)} nextClass=${nextClass} nextClient=${nextClient} exclude=${JSON.stringify(excludeClients)}`);
         try {
             const baseOpts = ctx.opts || this.getDownloadOptions(document.getElementById('download-form')) || {};
             const retryOpts = { ...baseOpts };
             if (nextClient) retryOpts.forceClient = nextClient;
             if (excludeClients.length) retryOpts.excludeClients = excludeClients;
-            if (trySameClientMuxed) retryOpts.forceLegacyProgressive = true;
-            if (tryOpus) retryOpts.forceOpusAudio = true;
+            if (nextClass === 'muxed') retryOpts.forceLegacyProgressive = true;
+            if (nextClass === 'opus') retryOpts.forceOpusAudio = true;
+            // An explicit move back to the adaptive class must clear a force left
+            // over from a previous rung, or the resolver keeps handing back the
+            // class that just failed.
+            if (nextClass === 'adaptive') {
+                retryOpts.forceLegacyProgressive = false;
+                retryOpts.forceOpusAudio = false;
+            }
             // A previous attempt came back short. Refuse the legacy-progressive
             // fallback only for the client that actually truncated — the short
             // stream is a SABR window, not a property of the muxed container,
@@ -409,11 +477,14 @@ export const downloadMethods = {
             console.error(`[Downloads] auto-retry re-resolve failed for ${p.id}:`, msg);
             this.showToast(`Retry failed: ${msg}`, 'error', 6000);
             try {
-                if (e && e.client_report) {
+                if (e && (e.client_report || e.mint_report)) {
                     this._recordClientReport({
                         title: '', videoId: '', client: null,
                         client_report: e.client_report,
                         client_report_text: e.client_report_text || '',
+                        mint_report: e.mint_report || null,
+                        mint_report_text: e.mint_report_text || '',
+                        mint_state: e.mint_state || null,
                     }, { phase: 'auto_retry_resolve_failed', key, attempt: budget.attempts, triedClients: tried.slice() });
                 }
             } catch (_) {}
@@ -588,13 +659,19 @@ export const downloadMethods = {
             console.error(err);
             console.groupEnd();
             // Resolver failures carry the per-client reaction report — archive it
-            // so "Copy report" still works when nothing was ever downloaded.
+            // so "Copy report" still works when nothing was ever downloaded. The
+            // mint report rides along: a resolve that died before any client
+            // answered is exactly the run where "did the mint even start?" is
+            // the question, and there is no other place it would show up.
             try {
-                if (err && err.client_report) {
+                if (err && (err.client_report || err.mint_report)) {
                     this._recordClientReport({
                         title: '', videoId: '', client: null,
                         client_report: err.client_report,
                         client_report_text: err.client_report_text || '',
+                        mint_report: err.mint_report || null,
+                        mint_report_text: err.mint_report_text || '',
+                        mint_state: err.mint_state || null,
                     }, { phase: 'resolve_failed', url });
                 }
             } catch (_) {}
@@ -1251,9 +1328,27 @@ export const downloadMethods = {
         })();
         const reportText = (reportSrc && (reportSrc.client_report_text || reportSrc.text)) || '';
         const selInfo = (reportSrc && reportSrc.selection) || null;
-        const clientBlock = reportText
-            ? `<div style="margin-top:6px;font-size:11px;line-height:1.45;color:var(--text-3);font-family:monospace;word-break:break-word;user-select:text">clients: ${this.escapeHtml(reportText)}${selInfo ? `<br>picked: itag=${this.escapeHtml(String(selInfo.itag))} ${this.escapeHtml(String(selInfo.ext))}${selInfo.audioOnly ? ' audio-only' : ' MUXED video+audio'}${selInfo.legacyProgressive ? ' — legacy progressive (SABR)' : ''}` : ''}
-                   <button type="button" class="btn btn-secondary btn-sm" data-action="copy-client-report" title="Copy how every InnerTube client answered (SABR / 403 / format counts)">Copy report</button></div>`
+        // The PO-token mint line. Reads from either shape: a live `resolved`
+        // (from the pending-download context) carries `mint_report_text`, while
+        // an archived entry carries `mintText` — same archive, two producers.
+        //
+        // The state name is printed first and on its own because the four
+        // possible values call for four different responses, and "no token on
+        // the url" reads identically for the two most important ones. In
+        // particular `minted-stripped` is CORRECT behaviour, not a failure: a
+        // Web/BotGuard token is platform-bound and is deliberately withheld
+        // from `ios`/`android`/`android_vr`. Reading it as "minting is broken"
+        // sends the owner to fix the WebView when the WebView is fine.
+        const mintText = (reportSrc && (reportSrc.mint_report_text || reportSrc.mintText)) || '';
+        const mintLine = (() => {
+            if (!mintText && !reportSrc) return '';
+            const state = (reportSrc && (reportSrc.mint_state || reportSrc.mintState)) || 'unknown';
+            const oneLine = mintText.split('\n').map((l) => l.trim()).filter(Boolean)[0] || '';
+            return `<div style="margin-top:4px;font-size:11px;line-height:1.45;color:var(--text-3);font-family:monospace;word-break:break-word;user-select:text">pot: ${this.escapeHtml(state)}${oneLine && !oneLine.includes('state=') ? ' — ' + this.escapeHtml(oneLine) : ''}<br><span style="opacity:.8">${this.escapeHtml(oneLine || 'no mint report')}</span></div>`;
+        })();
+        const clientBlock = (reportText || mintLine)
+            ? `<div style="margin-top:6px;font-size:11px;line-height:1.45;color:var(--text-3);font-family:monospace;word-break:break-word;user-select:text">${reportText ? `clients: ${this.escapeHtml(reportText)}${selInfo ? `<br>picked: itag=${this.escapeHtml(String(selInfo.itag))} ${this.escapeHtml(String(selInfo.ext))}${selInfo.audioOnly ? ' audio-only' : ' MUXED video+audio'}${selInfo.legacyProgressive ? ' — legacy progressive (SABR)' : ''}` : ''}` : ''}
+                   <button type="button" class="btn btn-secondary btn-sm" data-action="copy-client-report" title="Copy how every InnerTube client answered (SABR / 403 / format counts) AND the PO-token mint steps">Copy report</button></div>`
             : '';
         row.innerHTML = `
             <div class="track-row-info" style="min-width:0;flex:1">
@@ -1261,6 +1356,7 @@ export const downloadMethods = {
                 <div class="track-row-subtitle">${subtitle}</div>${destNote}
                 ${errBlock}
                 ${clientBlock}
+                ${mintLine}
             </div>
             ${pctBar}
         `;

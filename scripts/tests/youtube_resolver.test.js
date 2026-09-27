@@ -905,7 +905,7 @@ describe('YouTube Search & Streaming Integration', () => {
                 getDownloadOptions: () => ({}),
                 downloadResolvedTrack: async (r, f, o) => { calls.push({ client: r.client, opts: o }); return { id: 'next' }; },
             };
-            obj._autoRetryBudget = new Map([['BElct8HWkp8', { attempts: tried.length ? 1 : 0, triedClients: tried.slice() }]]);
+            obj._autoRetryBudget = new Map([['BElct8HWkp8', { attempts: tried.length ? 1 : 0, triedClients: tried.slice(), triedClasses: ['adaptive', 'opus', 'muxed'] }]]);
             obj._pendingDownloadContexts.set('dl1', {
                 key: 'BElct8HWkp8',
                 resolved: { client: tried.length ? 'ANDROID_VR' : 'IOS', orderedClients: ordered, retryClients: tried.length ? ['WEB'] : ['TV', 'ANDROID_VR', 'WEB'], client_report: report },
@@ -946,7 +946,7 @@ describe('YouTube Search & Streaming Integration', () => {
             getDownloadOptions: () => ({}),
             downloadResolvedTrack: async () => { throw new Error('must not be called'); },
         };
-        sabrObj._autoRetryBudget = new Map([['BElct8HWkp8', { attempts: 1, triedClients: ['IOS', 'ANDROID_VR'] }]]);
+        sabrObj._autoRetryBudget = new Map([['BElct8HWkp8', { attempts: 1, triedClients: ['IOS', 'ANDROID_VR'], triedClasses: ['adaptive', 'opus', 'muxed'] }]]);
         sabrObj._pendingDownloadContexts.set('dl1', {
             key: 'BElct8HWkp8',
             resolved: { client: 'ANDROID_VR', orderedClients: ordered, retryClients: ['ANDROID'], client_report: sabrOnly },
@@ -985,7 +985,7 @@ describe('YouTube Search & Streaming Integration', () => {
     // copy of its predicate is deliberate: a test that re-implements the rule it
     // is checking has already shipped one defect in this file (the pot-for-TV
     // case, AGENTS.md v2.6.50).
-    const attemptOnce = async ({ key, winner, report, ordered, tried, attempts, sel, error, optsIn = {} }) => {
+    const attemptOnce = async ({ key, winner, report, ordered, tried, attempts, sel, error, optsIn = {}, triedClasses }) => {
         const seen = [];
         const obj = {
             ...downloadMethods,
@@ -995,7 +995,16 @@ describe('YouTube Search & Streaming Integration', () => {
             getDownloadOptions: () => ({}),
             downloadResolvedTrack: async (r, f, o) => { seen.push({ client: r.client, opts: o }); return { id: 'next' }; },
         };
-        obj._autoRetryBudget = new Map([[key, { attempts, triedClients: tried.slice(), forcedLegacy: false, forcedOpus: false }]]);
+        // Default to every class already tried, because that is the state in which
+        // the ladder falls through to client rotation — and rotation is what most
+        // of these assertions are about. A case that is asserting a CLASS rung has
+        // to pass the classes that are still untried, or the rung is unreachable by
+        // construction and the assertion is vacuous.
+        obj._autoRetryBudget = new Map([[key, {
+            attempts,
+            triedClients: tried.slice(),
+            triedClasses: triedClasses || ['adaptive', 'opus', 'muxed'],
+        }]]);
         obj._pendingDownloadContexts.set('dl1', {
             key,
             resolved: { client: winner, orderedClients: ordered, client_report: report, selection: sel || { itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true } },
@@ -1100,9 +1109,13 @@ describe('YouTube Search & Streaming Integration', () => {
 
         // (ii) The opus rung picks on what each client actually offers. IOS
         // reports opusWithUrl=0, so it must never be the one asked for opus.
+        // `triedClasses` is passed explicitly: with every class already tried the
+        // ladder goes to rotation and the opus rung is unreachable, which would
+        // make this assertion vacuous rather than wrong.
         ({ seen } = await attemptOnce({
             key: 'yF9nmg_jHNs', winner: 'ANDROID_VR', report, ordered,
             tried: ['ANDROID_VR'], attempts: 2, error: errTrunc,
+            triedClasses: ['adaptive', 'muxed'],
             sel: { client: 'ANDROID_VR', itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true },
         }));
         assert.equal(seen.length, 1);
@@ -1129,7 +1142,7 @@ describe('YouTube Search & Streaming Integration', () => {
         // candidate with "no evidence either way", which is eligible by design —
         // so a stray name here would test the wrong branch.
         const androidLastOrdered = ['MWEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
-        const budget = { attempts: 1, triedClients: ['MWEB', 'ANDROID_VR', 'TV', 'IOS'], forcedLegacy: false, forcedOpus: false };
+        const budget = { attempts: 1, triedClients: ['MWEB', 'ANDROID_VR', 'TV', 'IOS'], triedClasses: ['adaptive', 'opus', 'muxed'] };
         const calls = [];
         const obj = {
             ...downloadMethods,
@@ -1168,7 +1181,7 @@ describe('YouTube Search & Streaming Integration', () => {
             { client: 'ANDROID', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0 },
         ];
         const ordered = ['MWEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
-        const budget = { attempts: 0, triedClients: [], forcedLegacy: false, forcedOpus: false };
+        const budget = { attempts: 0, triedClients: [], triedClasses: ['adaptive', 'opus', 'muxed'] };
         const chosen = [];
         let winner = 'IOS';
 
@@ -1254,6 +1267,10 @@ describe('YouTube Search & Streaming Integration', () => {
         const saturated = await attemptOnce({
             key: 'saturated', winner: 'ANDROID_VR', report: opusReport, ordered: opusOrdered,
             tried: ['MWEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'], attempts: 2, error: errTrunc,
+            // The saturated CLIENT set is the subject here; the class ladder must
+            // still have opus left, or the rung this case exists to exercise is
+            // unreachable and the assertion passes for the wrong reason.
+            triedClasses: ['adaptive', 'muxed'],
             sel: { client: 'ANDROID_VR', itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true },
         });
         assert.equal(saturated.seen.length, 1, 'a saturated tried-set must not stop the opus rescue');
@@ -1304,7 +1321,7 @@ describe('YouTube Search & Streaming Integration', () => {
             getDownloadOptions: () => ({}),
             downloadResolvedTrack: async (r, f, o) => { calls.push({ client: r.client }); return { id: 'next' }; },
         };
-        obj._autoRetryBudget = new Map([['hsXKOsnptw4', { attempts: 1, triedClients: ['IOS'] }]]);
+        obj._autoRetryBudget = new Map([['hsXKOsnptw4', { attempts: 1, triedClients: ['IOS'], triedClasses: ['adaptive', 'opus', 'muxed'] }]]);
         obj._pendingDownloadContexts.set('dl1', {
             key: 'hsXKOsnptw4',
             // IOS won, then 403'd, so it is the client being rotated away from.
@@ -1359,7 +1376,7 @@ describe('YouTube Search & Streaming Integration', () => {
                 getDownloadOptions: () => ({}),
                 downloadResolvedTrack: async (r, f, o) => { calls.push({ client: r.client, forceLegacy: !!o.forceLegacyProgressive }); return { id: 'next' }; },
             };
-            obj._autoRetryBudget = new Map([['hsXKOsnptw4', { attempts: 1, triedClients: ['IOS'], forcedLegacy: false }]]);
+            obj._autoRetryBudget = new Map([['hsXKOsnptw4', { attempts: 1, triedClients: ['IOS'], triedClasses: ['adaptive'] }]]);
             obj._pendingDownloadContexts.set('dl1', {
                 key: 'hsXKOsnptw4',
                 resolved: { client: 'IOS', orderedClients: ordered, client_report: report, selection: sel },
@@ -1380,16 +1397,28 @@ describe('YouTube Search & Streaming Integration', () => {
         assert.equal(calls[0].client, 'IOS', 'must re-ask the failing client, not rotate away from it');
         assert.equal(calls[0].forceLegacy, true, 'the retry must ask for the muxed format');
 
-        // IOS reported progressive=0 on every real attempt, so it has nothing to
-        // fall back to. Re-asking would re-resolve the same refused url, so the
-        // retry must rotate instead.
+        // IOS reported progressiveWithUrl=0 on every real attempt, so it has
+        // nothing to fall back to and must not be re-asked for the class. The
+        // muxed class is still untried, though, so the correct move is to take it
+        // from a client that HAS one — not to abandon the class and rotate.
+        // The previous assertion here demanded the rotation, which is the
+        // behaviour that burned the budget re-asking classes already refused.
         const noMuxed = report.map((e) => (e.client === 'IOS' ? { ...e, progressiveWithUrl: 0 } : e));
         const orig = JSON.stringify(report);
         report.length = 0; report.push(...noMuxed);
         calls = await run({ itag: 140, ext: 'm4a', audioOnly: true, legacyProgressive: false });
         assert.equal(calls.length, 1, 'a 403 must still be retried');
-        assert.notEqual(calls[0].client, 'IOS', 'a client with no progressive url must not be re-asked');
-        assert.equal(calls[0].forceLegacy, false, 'no muxed fallback exists, so none may be requested');
+        assert.notEqual(calls[0].client, 'IOS', 'a client with no progressive url must not be re-asked for it');
+        assert.equal(calls[0].forceLegacy, true, 'the untried class must be taken from a client that has it, not dropped');
+        report.length = 0; report.push(...JSON.parse(orig));
+
+        // And when NO client has the class, the ladder must not request it —
+        // asking a client for a format it has no url for spends an attempt
+        // re-resolving the same refused url.
+        const noMuxedAnywhere = report.map((e) => ({ ...e, progressiveWithUrl: 0 }));
+        report.length = 0; report.push(...noMuxedAnywhere);
+        calls = await run({ itag: 140, ext: 'm4a', audioOnly: true, legacyProgressive: false });
+        assert.equal(calls[0] && calls[0].forceLegacy, false, 'no client has a muxed url, so none may be requested');
         report.length = 0; report.push(...JSON.parse(orig));
 
         // Already on the muxed path: there is nothing to fall back to, so the
@@ -1579,28 +1608,34 @@ describe('YouTube Search & Streaming Integration', () => {
 
         const adaptive = { client: 'ANDROID_VR', itag: 140, ext: 'm4a', audioOnly: true, legacyProgressive: false };
         const muxed = { client: 'ANDROID_VR', itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true };
+        const opus = { client: 'ANDROID_VR', itag: 251, ext: 'webm', mime: 'audio/webm; codecs="opus"', audioOnly: true, legacyProgressive: false };
 
-        // Rung 2: 403 on adaptive, and the winner has a progressive url.
-        let calls = await run(adaptive, err403, { attempts: 0, triedClients: [], forcedLegacy: false, forcedOpus: false });
+        // Rung 2 is OPUS, not the muxed fallback. This test previously asserted
+        // the opposite, and the device run of 2026-09-27 is why that was wrong:
+        // the muxed class has never succeeded (403 once, truncated twice) while
+        // opus was never tried at all, so spending rung 2 on muxed guaranteed the
+        // untried class would not be reached. See the class-ladder test below for
+        // the full four-attempt replay.
+        let calls = await run(adaptive, err403, { attempts: 0, triedClients: [], triedClasses: [] });
         assert.equal(calls.length, 1);
-        assert.equal(calls[0].client, 'ANDROID_VR', 're-ask the same client');
-        assert.equal(calls[0].muxed, true, 'ask for its muxed format');
-        assert.equal(calls[0].opus, false, 'opus is not a first response to a 403 — the muxed rung comes first');
-
-        // Rung 3: the muxed fallback arrived truncated, and a client offers opus.
-        calls = await run(muxed, errTrunc, { attempts: 1, triedClients: ['ANDROID_VR'], forcedLegacy: true, forcedOpus: false });
-        assert.equal(calls.length, 1);
-        assert.equal(calls[0].opus, true, 'both other classes have failed, so try audio-only opus');
         assert.equal(calls[0].client, 'ANDROID_VR', 'ANDROID_VR is the only client offering opus, so it must be the one asked');
-        assert.equal(calls[0].muxed, false, 'must not re-ask for the class that just truncated');
+        assert.equal(calls[0].opus, true, 'the untried class must be rung 2');
+        assert.equal(calls[0].muxed, false, 'muxed has never succeeded and must not outrank an untried class');
+
+        // Rung 3: opus also refused, so the muxed class is the last one left.
+        calls = await run({ ...opus, client: 'ANDROID_VR' }, err403, { attempts: 1, triedClients: ['ANDROID_VR'], triedClasses: ['adaptive', 'opus'] });
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].muxed, true, 'with adaptive and opus refused, muxed is what remains');
+        assert.equal(calls[0].opus, false, 'must not re-ask for the class that just failed');
 
         // Gated: with no client offering opus the rung must not fire, or the
         // retry spends an attempt re-resolving a class already proven bad.
         // This is the real IOS case — progressiveWithUrl:0 and opusWithUrl:0.
         const noOpus = report.map((e) => ({ ...e, opusWithUrl: 0 }));
         const saved = report.splice(0, report.length, ...noOpus);
-        calls = await run({ ...muxed, client: 'IOS' }, errTrunc, { attempts: 2, triedClients: ['ANDROID_VR', 'IOS'], forcedLegacy: true, forcedOpus: false });
+        calls = await run(adaptive, err403, { attempts: 0, triedClients: [], triedClasses: ['adaptive'] });
         assert.equal(calls.every((c) => !c.opus), true, 'a client set with no opus must not trigger the opus rung');
+        assert.equal(calls[0].muxed, true, 'with no opus available the ladder must go to the muxed class instead');
         report.splice(0, report.length, ...saved);
 
         // ...and the resolver must honour the option, and say so when it cannot.
@@ -1614,6 +1649,111 @@ describe('YouTube Search & Streaming Integration', () => {
             'the opus selector must require an audio-only format');
         assert.ok(/\(b\.bitrate \|\| 0\) - \(a\.bitrate \|\| 0\)/.test(ysrc),
             'the opus selector must take the highest bitrate, not an arbitrary member');
+    });
+
+    it('the class ladder reaches audio-only opus instead of spending retries on classes already refused', async () => {
+        // Replay of the real device run, 2026-09-27, track yF9nmg_jHNs, on the
+        // build that shipped the opus rung. Four attempts, all failed, and opus
+        // was never requested:
+        //
+        //   #1 ANDROID_VR itag=140 adaptive -> 403 @ byte 0
+        //   #2 ANDROID_VR itag=18  MUXED    -> 403
+        //   #3 IOS        itag=140 adaptive -> 403 @ byte 0
+        //   #4 ANDROID    itag=18  MUXED    -> truncated 75s of 216s
+        //
+        // while the same report recorded `ANDROID_VR ... opusWithUrl=2`. The old
+        // gate only reached for opus on an observed *truncation*, and the only
+        // truncation landed on the last attempt the budget allows — so the one
+        // untried class was structurally unreachable, and two of three retries
+        // went to classes already proven bad.
+        const report = [
+            { client: 'MWEB', status: 'UNPLAYABLE', adaptiveWithUrl: 0, audioWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0 },
+            { client: 'WEB', status: 'UNPLAYABLE', adaptiveWithUrl: 0, audioWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0 },
+            // TV stopped being a hard zero on this run: `adaptive=28 progressive=1
+            // progressiveWithUrl=1`, still no audio-only urls. Recorded because it
+            // is the same "resolved empty is not a stable property" shape the
+            // rotationRank split exists for.
+            { client: 'TV', status: 'OK', adaptiveWithUrl: 0, audioWithUrl: 0, progressiveWithUrl: 1, opusWithUrl: 0, sabrStreamingUrl: true },
+            { client: 'IOS', status: 'OK', adaptiveWithUrl: 24, audioWithUrl: 2, progressiveWithUrl: 0, opusWithUrl: 0, sabrStreamingUrl: true },
+            { client: 'ANDROID_VR', status: 'OK', adaptiveWithUrl: 26, audioWithUrl: 4, progressiveWithUrl: 1, opusWithUrl: 2, sabrStreamingUrl: true },
+            { client: 'ANDROID', status: 'OK', adaptiveWithUrl: 0, audioWithUrl: 0, progressiveWithUrl: 1, opusWithUrl: 0, sabrStreamingUrl: true },
+        ];
+        const ordered = ['MWEB', 'WEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
+        const err403 = 'HTTP 403 Forbidden [rr1---sn-gwpa-cive7.googlevideo.com] body: (empty body), start_byte=0';
+        const errTrunc = 'Truncated download: only 75s of 216s of audio is actually present (>66% missing).';
+
+        // The adaptive class, as `selection` actually reports it.
+        const adaptive = { itag: 140, ext: 'm4a', mime: 'audio/mp4; codecs="mp4a.40.2"', audioOnly: true, hasVideo: false, legacyProgressive: false };
+        const muxed = { itag: 18, ext: 'mp4', mime: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"', audioOnly: false, hasVideo: true, legacyProgressive: true };
+        const opus = { itag: 251, ext: 'webm', mime: 'audio/webm; codecs="opus"', audioOnly: true, hasVideo: false, legacyProgressive: false };
+
+        // One shared budget across a whole track's retry sequence, which is how
+        // the real ladder is driven — `triedClients`/`triedClasses` accumulate.
+        const budget = { attempts: 0, triedClients: ['ANDROID_VR'], triedClasses: [] };
+        const calls = [];
+        const obj = {
+            ...downloadMethods,
+            _pendingDownloadContexts: new Map(),
+            extractErrorMessage: (p) => p.error || '',
+            showToast: () => {},
+            getDownloadOptions: () => ({}),
+            downloadResolvedTrack: async (r, f, o) => {
+                calls.push({
+                    client: r.client,
+                    muxed: !!o.forceLegacyProgressive,
+                    opus: !!o.forceOpusAudio,
+                });
+                return { id: 'next' };
+            },
+        };
+        obj._autoRetryBudget = new Map([['yF9nmg_jHNs', budget]]);
+        global.window = global.window || {};
+        global.window.AuralisYouTube = {
+            resolve: async (_u, o) => ({
+                kind: 'track', stream_url: 'https://x/', client: o.forceClient,
+                client_report: report,
+                selection: o.forceOpusAudio ? opus : (o.forceLegacyProgressive ? muxed : adaptive),
+            }),
+        };
+        const feed = async (sel, errRaw) => {
+            obj._pendingDownloadContexts.set('dl1', {
+                key: 'yF9nmg_jHNs',
+                resolved: { client: sel === muxed ? 'ANDROID' : 'ANDROID_VR', orderedClients: ordered, client_report: report, selection: sel },
+                opts: {}, originalUrl: 'https://youtu.be/yF9nmg_jHNs', format: 'm4a', _retrying: false,
+            });
+            await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: errRaw });
+        };
+
+        // Attempt #1 failed: adaptive refused at byte 0. The very next rung must
+        // be the class nobody has tried, not the muxed fallback that the old
+        // error-type gate jumped to.
+        await feed(adaptive, err403);
+        assert.equal(calls.length, 1, 'one retry per failure');
+        assert.equal(calls[0].opus, true, 'the untried class (opus) must be rung 2, not the muxed fallback');
+        assert.equal(calls[0].muxed, false, 'muxed has never succeeded and must not be tried before opus');
+        assert.equal(calls[0].client, 'ANDROID_VR', 'ANDROID_VR is the only client reporting opusWithUrl > 0');
+
+        // Attempt #2 (opus) also refused. The only class left is muxed, and it
+        // must still be reached rather than burning the budget on a rotation.
+        await feed(opus, err403);
+        assert.equal(calls.length, 2, 'a second retry must happen');
+        assert.equal(calls[1].muxed, true, 'with adaptive and opus both refused, muxed is the last class');
+        assert.equal(calls[1].opus, false, 'must not re-ask the class that just failed');
+        assert.deepEqual(budget.triedClasses, ['adaptive', 'opus'], 'each class is recorded once, in the order tried');
+
+        // Attempt #3 (muxed) truncated. Every class has now been tried, so what
+        // remains is a client re-ask — a second opinion, not progress, and the one
+        // thing the old mid-ladder rotation was doing too early.
+        await feed(muxed, errTrunc);
+        assert.equal(calls.length, 3, 'one rotation is still allowed once the classes are exhausted');
+        assert.equal(calls[2].opus, false, 'the rotation must not force a class');
+        assert.equal(calls[2].muxed, false, 'the rotation must not re-force the class that just truncated');
+        assert.deepEqual(budget.triedClasses, ['adaptive', 'opus', 'muxed'],
+            'each class recorded once, in the order tried, and no class is re-added');
+        // ...and the budget still bounds it: MAX_AUTO_RETRIES is 3, so the fourth
+        // failure must stop rather than spin on a class known to truncate.
+        await feed(muxed, errTrunc);
+        assert.equal(calls.length, 3, 'the attempt budget must still terminate the ladder');
     });
 
     it('downloader tops a windowed (SABR) partial download up with explicit ranges', () => {
