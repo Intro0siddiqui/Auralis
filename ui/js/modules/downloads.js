@@ -84,6 +84,8 @@ export const downloadMethods = {
                         // would have shown us. A measurement nobody can read is
                         // the same as no measurement.
                         `progressiveWithUrl=${r.progressiveWithUrl ?? 0}`,
+                        `audioOnlyWithUrl=${r.audioOnlyWithUrl ?? 0}`,
+                        `opusWithUrl=${r.opusWithUrl ?? 0}`,
                         `sabr=${r.sabrStreamingUrl ? 'yes' : 'no'}`,
                         r.ms ? `${r.ms}ms` : null,
                         r.error ? `err=${String(r.error).slice(0, 120)}` : null,

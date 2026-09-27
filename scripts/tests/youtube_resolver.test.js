@@ -1066,6 +1066,41 @@ describe('YouTube Search & Streaming Integration', () => {
             'an unrescuable client must say so, since IOS has progressive=0');
     });
 
+    it('opus is reported as an available audio-only class, and the ranking is not asserted to exclude it', () => {
+        // The user was right and the comment in youtube.js was wrong. Opus IS
+        // decodable by this project — `player.rs` routes WebM/Opus to our own
+        // `OpusSource` as `DecodedAudioSource::Opus`, bypassing rodio entirely
+        // (`rusty-opus` on 64-bit, `opus_decoder` on 32-bit). The old comment
+        // read rodio's missing opus feature and concluded the project could not
+        // play opus, which never followed.
+        const root = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../..');
+        const opusRs = fs.readFileSync(path.join(root, 'src/infrastructure/media/opus.rs'), 'utf8');
+        const playerRs = fs.readFileSync(path.join(root, 'src/infrastructure/media/player.rs'), 'utf8');
+        assert.ok(/rusty_opus::|opus_decoder::/.test(opusRs), 'a real opus decoder must be wired, not just declared');
+        assert.ok(/DecodedAudioSource::Opus/.test(playerRs),
+            'the player must route opus through our own decoder rather than rodio');
+
+        // ...and the consequence must be measured, not guessed. Whether the CDN
+        // serves an opus url is a question about the edge, so the report has to
+        // carry the number. A decoder that works locally is not evidence that a
+        // googlevideo url will be served -- the same error as trusting a
+        // decoder's opinion about a file's completeness.
+        const ysrc = fs.readFileSync(path.join(root, 'ui/js/youtube.js'), 'utf8');
+        assert.ok(/entry\.audioOnlyWithUrl = /.test(ysrc), 'the report must count audio-only urls per client');
+        // Both resolve paths separately. A single loose assertion is satisfied by
+        // EITHER one, so deleting the other still passes — which is how a
+        // measurement ends up present on the path nobody uses.
+        assert.ok(/entry\.opusWithUrl = audioOnlyUrls\.filter\(\(f\) => \/opus\/i\.test\(String\(f\.mimeType/.test(ysrc),
+            'the actions.execute report must count opus urls');
+        assert.ok(/entry\.opusWithUrl = audioOnlyUrls\.filter\(\(f\) => \/opus\/i\.test\(String\(f\.mime_type/.test(ysrc),
+            'the getInfo report must count opus urls, or the two paths disagree');
+        const dsrc = fs.readFileSync(path.join(root, 'ui/js/modules/downloads.js'), 'utf8');
+        assert.ok(/opusWithUrl=\$\{/.test(dsrc), 'opusWithUrl must be visible in the device report');
+        // The stale claim must not come back in a comment.
+        assert.ok(!/do NOT prefer webm\/opus/.test(ysrc),
+            'the refuted claim must not remain as a comment — it is what caused the misranking');
+    });
+
     it('downloader tops a windowed (SABR) partial download up with explicit ranges', () => {
         const base = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../src/infrastructure/media');
         const dsrc = fs.readFileSync(path.join(base, 'downloader.rs'), 'utf8');

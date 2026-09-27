@@ -95,9 +95,34 @@ async function nativeFetch(input, init = {}) {
 }
 
 /**
- * Format preference scoring — prefers itag 140 (m4a) which rodio can decode.
- * rodio 0.22.2 has no opus feature: webm/opus would cause DecodeError, so
- * we do NOT prefer webm/opus. Only m4a/mp4 audio is prioritized.
+ * Format preference scoring.
+ *
+ * The itag-140 preference is about rodio: `rodio 0.22.2` has no opus feature,
+ * and the fallback decoder chain cannot decode webm/opus without one.
+ *
+ * It is NOT a statement about this project's ability to play opus. Opus is
+ * decoded by our own `OpusSource` (`src/infrastructure/media/opus.rs` —
+ * `rusty-opus` with AVX2/NEON SIMD on 64-bit, `opus_decoder` on 32-bit), and
+ * `player.rs` routes WebM/Opus streams straight to it as `DecodedAudioSource::Opus`
+ * without rodio at all. So an earlier version of this comment took rodio's
+ * missing opus feature and concluded from it that webm/opus must never be
+ * preferred. The premise was true and the conclusion did not follow, which is
+ * the same shape as the self-contradictory comment in po_token.js:263: nobody
+ * rechecked it after OpusSource landed underneath.
+ *
+ * The concrete cost: with the default `mp4` target, `scoreFn` adds +0.5 to
+ * anything mp4-ish, so muxed itag 18 scores 1.5 while opus itag 251 scores 1.0
+ * and the audio-only tie-breaker never runs. We take a 360p video remux over a
+ * high-quality audio-only stream — the exact waste `pickLegacyProgressive`
+ * documents itself as avoiding.
+ *
+ * NOT fixed here, deliberately. Whether the CDN will serve an opus url is a
+ * question about the edge, not about our decoder, and on the one network we have
+ * data for the only url that has ever downloaded was the muxed itag 18.
+ * Promoting opus on the strength of "we can decode it" would be a decoder's
+ * opinion standing in for a measurement. So opus is now *counted and reported*
+ * (`opusWithUrl`) and the ordering is left alone until a device report says
+ * whether those urls are servable.
  */
 function scoreFormat(fmt) {
     const mime = (fmt.mimeType || fmt.mime_type || '').toLowerCase();
@@ -571,6 +596,8 @@ class YouTubeResolver {
                         adaptiveWithUrl: 0,
                         audioWithUrl: 0,
                         progressiveWithUrl: 0,
+                        audioOnlyWithUrl: 0,
+                        opusWithUrl: 0,
                         sabrStreamingUrl: false,
                         ms: 0,
                     };
@@ -599,6 +626,16 @@ class YouTubeResolver {
                         // filter could not see the path that worked because the
                         // report never recorded it.
                         entry.progressiveWithUrl = (sd?.formats || []).filter(urlOf).length;
+                        // How many AUDIO-ONLY urls this client is handing out, and
+                        // how many of those are opus. Reported rather than ranked,
+                        // because "we can decode opus" says nothing about whether
+                        // the edge will serve an opus url — and on the one network
+                        // we have data for, the only url that ever downloaded was
+                        // the muxed itag 18. This is the number that would settle
+                        // whether opus is worth promoting.
+                        const audioOnlyUrls = rawAdapt.filter((f) => String(f.mimeType || '').startsWith('audio/') && urlOf(f));
+                        entry.audioOnlyWithUrl = audioOnlyUrls.length;
+                        entry.opusWithUrl = audioOnlyUrls.filter((f) => /opus/i.test(String(f.mimeType || '') + String(f.codecs || ''))).length;
                         entry.sabrStreamingUrl = Boolean(sd?.serverAbrStreamingUrl);
                         // A client that answered but exposed only SABR metadata is
                         // materially different from one that returned real CDN urls.
@@ -710,6 +747,8 @@ class YouTubeResolver {
                         adaptiveWithUrl: 0,
                         audioWithUrl: 0,
                         progressiveWithUrl: 0,
+                        audioOnlyWithUrl: 0,
+                        opusWithUrl: 0,
                         sabrStreamingUrl: false,
                         ms: 0,
                     };
@@ -730,6 +769,9 @@ class YouTubeResolver {
                             // serve purely through the muxed progressive url reads
                             // as unable to serve at all. See the long note there.
                             entry.progressiveWithUrl = (sd.formats || []).filter(urlOf).length;
+                            const audioOnlyUrls = adapt.filter((f) => isAudioFormat(f) && !f.has_video && urlOf(f));
+                            entry.audioOnlyWithUrl = audioOnlyUrls.length;
+                            entry.opusWithUrl = audioOnlyUrls.filter((f) => /opus/i.test(String(f.mime_type || '') + String(f.mimeType || '') + String(f.codecs || ''))).length;
                             if (candidates.length > 0) {
                                 if (hasDirectOrDecipherableAudio(res)) {
                                     entry.ok = true;
