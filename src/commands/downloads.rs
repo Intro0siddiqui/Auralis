@@ -128,12 +128,22 @@ pub(crate) fn spawn_download_progress_emitter(
             match dl.get_progress(emit_id).await {
                 Some(progress) => {
                     let _ = app_handle.emit("download:progress", &progress);
-                    if matches!(
+                    // `post_commit` is the one thing that can hold a *terminal*
+                    // job back: the durable transition now happens the moment
+                    // the rename lands, and the public copy, the cover art and
+                    // the tags come after it. Emitting on the first terminal
+                    // status would end this loop before those landed, so
+                    // `download:completed` would carry the app-private path and
+                    // no `publish_error` — the exact combination that v2.6.49
+                    // made the UI explain and that DL-02's reordering would
+                    // otherwise have silently undone.
+                    let settled = matches!(
                         progress.status,
                         DownloadStatus::Completed
                             | DownloadStatus::Failed
                             | DownloadStatus::Cancelled
-                    ) {
+                    ) && !progress.post_commit;
+                    if settled {
                         if progress.status == DownloadStatus::Failed {
                             let host = progress.url.split('/').nth(2).unwrap_or("unknown");
                             error!(download_id = %emit_id, host = %host, title = %progress.title, error = ?progress.error, url = %progress.url, downloaded = progress.downloaded_bytes, total = ?progress.total_bytes, "Emitting download:completed (failed) — DIAGNOSTIC visible to frontend/logcat");

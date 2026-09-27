@@ -8,6 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+/// `skip_serializing_if` predicate for a plain `bool`.
+///
+/// A default-valued flag is noise in every payload it is unset in, and this
+/// struct is emitted on every progress tick.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Download job status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -18,6 +26,18 @@ pub enum DownloadStatus {
     Queued,
     /// Currently downloading
     Downloading,
+    /// Verified, and being written to its final location.
+    ///
+    /// The window between "every check passed" and "the file is where it will
+    /// stay". It exists because a job that is still `Downloading` across that
+    /// window is a job a user can pause or cancel: a cancel would delete a
+    /// finished, playable file, and a pause would report `Paused` over a job
+    /// whose staging file has just been renamed away, leaving nothing to
+    /// resume from. Neither is recoverable from the user's side, and neither
+    /// leaves anything in a log a release build can read.
+    ///
+    /// Non-interruptible by contract — see `downloader::classify_interrupt`.
+    Committing,
     /// Paused by user
     Paused,
     /// Completed successfully
@@ -33,6 +53,7 @@ impl fmt::Display for DownloadStatus {
         match self {
             DownloadStatus::Queued => write!(f, "queued"),
             DownloadStatus::Downloading => write!(f, "downloading"),
+            DownloadStatus::Committing => write!(f, "committing"),
             DownloadStatus::Paused => write!(f, "paused"),
             DownloadStatus::Completed => write!(f, "completed"),
             DownloadStatus::Failed => write!(f, "failed"),
@@ -46,6 +67,7 @@ impl PartialEq<&str> for DownloadStatus {
         let self_str = match self {
             DownloadStatus::Queued => "queued",
             DownloadStatus::Downloading => "downloading",
+            DownloadStatus::Committing => "committing",
             DownloadStatus::Paused => "paused",
             DownloadStatus::Completed => "completed",
             DownloadStatus::Failed => "failed",
@@ -119,6 +141,23 @@ pub struct DownloadProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_error: Option<String>,
 
+    /// The file is durable and this job is still doing work that can only
+    /// improve it: cover art, tags, the copy in `Download/Auralis/`.
+    ///
+    /// This exists because the terminal transition was moved to the moment the
+    /// rename lands, and everything after it is *not* part of the commit. The
+    /// progress emitter ends on the first terminal status it observes, so
+    /// without this flag it would emit `download:completed` — and stop — before
+    /// the public path or the publish reason existed, silently dropping both.
+    /// The alternative, keeping the state `Downloading` until publication
+    /// finished, is the DL-02 defect itself: the window a user can cancel
+    /// would cover the rename.
+    ///
+    /// So the file on disk and the event on the wire are given separate
+    /// clocks, and this is the one that says which of them has settled.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub post_commit: bool,
+
     /// When the download was started
     pub started_at: DateTime<Utc>,
 
@@ -158,6 +197,7 @@ impl DownloadProgress {
             duration_secs: None,
             error: None,
             publish_error: None,
+            post_commit: false,
             started_at: now,
             updated_at: now,
             completed_at: None,
@@ -190,9 +230,27 @@ impl DownloadProgress {
             }
         }
 
-        if self.status != DownloadStatus::Downloading {
+        // Only a job that was queued or paused starts downloading here. The
+        // unconditional form of this — "if it is not downloading, make it
+        // downloading" — also reached backwards over `Committing` and
+        // `Completed`, so any progress tick that landed after a terminal
+        // transition would silently un-complete a finished download and hand
+        // it back to the pause/cancel path that DL-02 exists to close.
+        if matches!(self.status, DownloadStatus::Queued | DownloadStatus::Paused) {
             self.status = DownloadStatus::Downloading;
         }
+    }
+
+    /// Enter the commit boundary: the transfer is verified and the staging file
+    /// is about to become the final file.
+    ///
+    /// Paired with [`Self::complete`] and both inside one hold of the
+    /// downloader's commit gate, so no interrupt can land between them. Setting
+    /// this on its own would be a state nothing could act on; that is the
+    /// point of it — a request that arrives here is refused rather than obeyed.
+    pub fn begin_commit(&mut self) {
+        self.status = DownloadStatus::Committing;
+        self.updated_at = Utc::now();
     }
 
     /// Mark as completed
@@ -201,6 +259,23 @@ impl DownloadProgress {
         self.progress = 1.0;
         self.output_path = Some(output_path);
         self.completed_at = Some(Utc::now());
+        self.updated_at = Utc::now();
+    }
+
+    /// The file is committed; work that can only improve it has started.
+    ///
+    /// Paired with [`Self::finish_post_commit`]. Kept as two calls rather than
+    /// set-and-unset inline at the call sites so the two halves cannot end up
+    /// on opposite sides of a `return`.
+    pub fn note_post_commit(&mut self) {
+        self.post_commit = true;
+        self.updated_at = Utc::now();
+    }
+
+    /// Everything that could improve the committed file has finished, so the
+    /// progress record is now the whole story.
+    pub fn finish_post_commit(&mut self) {
+        self.post_commit = false;
         self.updated_at = Utc::now();
     }
 
@@ -300,6 +375,124 @@ mod tests {
         assert_eq!(download.platform, "youtube");
         assert_eq!(download.status, DownloadStatus::Queued);
         assert_eq!(download.progress, 0.0);
+    }
+
+    #[test]
+    fn a_committed_job_is_terminal_before_the_work_that_improves_it() {
+        // The shape DL-02 requires. The file exists from the rename, so the
+        // state says so from the rename; cover art, tags and the public copy are
+        // then reported separately by `post_commit`, which is what keeps the
+        // progress emitter from ending the event stream with a record that
+        // cannot yet say where the file went.
+        let mut d = DownloadProgress::new(
+            "https://youtu.be/x".to_string(),
+            "Song".to_string(),
+            AudioFormat::M4a,
+        );
+        assert!(!d.post_commit, "no post-commit work before there is a file");
+
+        d.begin_commit();
+        assert_eq!(d.status, DownloadStatus::Committing);
+        assert!(!d.post_commit, "still nothing to report as settled");
+
+        d.complete("/data/data/com.auralis.v2/files/downloads/Song.m4a".to_string());
+        d.note_post_commit();
+        assert_eq!(d.status, DownloadStatus::Completed);
+        assert!(d.post_commit, "durable, but the public copy has not landed");
+
+        d.finish_post_commit();
+        assert_eq!(d.status, DownloadStatus::Completed);
+        assert!(!d.post_commit, "now the record is the whole story");
+    }
+
+    #[test]
+    fn a_progress_tick_cannot_resurrect_a_finished_download() {
+        // The unconditional "if it is not downloading, make it downloading" in
+        // `update` reached backwards over every terminal state. One stray tick
+        // after the commit would hand a finished, playable download back to the
+        // pause/cancel path — the exact window DL-02 closes.
+        let mut d = DownloadProgress::new(
+            "https://youtu.be/x".to_string(),
+            "Song".to_string(),
+            AudioFormat::M4a,
+        );
+        d.complete("/tmp/Song.m4a".to_string());
+        d.update(1024, Some(2048), 512);
+        assert_eq!(
+            d.status,
+            DownloadStatus::Completed,
+            "a completed download stays completed"
+        );
+
+        let mut committing = DownloadProgress::new(
+            "https://youtu.be/y".to_string(),
+            "Other".to_string(),
+            AudioFormat::M4a,
+        );
+        committing.begin_commit();
+        committing.update(1024, Some(2048), 512);
+        assert_eq!(
+            committing.status,
+            DownloadStatus::Committing,
+            "and a job inside the commit boundary is not knocked out of it"
+        );
+
+        // A queued or paused job still starts on its first byte, which is the
+        // whole reason that assignment exists.
+        let mut queued = DownloadProgress::new(
+            "https://youtu.be/z".to_string(),
+            "Third".to_string(),
+            AudioFormat::M4a,
+        );
+        queued.update(10, Some(100), 10);
+        assert_eq!(queued.status, DownloadStatus::Downloading);
+    }
+
+    #[test]
+    fn post_commit_reaches_the_wire_only_while_it_is_true() {
+        // The emitter reads this field off the serialized payload, so a
+        // `skip_serializing_if` that dropped the `true` case would make every
+        // completed download look settled before its public copy existed.
+        let mut d = DownloadProgress::new(
+            "https://youtu.be/x".to_string(),
+            "Song".to_string(),
+            AudioFormat::M4a,
+        );
+        let before = serde_json::to_value(&d).expect("serialize");
+        assert!(
+            before.get("post_commit").is_none(),
+            "an unset flag must not appear in the payload"
+        );
+
+        d.complete("/tmp/Song.m4a".to_string());
+        d.note_post_commit();
+        let during = serde_json::to_value(&d).expect("serialize");
+        assert_eq!(
+            during.get("post_commit").and_then(|v| v.as_bool()),
+            Some(true),
+            "a set flag must reach the emitter, or it ends the event early"
+        );
+    }
+
+    #[test]
+    fn committing_serializes_and_compares_as_its_own_state() {
+        // The wire value is what the frontend branches on. A new variant that
+        // serialized as something else would render as `Unknown` in the row.
+        let mut d = DownloadProgress::new(
+            "https://youtu.be/x".to_string(),
+            "Song".to_string(),
+            AudioFormat::M4a,
+        );
+        d.begin_commit();
+        assert_eq!(
+            serde_json::to_value(&d)
+                .expect("serialize")
+                .get("status")
+                .and_then(|v| v.as_str()),
+            Some("committing")
+        );
+        assert_eq!(d.status.to_string(), "committing");
+        assert!(d.status == "committing");
     }
 
     #[test]

@@ -8,6 +8,13 @@
 //! are required — resolution of user-facing URLs (YouTube, SoundCloud, …) is
 //! the frontend's responsibility; this layer only fetches bytes.
 
+/// Imported rather than spelled out at the call site: the fully qualified path
+/// is 86 characters wide, so the one line that calls it sat within a character
+/// or two of `max_width` and the two rustfmt versions this project builds with
+/// disagreed about where to break it. A short name has no such decision to
+/// make, and off Android there is nothing to import at all.
+#[cfg(target_os = "android")]
+use super::android_downloads::publish_to_downloads;
 use super::completeness::verify_decoded_duration;
 use super::forensics::{inspect_container, inspect_content, ContainerFacts, ContentFacts, Verdict};
 use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
@@ -20,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -73,8 +80,24 @@ struct DownloadJob {
     title: String,
     artist: Option<String>,
     album: Option<String>,
+    /// The final internal path. **Owned by this job alone** — see
+    /// [`reserve_output`], which is what made that exclusive, and
+    /// [`discard_owned_paths`], which is the only thing allowed to delete it.
     output_path: PathBuf,
+    /// The staging file, and simultaneously the reservation that makes
+    /// `output_path` this job's alone. Never removed while the job is
+    /// resumable: `pause` truncates it and `resume` appends to it.
     staging_path: PathBuf,
+    /// Name the public copy carries: the clean title, never the dedup suffix
+    /// that only the internal path needs.
+    ///
+    /// Read only by the Android MediaStore publish path, so on a host build
+    /// this is genuinely unread and `dead_code` fires — which fails the `lint`
+    /// job, because clippy runs `-D warnings` there while `check-android` is
+    /// the only job that would see the read. Gate the lint, not the field:
+    /// removing it would leave Android with no clean name to publish under.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    public_name: String,
     thumbnail: Option<String>,
     headers: Option<HashMap<String, String>>,
     expected_duration_secs: Option<u32>,
@@ -90,6 +113,22 @@ pub struct Downloader {
     active_downloads: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
     jobs: Arc<RwLock<HashMap<Uuid, DownloadJob>>>,
     tasks: Arc<RwLock<HashMap<Uuid, tokio::task::JoinHandle<()>>>>,
+    /// Held across the commit boundary: the move to `Committing`, the rename,
+    /// and the move to `Completed`.
+    ///
+    /// This is what makes the refusal in [`classify_interrupt`] mean what it
+    /// says. `pause` and `cancel` take this gate *before* they read the status,
+    /// so a job is observed strictly before the commit or strictly after it —
+    /// `Committing` is not observable to them at all, because it only exists
+    /// inside one hold. Without the gate the table alone is not enough: a
+    /// request that read `Downloading` and *then* aborted the task would still
+    /// be able to kill a job microseconds before its rename, leaving a stranded
+    /// `Committing` record and a file nobody ever reports.
+    ///
+    /// It is released as soon as the rename is durable, before cover art and
+    /// the public copy: those are the slow parts, and an interrupt that had to
+    /// queue behind them would look like a hang.
+    commit_gate: Arc<Mutex<()>>,
 }
 
 /// Downloader errors.
@@ -117,6 +156,17 @@ pub enum DownloaderError {
 const ALLOWED_EXTS: &[&str] = &[
     "mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "webm", "mp4", "mov", "oga",
 ];
+
+/// Extension of a staging file — which is also what makes it a reservation.
+const STAGING_EXT: &str = "part";
+
+/// How many output names one download may try before giving up.
+///
+/// Eight is not a tuning parameter: the fallback names are all distinct, so this
+/// only bounds a pathological case (every candidate already on disk) that would
+/// otherwise spin. Failing is the right answer there, because the alternative
+/// is sharing a path with a job that already holds it.
+const RESERVE_ATTEMPTS: usize = 8;
 
 /// Whitelist and sanitize an extension string. Returns a safe extension from
 /// the allow-list; falls back to the trusted `fallback` (AudioFormat) or "mp3".
@@ -778,18 +828,367 @@ fn classify_response(
     }
 }
 
+/// The cover-art sidecar path for a committed audio file.
+///
+/// One path, one owner: the sidecar name is derived from the output name, which
+/// is what the reservation makes exclusive, so a job that owns `<name>.mp4`
+/// owns `<name>.jpg` by the same token.
+fn sidecar_path(audio_path: &Path) -> PathBuf {
+    audio_path.with_extension("jpg")
+}
+
+/// One job's exclusive claim on an output name.
+///
+/// The claim **is** the staging file. Nothing else is created, nothing else is
+/// registered, and there is no release to forget: the marker disappears when
+/// the staging file is renamed to its final name at commit time, or when a
+/// failure path removes it — which is exactly the window the claim is meant to
+/// cover.
+struct OutputReservation {
+    /// Where the verified bytes will live.
+    output_path: PathBuf,
+    /// The claim itself. Present from reservation until the rename or cleanup.
+    staging_path: PathBuf,
+    /// The name the *public* copy should carry.
+    ///
+    /// Always the clean `<title>.<ext>`, even when the internal path needed a
+    /// dedup suffix. The suffix exists only to keep two internal files apart;
+    /// the owner looking at `Download/Auralis/` has not downloaded anything
+    /// twice, so showing them a UUID is a lie about their own library.
+    public_name: String,
+}
+
+/// Filenames to try, in order, for one download's output.
+///
+/// The first is the clean `<title>.<ext>`; the rest carry a short job-id suffix.
+/// The suffix is what the fallback *looks* like — exclusivity comes from
+/// [`reserve_output`] — but it is derived from the job id, so two concurrent
+/// jobs of the same title never even propose the same fallback name.
+fn candidate_file_names(stem: &str, ext: &str, id: Uuid) -> Vec<String> {
+    let short: String = id.to_string().chars().take(8).collect();
+    (0..RESERVE_ATTEMPTS)
+        .map(|attempt| match attempt {
+            0 => format!("{stem}.{ext}"),
+            1 => format!("{stem}_{short}.{ext}"),
+            n => format!("{stem}_{short}_{n}.{ext}"),
+        })
+        .collect()
+}
+
+/// Take an exclusive claim on an output name for `id`.
+///
+/// # Why an exclusive create and not a `stat`
+///
+/// The name used to be chosen with `if path.exists() { add a uuid }`, and there
+/// was an `await` between that test and the first create. Two jobs with the
+/// same title both observed "free" and were handed the *same* `output_path`;
+/// one of them then deleted the other's finished file on the way out, and two
+/// that both succeeded overwrote each other. `create_new` is the only
+/// filesystem operation that answers "is this name free?" and *takes* it in a
+/// single step, so the answer and the claim cannot be separated by a
+/// scheduling point.
+///
+/// The claim is deliberately a staging file and not a zero-byte file at the
+/// destination. Occupying the destination would put an empty
+/// `Song.mp4` in the library folder for the length of the download, and — worse
+/// — `rename` fails on Windows when the target exists, so every Windows
+/// download would be pushed onto the non-atomic copy fallback.
+///
+/// A destination that already exists is *rejected*, never claimed: a job must
+/// not adopt or overwrite a file from an earlier run.
+async fn reserve_output(
+    output_dir: &Path,
+    staging_dir: &Path,
+    stem: &str,
+    ext: &str,
+    id: Uuid,
+) -> Result<OutputReservation, DownloaderError> {
+    for file_name in candidate_file_names(stem, ext, id) {
+        let output_path = output_dir.join(&file_name);
+        if output_path.exists() {
+            debug!(
+                download_id = %id,
+                candidate = %file_name,
+                "Output name already used by an earlier download"
+            );
+            continue;
+        }
+        let staging_path = staging_dir.join(format!("{file_name}.{STAGING_EXT}"));
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging_path)
+            .await
+        {
+            Ok(claim) => {
+                // Closed immediately: the file's *existence* is the claim, and
+                // an open handle would only stop the commit from renaming over
+                // it on Windows.
+                drop(claim);
+                // A cover-art sidecar whose audio is gone is a leftover from an
+                // earlier run of the same title. The claim is exclusive, so
+                // nothing else can be using it, and inheriting it would attach
+                // the wrong artwork to this download — or, when this download
+                // has no thumbnail of its own, leave the stale one sitting next
+                // to the new file for good.
+                let stale_cover = sidecar_path(&output_path);
+                if let Err(e) = tokio::fs::remove_file(&stale_cover).await {
+                    debug!(
+                        path = %stale_cover.display(),
+                        error = %e,
+                        "No stale cover-art sidecar to clear"
+                    );
+                }
+                return Ok(OutputReservation {
+                    output_path,
+                    staging_path,
+                    public_name: format!("{stem}.{ext}"),
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                debug!(
+                    download_id = %id,
+                    candidate = %file_name,
+                    "Output name already claimed by a live download"
+                );
+                continue;
+            }
+            Err(e) => {
+                return Err(DownloaderError::IoError(e));
+            }
+        }
+    }
+    // Built here rather than hoisted above the loop: hoisting it and moving it
+    // into the successful arm would be a move out of a loop body, which the
+    // borrow checker rejects outright.
+    Err(DownloaderError::InvalidState(format!(
+        "could not claim an unused filename for {stem}.{ext} in {}",
+        output_dir.display()
+    )))
+}
+
+/// Delete the bytes this job owns — and only those.
+///
+/// The output path is removed only while the claim is still held, i.e. only
+/// while the staging file this job created is still on disk. Because the claim
+/// is what makes the name exclusive, a file sitting at the output path at that
+/// moment can only be this job's own partial work. Once the claim is gone the
+/// file is *committed*, and removing it would delete a finished track.
+///
+/// The claim is read before the staging file is touched, because removing the
+/// staging file is what releases it.
+async fn discard_owned_paths(staging: &Path, output: &Path) {
+    let holds_claim = tokio::fs::metadata(staging)
+        .await
+        .map(|meta| meta.is_file())
+        .unwrap_or(false);
+    cleanup_staging_file(staging).await;
+    if !holds_claim {
+        debug!(
+            output = %output.display(),
+            "Keeping the output file — this job's claim is already released, so it is committed"
+        );
+        return;
+    }
+    if let Err(e) = tokio::fs::remove_file(output).await {
+        debug!(path = %output.display(), error = %e, "No partial output file to remove");
+    }
+    let cover = sidecar_path(output);
+    if let Err(e) = tokio::fs::remove_file(&cover).await {
+        debug!(path = %cover.display(), error = %e, "No cover-art sidecar to remove");
+    }
+}
+
+/// Empty the staging directory at construction.
+///
+/// A staging file *is* a claim (see [`reserve_output`]), so a crash part way
+/// through a download would otherwise hold that name until the user manually
+/// cleared the directory. The same directory holds the transient public-name
+/// link, which a crash can strand too. Both are per-process scratch, and both
+/// are gone by the time anything can be mid-download.
+///
+/// Wholesale, and only here: the `Downloader` is constructed once per process,
+/// before any job exists, so nothing reachable from this function can be live.
+/// A job killed mid-run — never swept, only released early — leaks its claim
+/// until the next start, which is the safe direction to be wrong in.
+fn sweep_stale_staging(staging_dir: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(staging_dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            debug!(path = %staging_dir.display(), error = %e, "Could not clear the staging directory");
+        }
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(staging_dir) {
+        debug!(path = %staging_dir.display(), error = %e, "Could not recreate the staging directory");
+    }
+}
+
+/// Present `internal` under `public_name` without copying a single byte of it.
+///
+/// `publish_to_downloads` builds the MediaStore display name from the file name
+/// of the path it is handed, so the only lever this side owns is the path. A
+/// hard link says "this file, under that name" with no resolution involved
+/// anywhere and no second copy of the bytes; the caller removes the link as
+/// soon as the copy exists.
+///
+/// The link goes in `link_dir` (the staging directory), **not** beside the
+/// finished file. Beside it is exactly where the clean name is *already taken* —
+/// that is the only reason the internal name needed a suffix in the first place —
+/// so a link placed there would fail with `EEXIST` in precisely the case it
+/// exists for. The staging directory is this job's own scratch space, and
+/// nothing scans it.
+///
+/// Returns `None` when the internal name already is the public name (nothing to
+/// do) and when no link could be made. The second case is a lost nicety, not a
+/// failure: the caller publishes the internal path and the public copy keeps the
+/// suffix, which is what it did before.
+///
+/// Two live jobs of the same title both want the same link name. Only one gets
+/// it; the other publishes from its internal path. That is a race on a
+/// presentation detail with no correctness consequence — no shared bytes, no
+/// deletion, no lost file — so it is left unarbitrated rather than paid for with
+/// a second round of locking.
+///
+/// The link is briefly visible to the library scanner, which is why the caller's
+/// post-commit flag keeps `download:completed` (and the scan it triggers) behind
+/// it.
+#[cfg(any(target_os = "android", test))]
+fn link_under_public_name(internal: &Path, link_dir: &Path, public_name: &str) -> Option<PathBuf> {
+    let existing = internal
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if existing == public_name {
+        return None;
+    }
+    let link = link_dir.join(public_name);
+    match std::fs::hard_link(internal, &link) {
+        Ok(()) => Some(link),
+        Err(e) => {
+            // Kept short on purpose: rustfmt cannot break a string literal, and a
+            // `warn!` line it cannot fit is known to drop the statements around
+            // it out of the `cargo fmt --check` gate.
+            warn!(
+                internal = %internal.display(),
+                public_name = %public_name,
+                error = %e,
+                "No link under the clean name — the public copy will keep the suffix"
+            );
+            None
+        }
+    }
+}
+
+/// A user request to interrupt a download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interrupt {
+    Pause,
+    Cancel,
+}
+
+impl Interrupt {
+    /// Past tense, for error messages: "cannot pause download in …".
+    fn verb(self) -> &'static str {
+        match self {
+            Interrupt::Pause => "pause",
+            Interrupt::Cancel => "cancel",
+        }
+    }
+}
+
+/// What a downloader may do about an interrupt request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestOutcome {
+    /// Carry the request out.
+    Apply,
+    /// The job is already in the requested state: nothing to do, and that is
+    /// success rather than an error.
+    AlreadySettled,
+    /// Refuse. The job is past the point where interrupting it is safe.
+    Refuse,
+}
+
+/// The interrupt state table, as data.
+///
+/// | state       | pause           | cancel            |
+/// |-------------|-----------------|-------------------|
+/// | Queued      | apply           | apply             |
+/// | Downloading | apply           | apply             |
+/// | Paused      | already settled | apply             |
+/// | Committing  | refuse          | refuse            |
+/// | Completed   | refuse          | refuse            |
+/// | Failed      | refuse          | refuse            |
+/// | Cancelled   | refuse          | already settled   |
+///
+/// `Committing` is the row DL-02 added. It spans the rename, and after the
+/// rename there is no staging file left to truncate and no partial file worth
+/// deleting: a cancel in that window used to remove a finished, playable track,
+/// and a pause reported `Paused` over a job with no resume source. The refusal
+/// is a *deletion* guard; keeping the request from aborting the task mid-rename
+/// is [`Downloader::commit_gate`]'s job, and neither layer is redundant.
+fn classify_interrupt(request: Interrupt, status: DownloadStatus) -> RequestOutcome {
+    match status {
+        DownloadStatus::Queued | DownloadStatus::Downloading => RequestOutcome::Apply,
+        DownloadStatus::Paused => match request {
+            Interrupt::Pause => RequestOutcome::AlreadySettled,
+            Interrupt::Cancel => RequestOutcome::Apply,
+        },
+        // One state per arm rather than one `Committing | Completed | Failed`
+        // arm. Grouping them forces rustfmt to wrap the body in a block, and how
+        // a block-bodied or-pattern arm is wrapped is not something to leave to
+        // two rustfmt versions that have already been caught disagreeing
+        // elsewhere in this project. Nothing here needs the grouping.
+        DownloadStatus::Committing => RequestOutcome::Refuse,
+        DownloadStatus::Completed => RequestOutcome::Refuse,
+        DownloadStatus::Failed => RequestOutcome::Refuse,
+        DownloadStatus::Cancelled => match request {
+            Interrupt::Pause => RequestOutcome::Refuse,
+            Interrupt::Cancel => RequestOutcome::AlreadySettled,
+        },
+    }
+}
+
+/// Why a refused interrupt was refused.
+///
+/// These are `const`s rather than inline literals because they are long enough
+/// that an unbreakable line is a real possibility, and an unbreakable line is
+/// the one thing that is known to put code outside the `cargo fmt --check` gate.
+/// Both name the *consequence* rather than only the state, because "cannot
+/// cancel" does not tell the caller whether their file is safe.
+const REASON_INTERRUPT_COMMITTING: &str = "the download already passed every check and is \
+                                        being written to its final location — the file is \
+                                        complete, and interrupting now would either delete it \
+                                        or leave nothing to resume from";
+const REASON_INTERRUPT_TERMINAL: &str = "the download has already finished";
+
+/// The error a refused interrupt reports.
+fn interrupt_error(request: Interrupt, status: DownloadStatus) -> DownloaderError {
+    let reason = match status {
+        DownloadStatus::Committing => REASON_INTERRUPT_COMMITTING,
+        _ => REASON_INTERRUPT_TERMINAL,
+    };
+    DownloaderError::InvalidState(format!(
+        "cannot {} download in {status} state: {reason}",
+        request.verb()
+    ))
+}
+
 impl Downloader {
     /// Create a new downloader that writes files into `output_dir`.
     pub fn new(output_dir: PathBuf) -> Self {
         // Ensure staging directory exists
         let tmp_dir = output_dir.join(".tmp");
         let _ = std::fs::create_dir_all(&tmp_dir);
+        // Only correct here, at construction: no job can exist yet, so every
+        // claim found in there belongs to a previous process.
+        sweep_stale_staging(&tmp_dir);
 
         Self {
             output_dir,
             active_downloads: Arc::new(RwLock::new(HashMap::new())),
             jobs: Arc::new(RwLock::new(HashMap::new())),
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            commit_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -833,20 +1232,28 @@ impl Downloader {
         } else {
             sanitize_ext(&req.ext, &fallback_ext)
         };
-        let mut filename = format!("{}.{}", sanitize_filename(&req.title), ext);
-        let mut path = self.output_dir.join(&filename);
-        // Deduplicate with short UUID suffix if file already exists; keeps
-        // sidecar `<audio>.jpg` working via with_extension("jpg")
-        if path.exists() {
-            let stem = sanitize_filename(&req.title);
-            let short = id.to_string().chars().take(8).collect::<String>();
-            filename = format!("{}_{}.{}", stem, short, ext);
-            path = self.output_dir.join(&filename);
-        }
 
         let tmp_dir = self.output_dir.join(".tmp");
-        let staging_path = tmp_dir.join(format!("{}.part", id));
-        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+        // Propagated rather than ignored: without the directory there is no
+        // staging file, and without one of those there is no way to claim a
+        // name — so the job could only continue by picking one on trust.
+        tokio::fs::create_dir_all(&tmp_dir)
+            .await
+            .map_err(DownloaderError::IoError)?;
+
+        let claimed = reserve_output(
+            &self.output_dir,
+            &tmp_dir,
+            &sanitize_filename(&req.title),
+            &ext,
+            id,
+        )
+        .await?;
+        let OutputReservation {
+            output_path,
+            staging_path,
+            public_name,
+        } = claimed;
 
         let mut progress =
             DownloadProgress::with_id(id, req.stream_url.clone(), req.title.clone(), req.format);
@@ -854,7 +1261,7 @@ impl Downloader {
         progress.total_bytes = req.total_bytes;
         progress.expected_duration_secs = req.expected_duration_secs;
         progress.status = DownloadStatus::Downloading;
-        progress.output_path = Some(path.to_string_lossy().to_string());
+        progress.output_path = Some(output_path.to_string_lossy().to_string());
         progress.started_at = Utc::now();
         progress.updated_at = Utc::now();
 
@@ -871,8 +1278,9 @@ impl Downloader {
                     title: req.title.clone(),
                     artist: req.artist,
                     album: req.album,
-                    output_path: path,
+                    output_path,
                     staging_path,
+                    public_name,
                     thumbnail: req.thumbnail,
                     headers: req.headers,
                     expected_duration_secs: req.expected_duration_secs,
@@ -893,6 +1301,7 @@ impl Downloader {
         let jobs = self.jobs.clone();
         let active = self.active_downloads.clone();
         let tasks = self.tasks.clone();
+        let commit_gate = self.commit_gate.clone();
 
         let handle = tokio::spawn(async move {
             let job = {
@@ -903,15 +1312,17 @@ impl Downloader {
                 }
             };
 
-            if let Err(e) = Self::run_stream(id, &job, start_byte, active.clone()).await {
+            if let Err(e) =
+                Self::run_stream(id, &job, start_byte, active.clone(), commit_gate).await
+            {
                 let url_host = job.stream_url.split('/').nth(2).unwrap_or("unknown");
                 error!(download_id = %id, url_host = %url_host, url = %job.stream_url, start_byte = start_byte, error = %e, "Download failed — cleaning staging file and marking failed");
                 warn!(download_id = %id, error = %e, "DIAGNOSTIC download_failed id={} host={} url={} error={}", id, url_host, job.stream_url, e);
 
-                // Clean up staging file and output file on unrecoverable failure
-                let _ = tokio::fs::remove_file(&job.staging_path).await;
-                let _ = tokio::fs::remove_file(&job.output_path).await;
-                let _ = tokio::fs::remove_file(job.output_path.with_extension("jpg")).await;
+                // Only this job's own bytes, and only while it still holds the
+                // claim — after the rename the file is committed and must
+                // survive its own job's failure.
+                discard_owned_paths(&job.staging_path, &job.output_path).await;
 
                 let mut guard = active.write().await;
                 if let Some(state) = guard.get_mut(&id) {
@@ -933,6 +1344,7 @@ impl Downloader {
         job: &DownloadJob,
         initial_start_byte: u64,
         active: Arc<RwLock<HashMap<Uuid, DownloadProgress>>>,
+        commit_gate: Arc<Mutex<()>>,
     ) -> Result<(), DownloaderError> {
         let host = job.stream_url.split('/').nth(2).unwrap_or("unknown");
         let url_snip = if job.stream_url.chars().count() > 160 {
@@ -1762,12 +2174,45 @@ impl Downloader {
             }
         }
 
-        // All validation passed! Now perform atomic rename to destination
+        // -------------------------------------------------------------------
+        // The commit boundary (DL-02)
+        // -------------------------------------------------------------------
+        //
+        // Everything above this line can be thrown away. Everything below it
+        // cannot, and the difference is three ordered statements inside one
+        // hold of `commit_gate`:
+        //
+        //   1. `Committing` — the job is no longer interruptible
+        //   2. the rename    — the bytes become the file the user will keep
+        //   3. `Completed`   — the terminal transition, with the internal path
+        //
+        // 3 immediately after 2, and not at the end of the function, because
+        // what follows is seconds of work (a cover-art fetch with a 20 s
+        // timeout, an MP4 tag rewrite, a MediaStore insert) during which the
+        // job used to sit in `Downloading` with its staging file already gone:
+        // a cancel deleted a finished track, and a pause reported `Paused` over
+        // a job with nothing left to resume from.
+        //
+        // Holding the gate across all three is what stops an interrupt from
+        // landing *between* them. A request that acquires the gate is either
+        // strictly before this hold or strictly after it, so the state it reads
+        // is one of those two and the decision it makes is never about a
+        // half-committed job. Everything after the gate is released is
+        // best-effort work on a file that already exists and plays.
+        let _commit = commit_gate.lock().await;
+
+        {
+            let mut guard = active.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.begin_commit();
+            }
+        }
+
         info!(
             download_id = %id,
             staging = %job.staging_path.display(),
             destination = %job.output_path.display(),
-            "Atomically moving verified staging file to final destination"
+            "Verified staging file — committing to final destination"
         );
 
         if let Err(e) = tokio::fs::rename(&job.staging_path, &job.output_path).await {
@@ -1776,11 +2221,25 @@ impl Downloader {
                 error = %e,
                 "tokio::fs::rename failed, falling back to copy + remove"
             );
+            // Only reachable for a destination this job exclusively owns (see
+            // `reserve_output`), so the copy overwrites nothing that matters.
             tokio::fs::copy(&job.staging_path, &job.output_path)
                 .await
                 .map_err(DownloaderError::IoError)?;
             let _ = tokio::fs::remove_file(&job.staging_path).await;
         }
+
+        // Durable. Terminal before anything optional runs, so that a job can
+        // never be reported as anything but completed once the file exists.
+        {
+            let mut guard = active.write().await;
+            if let Some(state) = guard.get_mut(&id) {
+                state.complete(job.output_path.to_string_lossy().to_string());
+                state.note_post_commit();
+            }
+        }
+
+        drop(_commit);
 
         // Save thumbnail sidecar if requested
         if let Some(thumb) = &job.thumbnail {
@@ -1830,75 +2289,26 @@ impl Downloader {
             ),
         }
 
-        // Keep the effective user-visible path separate from the internal path.
-        // On Android this may be replaced with the public Download/Auralis path.
-        //
-        // The `mut` is only exercised inside the `#[cfg(target_os = "android")]`
-        // block below, so on every other target this binding is never mutated and
-        // rustc's default-on `unused_mut` fires — which is an error in CI, where
-        // clippy runs with `-D warnings`. Scoped to non-Android rather than
-        // allowed unconditionally so a genuinely unused mutation on Android
-        // would still be caught.
-        #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
-        let mut completion_path = job.output_path.to_string_lossy().to_string();
+        // Where the user can actually find the file. On Android this is the
+        // public `Download/Auralis` copy when publication succeeded, and the
+        // app-private path when it did not — the two are not interchangeable, and
+        // the difference is what `publish_error` is for.
+        let completion_path = Self::publish_public_copy(id, job, &active).await;
 
-        // MediaStore Publishing on Android
-        #[cfg(target_os = "android")]
-        {
-            let should_publish = std::panic::catch_unwind(|| {
-                crate::domain::models::Settings::load()
-                    .map(|s| s.downloads.use_system_downloads)
-                    .unwrap_or(true)
-            })
-            .unwrap_or(true);
-            info!(download_id = %id, should_publish = should_publish, src = %job.output_path.display(), "MediaStore publish check (use_system_downloads, default true)");
-            if !should_publish {
-                info!(download_id = %id, "Skipping MediaStore publish per use_system_downloads=false");
-            } else {
-                // Carried, not logged-and-dropped. The `Err` distinguishes a
-                // context that could not be acquired from a ContentResolver that
-                // would not return a collection, an insert that produced no row
-                // id, and a copy that threw — all of which previously collapsed
-                // into one indistinguishable "keeping internal path". On a
-                // release build this string is the only surviving evidence, and
-                // the user cannot act on a file they cannot find without it.
-                match crate::infrastructure::media::android_downloads::publish_to_downloads(
-                    &job.output_path,
-                ) {
-                    Ok(pub_path) => {
-                        let mut guard = active.write().await;
-                        if let Some(state) = guard.get_mut(&id) {
-                            // Keep internal path for library scan dedup, but surface public
-                            // path so `download:completed` shows the Files-visible location.
-                            state.output_path = Some(pub_path.clone());
-                        }
-                        // Log before the move: `info!` borrows `pub_path`, so this
-                        // has to precede the assignment that consumes it.
-                        info!(download_id = %id, public = %pub_path, internal = %job.output_path.display(), "Published download to Download/Auralis");
-                        completion_path = pub_path;
-                    }
-                    Err(reason) => {
-                        let mut guard = active.write().await;
-                        if let Some(state) = guard.get_mut(&id) {
-                            state.note_publish_error(reason.clone());
-                        }
-                        warn!(download_id = %id, src = %job.output_path.display(), reason = %reason, "MediaStore publish failed — file is app-private only");
-                    }
-                }
-            }
-        }
-
-        // Mark completed in active downloads
         {
             let mut guard = active.write().await;
             if let Some(state) = guard.get_mut(&id) {
-                state.complete(completion_path);
+                // The durable state was set immediately after the rename; this
+                // only says the record is now the whole story, which is the
+                // emitter's cue to send `download:completed` with the public
+                // path and the publish reason on it.
+                state.finish_post_commit();
             }
         }
 
         info!(
             download_id = %id,
-            path = %job.output_path.display(),
+            path = %completion_path,
             "Download complete and verified"
         );
 
@@ -1908,7 +2318,10 @@ impl Downloader {
     /// Fetch a thumbnail/cover URL and save it as a `<audio>.jpg` sidecar so the
     /// library scanner can associate it with the downloaded track. Non-fatal.
     async fn save_thumbnail(client: &reqwest::Client, url: &str, audio_path: &Path) {
-        let cover_path = audio_path.with_extension("jpg");
+        // `create` (truncate) rather than an exclusive create: a resumed job
+        // legitimately re-fetches its cover art, and the name is already this
+        // job's alone, so there is nothing here to protect against.
+        let cover_path = sidecar_path(audio_path);
         let res = match client
             .get(url)
             .timeout(Duration::from_secs(20))
@@ -1926,10 +2339,146 @@ impl Downloader {
         }
     }
 
+    /// Publish the finished file where the user can find it, and report the path
+    /// they will find it at.
+    ///
+    /// Split out of `run_stream` because almost all of it is Android-only, and
+    /// an `#[cfg]` block inline in the middle of the function left the
+    /// surrounding code reading as though the completion path were mutated on
+    /// every target — which is why it needed a
+    /// `#[cfg_attr(…, allow(unused_mut))]` to compile at all. Two definitions
+    /// rather than one function with a `cfg`'d block at each end of its body,
+    /// because a tail expression that is only present on some targets is a
+    /// shape rustc has to reason about, and this does not need that risk.
+    ///
+    /// Runs after the commit and outside `commit_gate`, because it can take
+    /// seconds and an interrupt must not have to queue behind it. A job
+    /// interrupted here is `Completed` with, at worst, a `publish_error` — the
+    /// file exists and plays, and that is the better of the two outcomes.
+    #[cfg(target_os = "android")]
+    async fn publish_public_copy(
+        id: Uuid,
+        job: &DownloadJob,
+        active: &RwLock<HashMap<Uuid, DownloadProgress>>,
+    ) -> String {
+        let should_publish = std::panic::catch_unwind(|| {
+            crate::domain::models::Settings::load()
+                .map(|s| s.downloads.use_system_downloads)
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+        info!(
+            download_id = %id,
+            should_publish = should_publish,
+            src = %job.output_path.display(),
+            "MediaStore publish check (use_system_downloads, default true)"
+        );
+        if !should_publish {
+            info!(download_id = %id, "Skipping MediaStore publish per use_system_downloads=false");
+            return job.output_path.to_string_lossy().to_string();
+        }
+
+        // The public copy is named from the path handed to
+        // `publish_to_downloads`, so hand it one that *reads* as the clean title
+        // even when the internal file needed a dedup suffix. A hard link says
+        // that without a second copy of the bytes; `None` means either the names
+        // already agree or the link could not be made, and both fall back to
+        // publishing the internal path.
+        let link_dir = job.staging_path.parent().map(Path::to_path_buf);
+        let linked = link_dir
+            .as_deref()
+            .and_then(|dir| link_under_public_name(&job.output_path, dir, &job.public_name));
+        let publish_src = linked.clone().unwrap_or_else(|| job.output_path.clone());
+        let result = publish_to_downloads(&publish_src);
+        // The link is a presentation of the same bytes, not a second file the
+        // library should see: it goes away with the call that needed it.
+        if let Some(link) = linked {
+            if let Err(e) = tokio::fs::remove_file(&link).await {
+                debug!(path = %link.display(), error = %e, "Could not remove the public-name link");
+            }
+        }
+
+        // Carried, not logged-and-dropped. The `Err` distinguishes a context
+        // that could not be acquired from a ContentResolver that would not
+        // return a collection, an insert that produced no row id, and a copy
+        // that threw — all of which previously collapsed into one
+        // indistinguishable "keeping internal path". On a release build this
+        // string is the only surviving evidence, and the user cannot act on a
+        // file they cannot find without it.
+        match result {
+            Ok(pub_path) => {
+                let mut guard = active.write().await;
+                if let Some(state) = guard.get_mut(&id) {
+                    // Keep internal path for library scan dedup, but surface public
+                    // path so `download:completed` shows the Files-visible location.
+                    state.output_path = Some(pub_path.clone());
+                }
+                // Log before the move: `info!` borrows `pub_path`, so this has
+                // to precede the assignment that consumes it.
+                info!(
+                    download_id = %id,
+                    public = %pub_path,
+                    internal = %job.output_path.display(),
+                    "Published download to Download/Auralis"
+                );
+                pub_path
+            }
+            Err(reason) => {
+                let mut guard = active.write().await;
+                if let Some(state) = guard.get_mut(&id) {
+                    state.note_publish_error(reason.clone());
+                }
+                warn!(
+                    download_id = %id,
+                    src = %job.output_path.display(),
+                    reason = %reason,
+                    "MediaStore publish failed — file is app-private only"
+                );
+                job.output_path.to_string_lossy().to_string()
+            }
+        }
+    }
+
+    /// Off Android there is no public copy to make, so the internal path is the
+    /// answer. See the Android definition for what this is for.
+    #[cfg(not(target_os = "android"))]
+    async fn publish_public_copy(
+        id: Uuid,
+        job: &DownloadJob,
+        active: &RwLock<HashMap<Uuid, DownloadProgress>>,
+    ) -> String {
+        let _ = (id, active);
+        job.output_path.to_string_lossy().to_string()
+    }
+
+    /// The current status of `id`.
+    async fn read_status(&self, id: Uuid) -> Result<DownloadStatus, DownloaderError> {
+        let downloads = self.active_downloads.read().await;
+        let state = downloads
+            .get(&id)
+            .ok_or(DownloaderError::DownloadNotFound(id))?;
+        Ok(state.status)
+    }
+
     /// Pause an in-progress download by aborting its task and truncating the
     /// staging file to the last fully-written byte.
     pub async fn pause(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Pausing download");
+
+        // The gate is taken *before* the status is read, and the status is what
+        // decides whether the task gets aborted at all. Both this and `cancel`
+        // used to abort first and read the state afterwards, so a request that
+        // arrived during a commit killed the task mid-rename and only then
+        // discovered it had no business doing so. Inside the gate a job is
+        // either before the commit or after it, so the state read here is not
+        // about to change under us.
+        let _gate = self.commit_gate.lock().await;
+        let status = self.read_status(id).await?;
+        match classify_interrupt(Interrupt::Pause, status) {
+            RequestOutcome::Apply => {}
+            RequestOutcome::AlreadySettled => return Ok(()),
+            RequestOutcome::Refuse => return Err(interrupt_error(Interrupt::Pause, status)),
+        }
 
         // Await the aborted task before touching the staging file. Without this,
         // pause/cancel can race the writer and truncate bytes it is still using.
@@ -1944,23 +2493,6 @@ impl Downloader {
         if let Some(handle) = handle {
             handle.abort();
             let _ = handle.await;
-        }
-
-        let status = {
-            let downloads = self.active_downloads.read().await;
-            let state = downloads
-                .get(&id)
-                .ok_or(DownloaderError::DownloadNotFound(id))?;
-            state.status
-        };
-
-        if status == DownloadStatus::Paused {
-            return Ok(());
-        }
-        if !matches!(status, DownloadStatus::Queued | DownloadStatus::Downloading) {
-            return Err(DownloaderError::InvalidState(format!(
-                "cannot pause download in {status} state"
-            )));
         }
 
         let staging_path = {
@@ -2033,6 +2565,19 @@ impl Downloader {
     pub async fn cancel(&self, id: Uuid) -> Result<(), DownloaderError> {
         info!(download_id = %id, "Cancelling download");
 
+        // Gate first, status second, abort third — the same reason as `pause`.
+        // This used to abort the task first and only then read the status to
+        // discover the job was already `Completed`, which is how a cancel
+        // arriving during the commit could kill a job whose file was seconds
+        // from being finished.
+        let _gate = self.commit_gate.lock().await;
+        let status = self.read_status(id).await?;
+        match classify_interrupt(Interrupt::Cancel, status) {
+            RequestOutcome::Apply => {}
+            RequestOutcome::AlreadySettled => return Ok(()),
+            RequestOutcome::Refuse => return Err(interrupt_error(Interrupt::Cancel, status)),
+        }
+
         // Take the handle out under the lock, then await it with the lock
         // released. `if let Some(h) = self.tasks.write().await.remove(&id)`
         // would keep the write guard alive until the end of the whole `if let`
@@ -2046,23 +2591,6 @@ impl Downloader {
             let _ = handle.await;
         }
 
-        let status = {
-            let downloads = self.active_downloads.read().await;
-            let state = downloads
-                .get(&id)
-                .ok_or(DownloaderError::DownloadNotFound(id))?;
-            state.status
-        };
-
-        if status == DownloadStatus::Cancelled {
-            return Ok(());
-        }
-        if matches!(status, DownloadStatus::Completed | DownloadStatus::Failed) {
-            return Err(DownloaderError::InvalidState(format!(
-                "cannot cancel download in {status} state"
-            )));
-        }
-
         let paths = {
             let jobs = self.jobs.read().await;
             jobs.get(&id)
@@ -2070,9 +2598,10 @@ impl Downloader {
         };
 
         if let Some((staging, output)) = paths {
-            let _ = tokio::fs::remove_file(&staging).await;
-            let _ = tokio::fs::remove_file(&output).await;
-            let _ = tokio::fs::remove_file(output.with_extension("jpg")).await;
+            // The staging file is this job's claim on the output name, so the
+            // output may only be deleted while the claim is still held — which,
+            // at a state where cancelling is allowed, it is.
+            discard_owned_paths(&staging, &output).await;
         }
 
         let mut downloads = self.active_downloads.write().await;
@@ -2645,10 +3174,16 @@ mod tests {
         // regressing, and because `inspect_container` reads up to 192 MB into
         // memory — a regression here is a multi-second stall of every other task
         // on the runtime, with no error and no failing test anywhere else.
-        const SOURCE: &str = concat!(
+        // `include_str!`, not `concat!`. `concat!` produced a *path*, and every
+        // search below ran against those 52 characters: `test_module` was always
+        // `None`, so the slice was the path itself and each `matches(...).count()`
+        // was 0. The pre-existing NEW-03 test had this shape and could not pass
+        // — the marker assertion below is what it tripped over, which is the one
+        // place the mistake was visible.
+        const SOURCE: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/infrastructure/media/downloader.rs"
-        );
+        ));
 
         // The test module holds the very strings it searches for, so counting
         // them in the whole file would count this test. Only the code above the
@@ -2776,6 +3311,648 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------
+    // DL-01 — one job, one output name
+    // ---------------------------------------------------------------------
+
+    /// An output dir plus its staging dir, cleaned up with the test.
+    struct ReservationDir {
+        dir: PathBuf,
+        output: PathBuf,
+        staging: PathBuf,
+    }
+
+    impl ReservationDir {
+        fn new(tag: &str) -> ReservationDir {
+            let dir = std::env::temp_dir().join(format!("auralis_own_{tag}_{}", Uuid::new_v4()));
+            let output = dir.join("downloads");
+            let staging = output.join(".tmp");
+            std::fs::create_dir_all(&staging).expect("create staging dir");
+            ReservationDir {
+                dir,
+                output,
+                staging,
+            }
+        }
+    }
+
+    impl Drop for ReservationDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn two_downloads_of_one_title_are_never_given_the_same_output() {
+        // The defect: the name used to be chosen with `if path.exists()`, and
+        // two jobs with the same title both saw "free" and were handed the same
+        // path — so one of them deleted the other's finished file, and two that
+        // both succeeded overwrote each other.
+        let area = ReservationDir::new("same_title");
+        let first = reserve_output(&area.output, &area.staging, "Song", "m4a", Uuid::new_v4())
+            .await
+            .expect("first download must be able to claim the clean name");
+        let second = reserve_output(&area.output, &area.staging, "Song", "m4a", Uuid::new_v4())
+            .await
+            .expect("second download must fall through to a dedup name");
+
+        assert_ne!(
+            first.output_path, second.output_path,
+            "two live jobs must not share an output path"
+        );
+        assert_ne!(
+            first.staging_path, second.staging_path,
+            "and therefore not share the claim that makes it exclusive"
+        );
+        assert!(
+            first.staging_path.exists() && second.staging_path.exists(),
+            "both claims are held until their own job releases them"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claim_is_exclusive_even_for_the_same_job_id() {
+        // Belt and braces against the list, not the filesystem: the fallback
+        // names are derived from the job id, so one job asking twice proposes
+        // the same candidate twice and the exclusive create has to be what stops
+        // it. A "fix" that only deduplicated the candidate list would pass the
+        // test above and fail this one.
+        let area = ReservationDir::new("same_id");
+        let id = Uuid::new_v4();
+        let first = reserve_output(&area.output, &area.staging, "Song", "m4a", id)
+            .await
+            .expect("first claim");
+        let second = reserve_output(&area.output, &area.staging, "Song", "m4a", id)
+            .await
+            .expect("second claim must not reuse the name the first holds");
+        assert_ne!(first.output_path, second.output_path);
+    }
+
+    #[tokio::test]
+    async fn an_existing_file_is_never_claimed_or_overwritten() {
+        // A file from an earlier run must be neither adopted nor clobbered: the
+        // old code only ever *renamed over* it when the dedup name was also
+        // taken, which is the other half of the same data loss.
+        let area = ReservationDir::new("existing");
+        let existing = area.output.join("Song.m4a");
+        std::fs::write(&existing, b"not ours").expect("seed existing file");
+
+        let claimed = reserve_output(&area.output, &area.staging, "Song", "m4a", Uuid::new_v4())
+            .await
+            .expect("a dedup name is available");
+        assert_ne!(
+            claimed.output_path, existing,
+            "a name already holding a file cannot be claimed"
+        );
+        assert_eq!(
+            std::fs::read(&existing).expect("existing file still readable"),
+            b"not ours",
+            "and the file an earlier download wrote is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_public_name_stays_clean_however_the_internal_one_did_not() {
+        // Defect 3: the dedup suffix exists so two *internal* files can coexist.
+        // Showing it to the owner in `Download/Auralis/` tells them they
+        // downloaded the same track twice when they did not.
+        let area = ReservationDir::new("public_name");
+        std::fs::write(area.output.join("Song.m4a"), b"earlier").expect("seed earlier download");
+
+        let claimed = reserve_output(&area.output, &area.staging, "Song", "m4a", Uuid::new_v4())
+            .await
+            .expect("claim a dedup name");
+        let internal = claimed
+            .output_path
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .to_string();
+        assert_ne!(
+            internal, "Song.m4a",
+            "precondition: the internal name is suffixed"
+        );
+        assert_eq!(
+            claimed.public_name, "Song.m4a",
+            "the public name is the clean title, not the internal one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_cover_sidecar_is_cleared_rather_than_inherited() {
+        // The sidecar is a separate file derived from the same name, so it
+        // carries its own hazard: an earlier download's artwork can outlive its
+        // audio, and then a download with no thumbnail of its own leaves the old
+        // cover art sitting next to the new file, attached to the wrong track.
+        let area = ReservationDir::new("stale_cover");
+        let cover = area.output.join("Song.jpg");
+        std::fs::write(&cover, b"stale artwork").expect("seed stale sidecar");
+
+        let claimed = reserve_output(&area.output, &area.staging, "Song", "m4a", Uuid::new_v4())
+            .await
+            .expect("claim the clean name");
+        let name = claimed
+            .output_path
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy();
+        assert_eq!(name, "Song.m4a");
+        assert!(
+            !cover.exists(),
+            "a sidecar whose audio is gone must not survive into the new download"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_committed_file_outlives_its_own_jobs_failure() {
+        // `discard_owned_paths` is what a failing job and a cancelling one both
+        // call, and it is the only thing allowed to delete an output path. The
+        // rename consumes the claim, so after a commit it must decline to touch
+        // the file: that is the completed download, and the "just clean up the
+        // output path" instinct is what deleted it.
+        let area = ReservationDir::new("committed");
+        let claimed = reserve_output(&area.output, &area.staging, "Song", "m4a", Uuid::new_v4())
+            .await
+            .expect("claim");
+        std::fs::write(&claimed.staging_path, b"verified bytes").expect("write staging bytes");
+        // The commit.
+        std::fs::rename(&claimed.staging_path, &claimed.output_path).expect("commit");
+
+        discard_owned_paths(&claimed.staging_path, &claimed.output_path).await;
+
+        assert!(
+            claimed.output_path.exists(),
+            "a job that has already committed must not delete its own finished file"
+        );
+        assert!(
+            !claimed.staging_path.exists(),
+            "the claim is spent either way"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partial_file_is_removed_by_the_job_that_owns_it() {
+        // The other half, so the guard above cannot be satisfied by simply never
+        // deleting anything: while the claim is held the output is this job's
+        // own partial work, and a failure must clear it.
+        let area = ReservationDir::new("partial");
+        let claimed = reserve_output(&area.output, &area.staging, "Song", "m4a", Uuid::new_v4())
+            .await
+            .expect("claim");
+        std::fs::write(&claimed.staging_path, b"half a track").expect("write staging bytes");
+        std::fs::write(&claimed.output_path, b"leftover").expect("write stray output");
+        std::fs::write(sidecar_path(&claimed.output_path), b"art").expect("write stray cover");
+
+        discard_owned_paths(&claimed.staging_path, &claimed.output_path).await;
+
+        assert!(!claimed.output_path.exists(), "partial output removed");
+        assert!(
+            !sidecar_path(&claimed.output_path).exists(),
+            "and its cover sidecar with it"
+        );
+        assert!(!claimed.staging_path.exists(), "the claim is released");
+    }
+
+    #[test]
+    fn a_claim_left_by_a_dead_process_is_swept_at_startup() {
+        // A staging file *is* a claim, so a crash part way through a download
+        // would hold that name until the user cleared the directory by hand — and
+        // every later download of that title would be pushed onto a dedup
+        // suffix for no reason.
+        let area = ReservationDir::new("sweep");
+        std::fs::write(area.staging.join("Song.m4a.part"), b"interrupted").expect("seed claim");
+        std::fs::write(area.staging.join("Song.m4a"), b"stranded link").expect("seed link");
+        std::fs::write(area.output.join("Song.m4a"), b"committed").expect("seed a real file");
+
+        sweep_stale_staging(&area.staging);
+
+        assert!(
+            area.staging
+                .read_dir()
+                .expect("read staging")
+                .next()
+                .is_none(),
+            "the staging directory is scratch and must be empty at startup"
+        );
+        assert!(
+            area.output.join("Song.m4a").exists(),
+            "and a committed file is not scratch: the sweep must not reach it"
+        );
+    }
+
+    #[test]
+    fn the_dedup_fallback_names_are_distinct_from_each_other() {
+        // The reservation is what makes the choice safe, but a list that offered
+        // the same name twice would make every collision look like a bug in the
+        // log — and the third attempt onwards is not a shape any test of
+        // behaviour would reach.
+        let id = Uuid::new_v4();
+        let names = candidate_file_names("Song", "m4a", id);
+        assert_eq!(names.len(), RESERVE_ATTEMPTS);
+        assert_eq!(names[0], "Song.m4a", "the clean name is always tried first");
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "every fallback must be distinct");
+    }
+
+    // ---------------------------------------------------------------------
+    // DL-02 — the commit boundary
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn the_interrupt_table_refuses_everything_after_verification() {
+        // The whole table, because the interesting cells are the ones a
+        // hand-written test would leave out. `Committing` is the new row: a
+        // cancel there used to delete a finished file, and a pause there used to
+        // report `Paused` over a job whose staging file had just been renamed
+        // away.
+        let all = [
+            DownloadStatus::Queued,
+            DownloadStatus::Downloading,
+            DownloadStatus::Paused,
+            DownloadStatus::Committing,
+            DownloadStatus::Completed,
+            DownloadStatus::Failed,
+            DownloadStatus::Cancelled,
+        ];
+        for status in all {
+            let pause = classify_interrupt(Interrupt::Pause, status);
+            let cancel = classify_interrupt(Interrupt::Cancel, status);
+            // One arm per state rather than grouped or-patterns: a grouped arm
+            // whose body needs a block is a formatting decision the two rustfmt
+            // versions in this project disagree about, and the table is the
+            // thing under test.
+            let expected = match status {
+                DownloadStatus::Queued => (RequestOutcome::Apply, RequestOutcome::Apply),
+                DownloadStatus::Downloading => (RequestOutcome::Apply, RequestOutcome::Apply),
+                DownloadStatus::Paused => (RequestOutcome::AlreadySettled, RequestOutcome::Apply),
+                DownloadStatus::Committing => (RequestOutcome::Refuse, RequestOutcome::Refuse),
+                DownloadStatus::Completed => (RequestOutcome::Refuse, RequestOutcome::Refuse),
+                DownloadStatus::Failed => (RequestOutcome::Refuse, RequestOutcome::Refuse),
+                DownloadStatus::Cancelled => {
+                    (RequestOutcome::Refuse, RequestOutcome::AlreadySettled)
+                }
+            };
+            assert_eq!(
+                (pause, cancel),
+                expected,
+                "pause/cancel of a {status} download"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_state_and_the_consequence() {
+        let error = interrupt_error(Interrupt::Cancel, DownloadStatus::Committing);
+        let message = error.to_string();
+        assert!(message.contains("cancel"), "says which request: {message}");
+        assert!(
+            message.contains("committing"),
+            "says which state: {message}"
+        );
+        assert!(
+            message.contains("complete") && message.contains("resume"),
+            "and says what the user stands to lose, which is the part that was \
+             missing: {message}"
+        );
+    }
+
+    /// A downloader with one job already registered in `status`, holding a claim
+    /// on an output name, and no live task.
+    async fn downloader_with_job_in(
+        dir: &Path,
+        status: DownloadStatus,
+    ) -> (Downloader, Uuid, OutputReservation) {
+        let staging = dir.join(".tmp");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        let downloader = Downloader::new(dir.to_path_buf());
+        let id = Uuid::new_v4();
+        let claimed = reserve_output(dir, &staging, "Song", "m4a", id)
+            .await
+            .expect("claim the output name");
+        std::fs::write(&claimed.output_path, b"a finished track").expect("write the output");
+        let job = DownloadJob {
+            stream_url: "https://example.com/song.m4a".to_string(),
+            title: "Song".to_string(),
+            artist: None,
+            album: None,
+            output_path: claimed.output_path.clone(),
+            staging_path: claimed.staging_path.clone(),
+            public_name: claimed.public_name.clone(),
+            thumbnail: None,
+            headers: None,
+            expected_duration_secs: None,
+            total_bytes: None,
+            format: AudioFormat::M4a,
+            ext: "m4a".to_string(),
+        };
+        let mut progress =
+            DownloadProgress::with_id(id, job.stream_url.clone(), job.title.clone(), job.format);
+        progress.status = status;
+        downloader.jobs.write().await.insert(id, job);
+        downloader
+            .active_downloads
+            .write()
+            .await
+            .insert(id, progress);
+        (downloader, id, claimed)
+    }
+
+    #[tokio::test]
+    async fn a_committing_job_refuses_to_pause_or_cancel_and_keeps_its_file() {
+        // The behavioural half of DL-02, on the real `pause`/`cancel` rather than
+        // on the table they consult: a refusal that still deleted the file would
+        // satisfy a table-only test.
+        let dir = std::env::temp_dir().join(format!("auralis_commit_{}", Uuid::new_v4()));
+        let (downloader, id, claimed) =
+            downloader_with_job_in(&dir, DownloadStatus::Committing).await;
+
+        let pause = downloader.pause(id).await;
+        let cancel = downloader.cancel(id).await;
+
+        assert!(
+            matches!(pause, Err(DownloaderError::InvalidState(_))),
+            "pause during the commit must be refused, got {pause:?}"
+        );
+        assert!(
+            matches!(cancel, Err(DownloaderError::InvalidState(_))),
+            "cancel during the commit must be refused, got {cancel:?}"
+        );
+        assert!(
+            claimed.output_path.exists(),
+            "and a refused request must not have deleted the file"
+        );
+        assert_eq!(
+            downloader.read_status(id).await.expect("still tracked"),
+            DownloadStatus::Committing,
+            "a refused request must not have moved the job either"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_committed_job_is_still_untouchable_and_reports_its_state() {
+        // The guard DL-02 was built on, pinned so a later edit cannot quietly
+        // narrow it to `Committing` only.
+        let dir = std::env::temp_dir().join(format!("auralis_done_{}", Uuid::new_v4()));
+        let (downloader, id, claimed) =
+            downloader_with_job_in(&dir, DownloadStatus::Completed).await;
+
+        assert!(matches!(
+            downloader.cancel(id).await,
+            Err(DownloaderError::InvalidState(_))
+        ));
+        assert!(matches!(
+            downloader.pause(id).await,
+            Err(DownloaderError::InvalidState(_))
+        ));
+        assert!(claimed.output_path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_job_still_deletes_its_own_partial_bytes() {
+        // The other direction: `Committing` must not turn cancel into a no-op.
+        let dir = std::env::temp_dir().join(format!("auralis_cancel_{}", Uuid::new_v4()));
+        let (downloader, id, claimed) = downloader_with_job_in(&dir, DownloadStatus::Paused).await;
+
+        downloader
+            .cancel(id)
+            .await
+            .expect("a paused job may be cancelled");
+
+        assert!(
+            !claimed.output_path.exists(),
+            "an uncommitted job's own bytes are removed on cancel"
+        );
+        assert_eq!(
+            downloader.read_status(id).await.expect("still tracked"),
+            DownloadStatus::Cancelled
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_commit_boundary_is_ordered_and_held() {
+        // The ordering DL-02 is about cannot be observed from outside without a
+        // real 4-minute download and a CD-R, and a test that asserted a
+        // reimplementation of it would pass no matter what the shipped code did —
+        // which is how `pot-for-TV` shipped a live 403. So this reads the real
+        // source and checks the order the file is in.
+        // `include_str!`, not `concat!`. `concat!` produced a *path*, and every
+        // search below ran against those 52 characters: `test_module` was always
+        // `None`, so the slice was the path itself and each `matches(...).count()`
+        // was 0. The pre-existing NEW-03 test had this shape and could not pass
+        // — the marker assertion below is what it tripped over, which is the one
+        // place the mistake was visible.
+        const SOURCE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/infrastructure/media/downloader.rs"
+        ));
+        let test_module = SOURCE.find("\n#[cfg(test)]\nmod tests {");
+        let production = match test_module {
+            Some(at) => &SOURCE[..at],
+            None => SOURCE,
+        };
+        let start = production
+            .find("    async fn run_stream(")
+            .expect("run_stream must exist");
+        let body = &production[start..];
+
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{needle} must appear in run_stream"))
+        };
+        let gate = at("let _commit = commit_gate.lock().await;");
+        let committing = at("state.begin_commit();");
+        let rename = at("tokio::fs::rename(&job.staging_path, &job.output_path)");
+        let completed = at("state.complete(job.output_path.to_string_lossy().to_string());");
+        let released = at("drop(_commit);");
+        let cover = at("Self::save_thumbnail(&client, thumb, &job.output_path).await;");
+        let publish = at("Self::publish_public_copy(id, job, &active).await;");
+        let settled = at("state.finish_post_commit();");
+
+        assert!(
+            gate < committing && committing < rename && rename < completed,
+            "the gate is taken, then Committing, then the rename, then Completed"
+        );
+        assert!(
+            completed < released && released < cover && cover < publish && publish < settled,
+            "Completed is terminal immediately after the rename, and everything \
+             that can improve the file happens after it"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_is_decided_before_the_task_is_aborted() {
+        // The table above decides whether a request may be *obeyed*; it cannot
+        // decide whether the task is killed first. That ordering is the other
+        // half of DL-02 and it is not observable from the state table, because
+        // a request that reads `Downloading` and *then* aborts has already done
+        // the damage by the time the table gets a say — which is exactly what
+        // `cancel` used to do, killing the task mid-rename and only then
+        // discovering the job was `Completed` and declining to delete anything.
+        //
+        // So the order is pinned in the source. A test that reimplemented the
+        // order would pass whatever the shipped code did, which is how a
+        // regression here once shipped as a live defect.
+        // `include_str!`, not `concat!`. `concat!` produced a *path*, and every
+        // search below ran against those 52 characters: `test_module` was always
+        // `None`, so the slice was the path itself and each `matches(...).count()`
+        // was 0. The pre-existing NEW-03 test had this shape and could not pass
+        // — the marker assertion below is what it tripped over, which is the one
+        // place the mistake was visible.
+        const SOURCE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/infrastructure/media/downloader.rs"
+        ));
+        let test_module = SOURCE.find("\n#[cfg(test)]\nmod tests {");
+        let production = match test_module {
+            Some(at) => &SOURCE[..at],
+            None => SOURCE,
+        };
+
+        let pause = span_of(
+            production,
+            "    pub async fn pause(",
+            "    /// Resume a paused download",
+            "pause",
+        );
+        let cancel = span_of(
+            production,
+            "    pub async fn cancel(",
+            "    /// Prune finished, failed, and cancelled download records",
+            "cancel",
+        );
+
+        for (name, body) in [("pause", pause), ("cancel", cancel)] {
+            let at = |needle: &str| {
+                body.find(needle)
+                    .unwrap_or_else(|| panic!("{name} must contain {needle:?}"))
+            };
+            let gate = at("self.commit_gate.lock().await");
+            let status = at("self.read_status(id).await?");
+            let verdict = at("classify_interrupt");
+            let abort = at("handle.abort()");
+            assert!(
+                gate < status && status < verdict && verdict < abort,
+                "{name}: the gate is taken, the state read, the verdict taken, \
+                 and only then is the task aborted"
+            );
+        }
+
+        // The rest of the ordering. `cancel` deletes, so the deletion has to come
+        // after the abort has been awaited, and `pause` must never delete at all
+        // — a pause that removed bytes would turn "stop here" into "lose this".
+        // And neither may touch the staging file before the aborted task has
+        // actually stopped, which is the race the code has always guarded.
+        let cancel_delete = cancel
+            .find("discard_owned_paths")
+            .expect("cancel must clean up through discard_owned_paths");
+        assert!(
+            cancel.find("handle.abort()").expect("cancel aborts") < cancel_delete,
+            "cancel: the files are touched only after the task is stopped"
+        );
+        assert!(
+            !pause.contains("discard_owned_paths") && !pause.contains("remove_file"),
+            "pause: stopping a download must never delete anything"
+        );
+        let awaited = pause
+            .find("let _ = handle.await;")
+            .expect("pause must await the aborted task");
+        assert!(
+            awaited < pause.find("set_len").expect("pause truncates what it owns"),
+            "pause: the staging file is truncated only once the writer has stopped"
+        );
+    }
+
+    /// The text of one `fn`/`async fn` in the production slice, by its signature
+    /// and whatever doc comment follows it.
+    fn span_of<'a>(production: &'a str, start: &str, end: &str, what: &str) -> &'a str {
+        let from = production
+            .find(start)
+            .unwrap_or_else(|| panic!("{what} must exist in the production source"));
+        let to = production
+            .find(end)
+            .unwrap_or_else(|| panic!("{what} must be followed by {end:?}"));
+        assert!(to > from, "{what} must precede {end:?}");
+        &production[from..to]
+    }
+
+    // ---------------------------------------------------------------------
+    // Defect 3 — the public name
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_deduped_file_can_be_published_under_its_clean_name() {
+        // `publish_to_downloads` derives the MediaStore display name from the
+        // path it is given, so the only lever this side owns is the path. A hard
+        // link is what carries the clean name without a second copy of the
+        // bytes, and without anything having to resolve at read time.
+        //
+        // The link goes in the staging directory precisely because the clean
+        // name is *taken* next to the file: that is the only reason the internal
+        // name was deduped. Placing it beside the file fails with EEXIST in the
+        // one case it exists for — which is what the first version of this test
+        // did, and the failure it produced is the reason the link is here.
+        let area = ReservationDir::new("public_link");
+        std::fs::write(area.output.join("Song.m4a"), b"earlier").expect("seed earlier download");
+        let claimed = reserve_output(&area.output, &area.staging, "Song", "m4a", Uuid::new_v4())
+            .await
+            .expect("claim a dedup name");
+        std::fs::write(&claimed.output_path, b"the real bytes").expect("write the finished file");
+
+        let link =
+            link_under_public_name(&claimed.output_path, &area.staging, &claimed.public_name)
+                .expect("a link must be available for a deduped name");
+
+        assert_eq!(
+            link.file_name().expect("a file name").to_string_lossy(),
+            "Song.m4a",
+            "the path handed to the publisher is named after the clean title"
+        );
+        assert_eq!(
+            std::fs::read(&link).expect("link readable"),
+            b"the real bytes",
+            "and it carries the finished file's bytes, not a copy of its own"
+        );
+        assert!(
+            claimed.output_path.exists(),
+            "and the internal file is untouched by the presentation"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_link_is_made_when_the_names_already_agree() {
+        // The overwhelmingly common case. Returning a link here would put a
+        // second copy of every ordinary download in the library folder for the
+        // duration of the publish.
+        //
+        // The finished file has to exist before this is meaningful: a link
+        // cannot be made from a path that is not there, so a test that asserted
+        // `None` on a merely-*reserved* name would pass with the guard deleted —
+        // which is exactly what the first version of it did, and mutation
+        // testing found it.
+        let area = ReservationDir::new("public_link_same");
+        let claimed = reserve_output(&area.output, &area.staging, "Song", "m4a", Uuid::new_v4())
+            .await
+            .expect("claim the clean name");
+        std::fs::write(&claimed.output_path, b"the real bytes").expect("write the finished file");
+        let name = claimed
+            .output_path
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy();
+        assert_eq!(name, "Song.m4a");
+        assert!(
+            link_under_public_name(&claimed.output_path, &area.staging, &claimed.public_name)
+                .is_none(),
+            "nothing to present when the internal name is already the public one"
+        );
+    }
+
     /// A loopback origin that answers every request with one fixed response, and
     /// counts how many requests it served.
     ///
@@ -2802,7 +3979,10 @@ mod tests {
                 std::thread::spawn(move || {
                     while running.load(Ordering::Relaxed) {
                         match listener.accept() {
-                            Ok((mut stream, _)) => {
+                            // `serve_one` takes the stream by value, so the
+                            // binding is never mutated. CI's clippy
+                            // (`-D warnings`) rejects the `mut`.
+                            Ok((stream, _)) => {
                                 let served = Arc::clone(&served);
                                 let running = Arc::clone(&running);
                                 std::thread::spawn(move || {
@@ -2926,15 +4106,19 @@ mod tests {
             error.contains("zero-length object"),
             "the failure must name the cause: {error}"
         );
+        // `DownloadProgress::output_path` is a `String`, not a `PathBuf`, so the
+        // on-disk check needs an explicit conversion. Calling `.exists()` on it
+        // straight is a compile error, not a lint — this is the E0599 that kept
+        // v2.6.59 and v2.6.60 red.
+        let saved_to = downloader
+            .get_progress(id)
+            .await
+            .expect("progress record")
+            .output_path
+            .expect("an output path");
         assert!(
-            !downloader
-                .get_progress(id)
-                .await
-                .expect("progress record")
-                .output_path
-                .expect("output path")
-                .exists(),
-            "nothing may be saved for an empty object"
+            !std::path::Path::new(&saved_to).exists(),
+            "nothing may be saved for an empty object, but {saved_to} exists"
         );
 
         let served = server.served.load(Ordering::Relaxed);
@@ -3001,7 +4185,8 @@ mod tests {
             artist: None,
             album: None,
             output_path: dir.join("audio.mp3"),
-            staging_path: dir.join("audio.part"),
+            staging_path: dir.join(".tmp").join("audio.mp3.part"),
+            public_name: "audio.mp3".to_string(),
             thumbnail: None,
             headers: None,
             expected_duration_secs: None,
