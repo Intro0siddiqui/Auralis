@@ -28,6 +28,17 @@
 //! completed and deletes the row in every other case (including a clear that
 //! failed or matched no rows). The decision itself lives in the pure
 //! [`next_step`] so it can be unit-tested without a device.
+//!
+//! # One local reference frame per publish
+//!
+//! `jni` 0.21's `JObject` has no `Drop`, so a local reference lives until the
+//! frame that created it is popped, and the frame a publish used to run in was
+//! the thread's own — never popped, because attaching an already-attached thread
+//! is a no-op. [`publish_inner`] now runs the publish inside a bounded
+//! `PushLocalFrame`/`PopLocalFrame` pair, so its references are released when the
+//! publish ends rather than when the worker thread dies. The per-chunk
+//! `DeleteLocalRef` in [`copy_into_media_store`] stays: it is what bounds the one
+//! allocation that scales with the size of the file.
 
 use std::path::Path;
 #[cfg(target_os = "android")]
@@ -74,19 +85,125 @@ const PUBLIC_ABSOLUTE_DIR: &str = "/storage/emulated/0/Download/Auralis";
 #[cfg(target_os = "android")]
 const SIG_RESOLVER_QUERY: &str = "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;";
 
+/// JNI signature of `ContentResolver.update`, used by [`clear_pending_flag`].
+///
+/// Hoisted for the reason [`SIG_RESOLVER_QUERY`] gives, and the measurement is
+/// narrower than that comment's wording, so it is worth stating precisely: the
+/// literal is 87 characters, which with the 12 spaces of indentation inside the
+/// call reaches 102 columns, and rustfmt cannot break a string literal. What
+/// that costs is not (only) the enclosing function — measured on rustfmt 1.63 by
+/// mangling one statement at a time and re-formatting, it is the **statement
+/// holding the literal** that comes back untouched: `let result = env` and its
+/// trailing `.and_then(..)` were both left exactly as written, while every other
+/// statement in the same function was normalized. So the gate was not red, it was
+/// silent, and the code inside those two calls was never checked. Hoisting the
+/// literal puts both statements back under the gate; keep it out.
+#[cfg(target_os = "android")]
+const SIG_RESOLVER_UPDATE: &str =
+    "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I";
+
+/// JNI signature of `MediaScannerConnection.scanFile`, used by
+/// [`publish_legacy`].
+///
+/// 126 characters: the longest literal in the file, and the same two statements
+/// (`let scan = env` and the `.map_err(..)` that ends the chain) were frozen by
+/// it for a version. A signature belongs in a `const`, not in a body.
+#[cfg(target_os = "android")]
+const SIG_SCANNER_SCAN_FILE: &str = "(Landroid/content/Context;[Ljava/lang/String;[Ljava/lang/String;Landroid/media/MediaScannerConnection$OnScanCompletedListener;)V";
+
 /// Chunk size for the `OutputStream.write([B)` loop.
 ///
 /// This is a *copy* buffer, sized so a re-read after a failure redoes at most
 /// 64 KiB. It has nothing to do with JNI local references: a small chunk does
 /// **not** mean few of them. `jni` 0.21's `JObject` has no `Drop` impl, so a
 /// local reference lives until the local reference frame that created it
-/// exits, and here that frame is the whole publish (see [`with_attached_env`]).
-/// Halving the chunk halves the pinned Java heap but leaves the *count* of
-/// live references exactly the same. Bounding the references is
-/// [`copy_into_media_store`]'s job, and it does it per chunk with
-/// `DeleteLocalRef` rather than by shrinking this constant.
+/// exits, and here that frame is the publish's own
+/// ([`PUBLISH_LOCAL_FRAME_CAPACITY`]). Halving the chunk halves the pinned
+/// Java heap but leaves the *count* of live references exactly the same.
+/// Bounding the references is [`copy_into_media_store`]'s job, and it does it
+/// per chunk with `DeleteLocalRef` rather than by shrinking this constant.
 #[cfg(target_os = "android")]
 const COPY_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Local references reserved for one whole publish by `PushLocalFrame`.
+///
+/// The publish is the unit that must not grow: `jni` 0.21's `JObject` has no
+/// `Drop`, so every reference a publish creates — the `Context`, the
+/// `ContentResolver`, the `MediaStore$Downloads` class, the `EXTERNAL_CONTENT_URI`
+/// static, the `ContentValues` and each key/value object in it, the row uri, the
+/// `OutputStream` — would live until the enclosing frame is popped. On a
+/// tokio worker that was *already attached* to the VM when the publish started,
+/// [`with_attached_env`] never pops anything: attaching an attached thread is a
+/// no-op per the JNI spec, so the frame that owns those references is the VM's
+/// own, and it lives as long as the thread. Per-chunk `DeleteLocalRef`
+/// ([`COPY_CHUNK_BYTES`]) bounds the one allocation that scales with file size;
+/// this bounds the rest, which still scales with the number of publishes.
+///
+/// 64 is deliberately larger than the ~20 references a publish actually makes:
+/// the capacity is a floor the VM grows on demand, so overshooting costs a
+/// little frame memory once per publish and undershooting costs a reallocation
+/// per publish.
+#[cfg(target_os = "android")]
+const PUBLISH_LOCAL_FRAME_CAPACITY: i32 = 64;
+
+/// Why the publish path needs an error type of its own.
+///
+/// Every function below used to return `Result<_, String>`, because the message
+/// is the whole point: it is the only evidence a release build leaves behind
+/// (no logcat subscriber), and it rides out to the user on `download:completed`.
+///
+/// That is also what made the bounded local-reference frame unreachable.
+/// `JNIEnv::with_local_frame` is declared as
+/// `pub fn with_local_frame<F, T, E>(&mut self, capacity: i32, f: F) -> Result<T, E>
+/// where E: From<jni::errors::Error>` (jni 0.21.1) — the closure's error has to
+/// be convertible from a JNI error so the frame can report its own failure
+/// (`PushLocalFrame` returns `Err` with a pending `OutOfMemoryError`). `String`
+/// cannot satisfy that: the impl would be between two foreign types, so the
+/// orphan rule forbids it, and `String` has no inherent conversion from
+/// `jni::errors::Error`.
+///
+/// So the bound is satisfiable *locally*, by owning the type the bound is about.
+/// Nothing about the message changes: `PublishErr` is a `String` newtype, and
+/// [`publish_to_downloads`] still returns `Result<String, String>` —
+/// `downloader.rs` depends on that signature and must not see a change.
+#[cfg(target_os = "android")]
+#[derive(Debug)]
+struct PublishErr(String);
+
+#[cfg(target_os = "android")]
+impl From<String> for PublishErr {
+    fn from(message: String) -> Self {
+        PublishErr(message)
+    }
+}
+
+#[cfg(target_os = "android")]
+impl From<&str> for PublishErr {
+    fn from(message: &str) -> Self {
+        PublishErr(message.to_string())
+    }
+}
+
+/// The `From<jni::errors::Error>` that unlocks `with_local_frame`.
+///
+/// Only reached for errors `jni` produced but this file did not wrap itself —
+/// chiefly a `PushLocalFrame` that could not reserve
+/// [`PUBLISH_LOCAL_FRAME_CAPACITY`]. The `Display` text of `jni::errors::Error`
+/// is the variant's description, which is what `?` on a bare `jni` call has
+/// always produced here, so this loses no context the file had.
+#[cfg(target_os = "android")]
+impl From<jni::errors::Error> for PublishErr {
+    fn from(e: jni::errors::Error) -> Self {
+        PublishErr(e.to_string())
+    }
+}
+
+#[cfg(target_os = "android")]
+impl std::fmt::Display for PublishErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// MIME for a download ext, for MediaStore DISPLAY.
 pub fn mime_for_ext(ext: &str) -> &'static str {
@@ -121,6 +238,10 @@ pub fn mime_for_ext(ext: &str) -> &'static str {
 /// looking for, and a caller that cannot tell them apart cannot report them. The
 /// reason now rides out on `download:completed` so a device run diagnoses itself
 /// instead of producing another "it failed" with no cause.
+///
+/// The `String` error is this module's public contract and stays exactly as it
+/// was: the internal [`PublishErr`] is unwrapped here and nowhere else, so
+/// `downloader.rs` sees no signature change.
 pub fn publish_to_downloads(src_path: &Path) -> Result<String, String> {
     #[cfg(not(target_os = "android"))]
     {
@@ -150,7 +271,7 @@ pub fn publish_to_downloads(src_path: &Path) -> Result<String, String> {
                 // level and the JNI error string, because a release build has
                 // no logcat and this line is the only evidence that survives.
                 warn!(src = %src_path.display(), display_name = %display_name, error = %e, "MediaStore publish failed, keeping internal path");
-                Err(e)
+                Err(e.0)
             }
         }
     }
@@ -202,8 +323,24 @@ fn sdk_int(env: &mut JNIEnv<'_>) -> i32 {
 #[cfg(target_os = "android")]
 const SDK_INT_FALLBACK: i32 = 29;
 
+/// Attach the current thread to the VM and run the whole publish inside one
+/// bounded local-reference frame.
+///
+/// The frame is the point. `jni` 0.21's `JObject` has no `Drop`, so a local
+/// reference survives until the frame that created it is popped — and on a tokio
+/// worker that was already attached to the VM, no frame is ever popped by
+/// [`with_attached_env`] (attaching an attached thread is a no-op per the JNI
+/// spec). Without this, every publish permanently added a few dozen references
+/// to a thread that can serve thousands of downloads. Per-chunk `DeleteLocalRef`
+/// in [`copy_into_media_store`] bounds the one allocation that scales with file
+/// size; `PopLocalFrame` bounds the rest.
+///
+/// It is safe for a reference created *before* the push to be used inside the
+/// frame ([`service_context`] hands back a `JObject` over a global ref, which
+/// local frames do not own), and nothing JNI-typed leaves the closure — the
+/// result is a `String` — so the pop cannot invalidate a live handle.
 #[cfg(target_os = "android")]
-fn publish_inner(src_path: &Path, display_name: &str, mime: &str) -> Result<String, String> {
+fn publish_inner(src_path: &Path, display_name: &str, mime: &str) -> Result<String, PublishErr> {
     let file_len = std::fs::metadata(src_path).map(|m| m.len()).unwrap_or(0);
     if file_len == 0 {
         return Err("source file empty or missing".into());
@@ -214,27 +351,45 @@ fn publish_inner(src_path: &Path, display_name: &str, mime: &str) -> Result<Stri
     // We read lazily in the JNI block to avoid holding env across I/O.
 
     with_attached_env(|env| {
-        let sdk = sdk_int(env);
-        let ctx = service_context()?;
+        env.with_local_frame(PUBLISH_LOCAL_FRAME_CAPACITY, |env| {
+            let sdk = sdk_int(env);
+            let ctx = service_context()?;
 
-        // resolver = ctx.getContentResolver()
-        let resolver = env
-            .call_method(
-                &ctx,
-                "getContentResolver",
-                "()Landroid/content/ContentResolver;",
-                &[],
-            )
-            .map_err(|e| format!("getContentResolver: {e}"))?
-            .l()
-            .map_err(|e| format!("resolver l: {e}"))?;
+            // resolver = ctx.getContentResolver()
+            let resolver = env
+                .call_method(
+                    &ctx,
+                    "getContentResolver",
+                    "()Landroid/content/ContentResolver;",
+                    &[],
+                )
+                .map_err(|e| format!("getContentResolver: {e}"))?
+                .l()
+                .map_err(|e| format!("resolver l: {e}"))?;
 
-        if sdk >= 29 {
-            // Q+ MediaStore path with IS_PENDING
-            publish_q(env, &resolver, &ctx, sdk, src_path, display_name, mime)
-        } else {
-            publish_legacy(env, &resolver, &ctx, sdk, src_path, display_name)
-        }
+            let outcome = if sdk >= 29 {
+                // Q+ MediaStore path with IS_PENDING
+                publish_q(env, &resolver, &ctx, sdk, src_path, display_name, mime)
+            } else {
+                publish_legacy(env, &resolver, &ctx, sdk, src_path, display_name)
+            };
+
+            // The frame is popped as soon as this closure returns, and popping
+            // it is a JNI call — so nothing may be left pending here.
+            // `PopLocalFrame` is on the JNI permitted-while-pending list, so this
+            // is belt-and-braces rather than a correctness requirement, but the
+            // publish is the last place that knows which row the exception
+            // belonged to.
+            if let Some(exception) = take_pending_exception(env) {
+                warn!(
+                    display_name = %display_name,
+                    api = sdk as i64,
+                    exception = %exception,
+                    "Drained a pending Java exception before the publish's local frame was popped"
+                );
+            }
+            outcome
+        })
     })
     .ok_or_else(|| "JNI env unavailable".to_string())?
 }
@@ -424,7 +579,7 @@ fn clear_pending_flag<'local>(
         .call_method(
             resolver,
             "update",
-            "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I",
+            SIG_RESOLVER_UPDATE,
             &[
                 JValue::Object(&row.uri),
                 JValue::Object(&cv),
@@ -664,7 +819,7 @@ fn describe_uri(env: &mut JNIEnv<'_>, uri: &JObject<'_>) -> (String, String) {
 }
 
 #[cfg(target_os = "android")]
-fn new_content_values<'local>(env: &mut JNIEnv<'local>) -> Result<JObject<'local>, String> {
+fn new_content_values<'local>(env: &mut JNIEnv<'local>) -> Result<JObject<'local>, PublishErr> {
     env.new_object("android/content/ContentValues", "()V", &[])
         .map_err(|e| format!("new ContentValues: {e}"))
 }
@@ -675,7 +830,7 @@ fn put_string_column<'local>(
     cv: &JObject<'_>,
     key: &str,
     value: &str,
-) -> Result<(), String> {
+) -> Result<(), PublishErr> {
     let j_key = env
         .new_string(key)
         .map_err(|e| format!("new_string({key}): {e}"))?;
@@ -701,7 +856,7 @@ fn put_int_column<'local>(
     cv: &JObject<'_>,
     key: &str,
     value: i32,
-) -> Result<(), String> {
+) -> Result<(), PublishErr> {
     let j_key = env
         .new_string(key)
         .map_err(|e| format!("new_string({key}): {e}"))?;
@@ -723,7 +878,7 @@ fn open_output_stream<'local>(
     env: &mut JNIEnv<'local>,
     resolver: &JObject<'_>,
     uri: &JObject<'_>,
-) -> Result<JObject<'local>, String> {
+) -> Result<JObject<'local>, PublishErr> {
     let os = env
         .call_method(
             resolver,
@@ -760,13 +915,13 @@ fn copy_into_media_store(
     env: &mut JNIEnv<'_>,
     os: &JObject<'_>,
     src_path: &Path,
-) -> Result<(), String> {
-    let mut result: Result<(), String> = Ok(());
+) -> Result<(), PublishErr> {
+    let mut result: Result<(), PublishErr> = Ok(());
     let mut file = match std::fs::File::open(src_path) {
         Ok(file) => file,
         Err(e) => {
             close_media_stream(env, os);
-            return Err(format!("open source for MediaStore copy: {e}"));
+            return Err(format!("open source for MediaStore copy: {e}").into());
         }
     };
     let mut buf = vec![0u8; COPY_CHUNK_BYTES];
@@ -774,7 +929,7 @@ fn copy_into_media_store(
         let n = match std::io::Read::read(&mut file, &mut buf) {
             Ok(n) => n,
             Err(e) => {
-                result = Err(format!("read source for MediaStore copy: {e}"));
+                result = Err(format!("read source for MediaStore copy: {e}").into());
                 break;
             }
         };
@@ -784,7 +939,7 @@ fn copy_into_media_store(
         let chunk = match env.byte_array_from_slice(&buf[..n]) {
             Ok(chunk) => JObject::from(chunk),
             Err(e) => {
-                result = Err(format!("byte_array_from_slice: {e}"));
+                result = Err(format!("byte_array_from_slice: {e}").into());
                 break;
             }
         };
@@ -805,13 +960,13 @@ fn copy_into_media_store(
         let written = env.call_method(os, "write", "([B)V", &[JValue::Object(&chunk)]);
         let _ = env.delete_local_ref(chunk);
         if let Err(e) = written {
-            result = Err(format!("write to MediaStore row: {e}"));
+            result = Err(format!("write to MediaStore row: {e}").into());
             break;
         }
     }
     if result.is_ok() {
         if let Err(e) = env.call_method(os, "flush", "()V", &[]) {
-            result = Err(format!("flush MediaStore row: {e}"));
+            result = Err(format!("flush MediaStore row: {e}").into());
         }
     }
 
@@ -829,7 +984,7 @@ fn copy_into_media_store(
     if let Err(e) = env.call_method(os, "close", "()V", &[]) {
         let _ = take_pending_exception(env);
         if result.is_ok() {
-            result = Err(format!("close MediaStore row: {e}"));
+            result = Err(format!("close MediaStore row: {e}").into());
         } else {
             warn!(
                 src = %src_path.display(),
@@ -860,7 +1015,7 @@ fn publish_q<'local>(
     src_path: &Path,
     display_name: &str,
     mime: &str,
-) -> Result<String, String> {
+) -> Result<String, PublishErr> {
     // --- insert: this is the point of no return, the row exists from here on --
     let cv = new_content_values(env)?;
     put_string_column(env, &cv, COLUMN_DISPLAY_NAME, display_name)?;
@@ -896,7 +1051,8 @@ fn publish_q<'local>(
                 sdk,
                 e,
                 exception_note(exception.as_deref())
-            ));
+            )
+            .into());
         }
     };
     if out_uri.is_null() {
@@ -912,7 +1068,8 @@ fn publish_q<'local>(
             display_name,
             sdk,
             exception_note(exception.as_deref())
-        ));
+        )
+        .into());
     }
 
     let (uri_string, row_id) = describe_uri(env, &out_uri);
@@ -955,15 +1112,18 @@ fn publish_q<'local>(
                 "{} [{}]",
                 e,
                 unresolved_note(&row, outcome, "no bytes were written")
-            ));
+            )
+            .into());
         }
     };
 
     // --- copy the bytes --
     let copy_res = copy_into_media_store(env, &os, src_path);
+    // `note` stays a `String` because it is spliced into a user-facing message
+    // by `unresolved_note`; the error's own text is the whole content of it.
     let (copy, note) = match &copy_res {
         Ok(()) => (CopyOutcome::Complete, "the byte copy completed".to_string()),
-        Err(e) => (CopyOutcome::Failed, e.clone()),
+        Err(e) => (CopyOutcome::Failed, e.to_string()),
     };
     if let Err(e) = &copy_res {
         warn!(
@@ -978,7 +1138,7 @@ fn publish_q<'local>(
     // --- resolve the row: always, success included --
     match resolve_pending_row(env, resolver, &row, copy) {
         PendingOutcome::Visible => Ok(format!("{PUBLIC_ABSOLUTE_DIR}/{display_name}")),
-        outcome => Err(unresolved_note(&row, outcome, &note)),
+        outcome => Err(unresolved_note(&row, outcome, &note).into()),
     }
 }
 
@@ -1011,9 +1171,22 @@ fn exception_note(exception: Option<&str>) -> String {
 
 /// API 26-28: no `is_pending` protocol exists here, so there is no pending row
 /// to leak — the file lands on the filesystem and the media scanner indexes it
-/// directly. The only discipline worth adding is to say *where* it went and on
-/// which API, since a `scanFile` that throws leaves a file the file manager may
-/// only pick up on the next boot scan.
+/// directly.
+///
+/// **What counts as published here is the byte copy, not the scan.** The two are
+/// separate steps with separate failure modes: `std::fs::copy` puts the file in
+/// `Download/Auralis/`, and `MediaScannerConnection.scanFile` only asks the
+/// media scanner to *index* a file that is already there. A scan that throws
+/// leaves a real, complete, findable-by-path file; the worst it can cause is
+/// that the file manager may not list it until the next boot scan.
+///
+/// The two used to be reported as one thing: the copy succeeded, the scan
+/// failed, and the function returned `Err`. The caller
+/// (`downloader.rs`) reads `Err` as "nothing was published" — it keeps the
+/// internal path as the completion path and attaches the reason to the download
+/// row, so the UI reported a publish failure for a file that was sitting in
+/// `Download/Auralis/` the whole time. The return value therefore reports the
+/// copy; a failed scan is a `warn!` carrying its exception text.
 #[cfg(target_os = "android")]
 fn publish_legacy(
     env: &mut JNIEnv<'_>,
@@ -1022,7 +1195,7 @@ fn publish_legacy(
     sdk: i32,
     src_path: &Path,
     display_name: &str,
-) -> Result<String, String> {
+) -> Result<String, PublishErr> {
     // Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS) + "/Auralis"
     let env_class = env
         .find_class("android/os/Environment")
@@ -1082,6 +1255,8 @@ fn publish_legacy(
     .map_err(|e| format!("create {}: {}", PUBLIC_ABSOLUTE_DIR, e))?;
     std::fs::copy(src_path, &dest_path).map_err(|e| format!("copy to {dest_path}: {e}"))?;
 
+    // The copy above is the publish. Everything from here is indexing.
+    //
     // MediaScannerConnection.scanFile(ctx, [path], null, null)
     let scanner_class = env
         .find_class("android/media/MediaScannerConnection")
@@ -1094,7 +1269,7 @@ fn publish_legacy(
         .call_static_method(
             scanner_class,
             "scanFile",
-            "(Landroid/content/Context;[Ljava/lang/String;[Ljava/lang/String;Landroid/media/MediaScannerConnection$OnScanCompletedListener;)V",
+            SIG_SCANNER_SCAN_FILE,
             &[
                 JValue::Object(ctx),
                 JValue::Object(&arr.into()),
@@ -1107,6 +1282,10 @@ fn publish_legacy(
         // The file is already on disk, so this is cosmetic — but the file
         // manager may not list it until the next boot scan, and this is the
         // only hint that says why.
+        //
+        // Logged and then *not* returned: the copy succeeded, so the file is
+        // published and the caller needs its path. Returning `Err` here is what
+        // made the UI report a failed publish for a file that existed.
         let exception = take_pending_exception(env);
         warn!(
             display = %display_name,
@@ -1116,7 +1295,6 @@ fn publish_legacy(
             exception = %exception.as_deref().unwrap_or("none"),
             "MediaScannerConnection.scanFile failed; the file is on disk but may stay unindexed"
         );
-        return Err(format!("{}{}", e, exception_note(exception.as_deref())));
     }
     let _ = resolver;
     info!(
@@ -1151,10 +1329,16 @@ fn cached_vm() -> Option<&'static jni::JavaVM> {
     None
 }
 
+/// Attach `env` for the duration of `f` and guarantee the thread hands back to
+/// Java with no exception pending.
+///
+/// Generic over the closure's error because the publish's error is
+/// [`PublishErr`] and the playback fallback's is still `String`; nothing here
+/// inspects or converts it.
 #[cfg(target_os = "android")]
-fn with_attached_env<T>(
-    f: impl FnOnce(&mut JNIEnv<'_>) -> Result<T, String>,
-) -> Option<Result<T, String>> {
+fn with_attached_env<T, E>(
+    f: impl FnOnce(&mut JNIEnv<'_>) -> Result<T, E>,
+) -> Option<Result<T, E>> {
     let vm = cached_vm()?;
     let mut guard = vm.attach_current_thread().ok()?;
     let res = f(&mut guard);
@@ -1164,6 +1348,9 @@ fn with_attached_env<T>(
     // behaviour, so nothing may leave here with one. A failed *check* is
     // treated as "there might be one": `ExceptionClear` with nothing pending is
     // a documented no-op, so assuming the worst is free and keeps the invariant.
+    //
+    // This is the *outer* one; the publish's own frame is popped inside `f`, and
+    // `publish_inner` drains before that pop for the same reason.
     if guard.exception_check().unwrap_or(true) {
         let _ = guard.exception_clear();
     }
@@ -1193,8 +1380,18 @@ fn with_attached_env<T>(
 ///   leaked global ref by `try_seed`, so this is not expected — but a null
 ///   `jobject` handed to `getContentResolver` is a `NullPtr` at best, so it is
 ///   reported rather than wrapped into a `JObject` and passed on.
+///
+/// The first case is now *asked about* instead of discovered: this function is
+/// not gated on the app's own `SEEDED` flag, so the panic it can raise would
+/// abort the process on a tokio worker in the middle of a download. The null
+/// check below cannot help — the panic happens before it runs — so the gate has
+/// to be `crate::android_context_seeded()`, which is what
+/// `background_service.rs` asks first for the same reason.
 #[cfg(target_os = "android")]
-fn service_context() -> Result<JObject<'static>, String> {
+fn service_context() -> Result<JObject<'static>, PublishErr> {
+    if !crate::android_context_seeded() {
+        return Err("android context not seeded yet: no public copy attempted".into());
+    }
     let ctx = ndk_context::android_context().context();
     if ctx.is_null() {
         return Err("android context jobject is null: ndk_context was never seeded".into());

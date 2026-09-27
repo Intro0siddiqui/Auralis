@@ -387,6 +387,79 @@ pub extern "system" fn Java_com_auralis_v2_NativeBridge_command(
     }
 }
 
+/// The queue index a notification-triggered replay must point at, decided
+/// without touching the player.
+///
+/// `play_track` commits in two steps: rodio accepts the source, and only then is
+/// the state published — including a decoder-repaired duration, which is
+/// re-stamped onto `queue[current_index]`. So the index has to name the track
+/// being replayed *before* the start, or the repair lands on somebody else's
+/// entry: the track just left gets the incoming track's length while the track
+/// now playing never receives its own. That is PB-01a, and its fix was the
+/// ordering, not the guard — the guard that only mirrors when the decoder had an
+/// opinion is correct and cannot help.
+///
+/// This is the shape `AudioPlayer::start_at_index` and `commands::playback::play`
+/// already use, factored out so it can be tested off-device:
+///
+/// * an index that already names the track is kept, so a queue holding the same
+///   track twice keeps pointing at the copy that was playing;
+/// * otherwise the first entry with that id;
+/// * otherwise `None` — the track is not in the queue, so there is no entry to
+///   repair, and leaving a *foreign* index in place is exactly how a foreign
+///   entry receives this track's duration. `commit_start` skips the mirror when
+///   the index is `None`, which is the honest answer: nothing to stamp.
+///
+/// A notification button is not the place to discover that the index is stale.
+/// The index is only ever set as a side effect of somebody else starting a
+/// track: `commands::playback::play` sets it only when the caller passes a
+/// `queue_index`, and the frontend does not (`ui/js/modules/player.js` invokes
+/// `play` with `track_id` alone), so it relies on the `set_queue` it fired
+/// first — and that call is skipped when its track list is empty, and falls back
+/// to `.or(Some(0))` when the current id is not among the rows it fetched
+/// (`commands/playback.rs`). Any of those leaves the index naming a track other
+/// than the one now playing.
+#[cfg(any(target_os = "android", test))]
+fn replay_index(queue: &[Track], track: &Track, current_index: Option<usize>) -> Option<usize> {
+    if let Some(i) = current_index {
+        if queue.get(i).map(|t| t.id) == Some(track.id) {
+            return current_index;
+        }
+    }
+    queue.iter().position(|t| t.id == track.id)
+}
+
+/// Replay `current_track` after `resume` refused, with the queue index already
+/// pointing at it.
+///
+/// The steps are ordered, and the order is the fix: `replay_index` (pure, and
+/// tested without a device) → set the index → `play_track` → put the outgoing
+/// index back if the start failed. `play_track` is transactional — it publishes
+/// nothing until rodio has accepted a source — so on `Err` the player still
+/// describes the previous track, and an index left pointing at the replay would
+/// highlight one queue row while the player bar shows another. The outgoing
+/// index is read once, *before* any `.await`, so the rollback cannot pick up a
+/// value something else wrote while the start was in flight.
+///
+/// On success the index is left where `replay_index` put it: the entry for the
+/// track that is now playing.
+#[cfg(target_os = "android")]
+async fn replay_current(player: &AudioPlayer) {
+    let Some(track) = player.get_current_track().await else {
+        warn!("Notification play: nothing is loaded to replay");
+        return;
+    };
+    let outgoing = player.get_current_index().await;
+    // `get_queue` clones the whole queue; the index is the only part of it that
+    // is needed, and a media-button press is not on a hot path.
+    let queue = player.get_queue().await;
+    let target = replay_index(&queue, &track, outgoing);
+    player.set_current_index(target).await;
+    if player.play_track(track).await.is_err() {
+        player.set_current_index(outgoing).await;
+    }
+}
+
 /// Parse a media command and act on the player, then refresh the frontend and
 /// the notification state so every surface stays in sync.
 #[cfg(target_os = "android")]
@@ -406,11 +479,12 @@ fn dispatch(command: &str) {
                 // to resume (no sink, or a drained one). The notification's play
                 // button used to discard that, so it silently did nothing after
                 // a stop or at the end of a track - the same dead end the in-app
-                // play button had. Replay the current track instead.
+                // play button had. Replay the current track instead - through
+                // `replay_current`, which also points the queue index at it
+                // first, because `play_track` alone stamps a decoder-repaired
+                // duration onto whatever entry the index names.
                 if player.resume().await.is_err() {
-                    if let Some(track) = player.get_current_track().await {
-                        let _ = player.play_track(track).await;
-                    }
+                    replay_current(&player).await;
                 }
             }
             "pause" => {
@@ -436,4 +510,94 @@ fn dispatch(command: &str) {
         crate::commands::playback::emit_state_changed(&app, &player).await;
         push_now_playing(&player).await;
     });
+}
+
+/// The index decision behind the notification's play button — the one piece of
+/// that path that can be exercised off-device.
+///
+/// What these tests deliberately do **not** claim: that `replay_current` sets the
+/// index before calling `play_track`, or that it restores the outgoing index when
+/// the start fails. Both are claims about call order against a real
+/// `AudioPlayer`, whose audio path cannot run here, and a test that asserted them
+/// against a copy of the sequence would prove nothing about the shipped code —
+/// the failure mode of the `pot-for-TV` test, which defined its own copy of the
+/// logic and passed whatever `youtube.js` did. So this module tests the decision
+/// function the code really calls, and the ordering is left to inspection plus
+/// the sibling coverage in `player.rs`
+/// (`next_moves_the_queue_index_before_starting_the_track` and its three
+/// siblings, which do hold a real player).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::AudioFormat;
+
+    fn track(title: &str) -> Track {
+        Track::new(
+            title.to_string(),
+            format!("/music/{title}.mp3"),
+            180,
+            AudioFormat::Mp3,
+        )
+    }
+
+    /// A track that is deliberately not one of the queue's own entries.
+    fn other_track() -> Track {
+        track("zzz-other")
+    }
+
+    #[test]
+    fn replay_points_the_index_at_the_track_being_replayed() {
+        let a = track("a");
+        let b = track("b");
+        let queue = vec![a, b.clone()];
+
+        // The ordinary case: no index yet, so the replay has to find its entry.
+        assert_eq!(replay_index(&queue, &b, None), Some(1));
+        // An index left over from whatever played before must not survive — that
+        // is the case that stamped the duration onto the wrong entry.
+        assert_eq!(replay_index(&queue, &b, Some(0)), Some(1));
+    }
+
+    #[test]
+    fn replay_keeps_an_index_that_already_names_the_track() {
+        let a = track("a");
+        let queue = vec![a.clone(), a.clone(), a.clone()];
+
+        // Three copies of one track: the one that was playing is the one whose
+        // duration the repair belongs to, so a plain `position` (which would
+        // answer 0) must not override an index that already agrees.
+        assert_eq!(replay_index(&queue, &a, Some(2)), Some(2));
+        assert_eq!(replay_index(&queue, &a, Some(0)), Some(0));
+        // With no index to keep, the first copy is the only defensible answer.
+        assert_eq!(replay_index(&queue, &a, None), Some(0));
+    }
+
+    #[test]
+    fn replay_of_a_track_that_is_not_queued_clears_the_index() {
+        let a = track("a");
+        let queue = vec![a.clone()];
+
+        // `None`, not `Some(0)`: there is no entry to repair, and leaving a
+        // foreign index in place is how a foreign entry receives this track's
+        // decoder-repaired duration. `commit_start` skips the mirror when the
+        // index is `None`.
+        let absent = other_track();
+        assert_eq!(replay_index(&queue, &absent, Some(0)), None);
+        assert_eq!(replay_index(&queue, &absent, None), None);
+        // An empty queue cannot name anything either.
+        assert_eq!(replay_index(&[], &a, Some(0)), None);
+    }
+
+    #[test]
+    fn replay_index_never_points_outside_the_queue() {
+        let a = track("a");
+        let queue = vec![a.clone(), a.clone()];
+
+        // An out-of-range index is not "already correct" and must not come back
+        // as-is: `commit_start` would stamp `queue[3]`, which does not exist,
+        // and the entry that does exist would go unrepaired.
+        assert_eq!(replay_index(&queue, &a, Some(3)), Some(0));
+        let absent = other_track();
+        assert_eq!(replay_index(&queue, &absent, Some(9)), None);
+    }
 }
