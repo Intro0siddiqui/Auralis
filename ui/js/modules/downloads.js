@@ -255,19 +255,38 @@ export const downloadMethods = {
             : false;
         const trySameClientMuxed = refusedAdaptiveAudio && winnerHasMuxed && !budget.forcedLegacy;
 
-        const nextClient = trySameClientMuxed
+        // Third rung: audio-only OPUS. Reached only once BOTH other classes have
+        // failed for this track — adaptive m4a refused at byte 0, and the muxed
+        // fallback arriving truncated. On the device report of 2026-09-27 that is
+        // exactly the state four attempts ran out of road in, while the same
+        // report recorded `ANDROID_VR ... opusWithUrl=2` — two audio-only opus
+        // streams with usable urls that nothing had ever asked for.
+        //
+        // Gated on the client actually offering one, for the same reason the muxed
+        // rung is gated on `progressiveWithUrl`: IOS reports `opusWithUrl: 0`, so
+        // asking it would spend an attempt re-resolving a class just proven bad.
+        const muxedTruncated = isTruncated && Boolean(sel.legacyProgressive || sel.itag === 18);
+        const opusCandidates = ordered.filter((c) => ((reportByClient.get(c) || {}).opusWithUrl || 0) > 0);
+        const tryOpus = muxedTruncated && !budget.forcedOpus && opusCandidates.length > 0;
+        const opusClient = tryOpus
+            ? (opusCandidates.includes(winner) ? winner : opusCandidates[0])
+            : null;
+
+        const nextClient = tryOpus
+            ? opusClient
+            : trySameClientMuxed
             ? winner
             : (rotate ? (candidates.find(canServeAudio) || null) : null);
         // Every remaining client is known to be unable to hand out an audio url.
-        const deadEnd = rotate && !trySameClientMuxed && candidates.length > 0 && !candidates.some(canServeAudio);
+        const deadEnd = rotate && !trySameClientMuxed && !tryOpus && candidates.length > 0 && !candidates.some(canServeAudio);
         const allClients = resolved.orderedClients || [];
         // Never exclude every client — that leaves the resolver nothing to try.
         // When re-asking the winner for a different format it must not also be
         // excluded, or the two instructions contradict each other.
         const excludeClients = (tried.length > 0 && tried.length < allClients.length)
-            ? (trySameClientMuxed ? tried.filter(c => c !== winner) : tried.slice())
+            ? ((trySameClientMuxed || tryOpus) ? tried.filter((c) => c !== nextClient) : tried.slice())
             : [];
-        if (rotate && !trySameClientMuxed && (!nextClient || deadEnd)) {
+        if (rotate && !trySameClientMuxed && !tryOpus && (!nextClient || deadEnd)) {
             console.warn(`[Downloads] 403/truncation auto-retry: no client left worth trying for ${p.id} (winning=${resolved.client}, deadEnd=${deadEnd})`);
             map.delete(p.id);
             return;
@@ -275,10 +294,13 @@ export const downloadMethods = {
 
         budget.attempts += 1;
         if (trySameClientMuxed) budget.forcedLegacy = true;
+        if (tryOpus) budget.forcedOpus = true;
         ctx._retrying = true;
         try { window.__auralisDownloadRetryingIds = window.__auralisDownloadRetryingIds || new Set(); window.__auralisDownloadRetryingIds.add(p.id); } catch (_) {}
         const shortfall = (errRaw.match(/only \d+s of \d+s|received \d+ bytes of \d+/) || [errRaw.split('\n')[0].slice(0, 80)])[0];
-        const label = trySameClientMuxed
+        const label = tryOpus
+            ? `Both the adaptive stream and the muxed fallback failed — trying ${opusClient}'s audio-only opus stream`
+            : trySameClientMuxed
             ? `403 on ${winner}'s adaptive stream — retrying the same client with the muxed format it also offers`
             : isTruncated
             ? `Truncated stream (${shortfall}), re-resolving via ${nextClient || 'another client'}`
@@ -286,13 +308,14 @@ export const downloadMethods = {
                 ? `403 on ${resolved.client || 'TV'} (rr1---sn-gwpa-cived), retrying with ${nextClient}`
                 : `Download incomplete (${shortfall}), retrying`;
         this.showToast(`${label}… (attempt ${budget.attempts}/${MAX_AUTO_RETRIES})`, 'info', 5000);
-        console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} truncated=${isTruncated} sabr=${!!resolved.sabrFallback} nextClient=${nextClient} sameClientMuxed=${trySameClientMuxed} exclude=${JSON.stringify(excludeClients)}`);
+        console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} truncated=${isTruncated} sabr=${!!resolved.sabrFallback} nextClient=${nextClient} sameClientMuxed=${trySameClientMuxed} opus=${tryOpus} opusCandidates=${JSON.stringify(opusCandidates)} exclude=${JSON.stringify(excludeClients)}`);
         try {
             const baseOpts = ctx.opts || this.getDownloadOptions(document.getElementById('download-form')) || {};
             const retryOpts = { ...baseOpts };
             if (nextClient) retryOpts.forceClient = nextClient;
             if (excludeClients.length) retryOpts.excludeClients = excludeClients;
             if (trySameClientMuxed) retryOpts.forceLegacyProgressive = true;
+            if (tryOpus) retryOpts.forceOpusAudio = true;
             // A previous attempt came back short. Refuse the legacy-progressive
             // fallback only for the client that actually truncated — the short
             // stream is a SABR window, not a property of the muxed container,

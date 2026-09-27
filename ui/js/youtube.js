@@ -492,6 +492,48 @@ class YouTubeResolver {
             return all.some((f) => isAudioFormat(f) && isDecipherable(f));
         };
 
+        // Audio-only OPUS (typically itag 251), which is a third URL class
+        // distinct from both of the ones we had been choosing between.
+        //
+        // Why it now exists, from the device report of 2026-09-27
+        // (yF9nmg_jHNs). Every attempt on that track failed, and the ladder
+        // explains why:
+        //
+        //   adaptive m4a  itag 140 -> 403 at byte 0   (IOS and ANDROID_VR)
+        //   muxed mp4     itag 18  -> truncated 75s of 216s, all advertised bytes
+        //                                received and 416 on every range mechanism
+        //                                (ANDROID_VR and ANDROID)
+        //
+        // and the report also recorded `ANDROID_VR ... opusWithUrl=2` — two
+        // audio-only opus streams with usable urls that we never once requested,
+        // because scoreFormat ranks itag 140 above opus and nothing ever asked
+        // for the other one. The owner had already asked why we deprioritised
+        // opus given we can decode it; the honest answer then was that we could
+        // not measure whether the edge serves it. Now we can at least try.
+        //
+        // NOT promoted globally, and deliberately. Adaptive m4a and adaptive opus
+        // share a delivery path, so if the 403 is a client/token binding rather
+        // than a per-format one, opus will be refused the same way and this rung
+        // buys nothing. The prior is genuinely uncertain — that is why it is a
+        // measured attempt rather than a reordering, and why the report counts
+        // `opusWithUrl` so a second failure is as legible as the first.
+        //
+        // The upside if it does work is real: opus here is audio-ONLY, so unlike
+        // the muxed fallback there is no 360p video remuxing waste, and it plays
+        // through the project's own OpusSource rather than rodio.
+        const pickOpusAudio = (fmts) => {
+            if (!fmts || !fmts.length) return null;
+            const valid = fmts.filter((f) => isDecipherable(f)
+                && isAudioFormat(f)
+                && !f.has_video
+                && /opus/i.test(String(f.mime_type || '') + String(f.mimeType || '') + String(f.codecs || '')));
+            if (!valid.length) return null;
+            // Highest bitrate wins: the point of asking for opus at all is
+            // quality, so taking the low-bitrate member of the set would be a
+            // worse answer than the m4a we just failed to fetch.
+            return [...valid].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+        };
+
         // F7 SABR-only fallback: 2026 WEB client often returns SABR-only (only
         // serverAbrStreamingUrl, adaptive_formats URLs missing) but legacy
         // progressive formats[18] (360p) remain usable. FreeTube#6977.
@@ -912,6 +954,24 @@ class YouTubeResolver {
                 // fail visibly rather than silently re-resolving the same
                 // adaptive url and 403ing again.
                 console.warn(`[YouTubeResolver] forceLegacyProgressive UNAVAILABLE for ${videoId} (client=${winningClient}): no decipherable progressive format — this client cannot be rescued.`);
+            }
+        }
+
+        // Explicit request for the audio-only OPUS stream — the third rung of
+        // the retry ladder, after adaptive m4a and the muxed fallback. See
+        // `pickOpusAudio` for the measurement that motivates it and for why it
+        // is a rung rather than a reordering.
+        if (opts.forceOpusAudio || opts.force_opus_audio) {
+            const opus = pickOpusAudio(sd.adaptive_formats || []);
+            if (opus) {
+                console.warn(`[YouTubeResolver] forceOpusAudio: using audio-only opus itag=${opus.itag} bitrate=${opus.bitrate} for ${videoId} (client=${winningClient}) — adaptive m4a and the muxed fallback have both failed for this track.`);
+                fmt = opus;
+                used_legacy_progressive = false;
+            } else {
+                // Said out loud, because a client with `opusWithUrl: 0` makes
+                // this rung a no-op and the retry would otherwise burn an
+                // attempt re-resolving the same two classes that just failed.
+                console.warn(`[YouTubeResolver] forceOpusAudio UNAVAILABLE for ${videoId} (client=${winningClient}): no decipherable audio-only opus format.`);
             }
         }
 

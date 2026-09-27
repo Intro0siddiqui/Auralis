@@ -1176,6 +1176,105 @@ describe('YouTube Search & Streaming Integration', () => {
             'DownloadProgress must carry the reason on its own field, separate from the download error');
     });
 
+    it('the retry ladder is adaptive -> same-client muxed -> audio-only opus, and each rung is gated on the report', async () => {
+        // The real per-client report from the device, 2026-09-27, track
+        // yF9nmg_jHNs, which exhausted four attempts and still failed:
+        //
+        //   #1 ANDROID_VR itag=140 m4a audio-only -> 403 at byte 0
+        //   #2 ANDROID_VR itag=18  mp4 MUXED      -> truncated 75s of 216s
+        //   #3 ANDROID   itag=18  mp4 MUXED      -> truncated
+        //   #4 IOS       itag=140 m4a audio-only -> 403 at byte 0
+        //
+        // and it recorded `ANDROID_VR ... opusWithUrl=2` — two audio-only opus
+        // streams with usable urls that nothing ever requested, because
+        // scoreFormat ranks itag 140 above opus. The owner had asked why opus
+        // was deprioritised when we can decode it; this is the measurement that
+        // finally lets us ask for it rather than guess.
+        const report = [
+            { client: 'MWEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0 },
+            { client: 'WEB', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0 },
+            { client: 'TV', status: 'UNPLAYABLE', audioWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0 },
+            { client: 'IOS', status: 'OK', audioWithUrl: 2, adaptiveWithUrl: 24, progressiveWithUrl: 0, audioOnlyWithUrl: 2, opusWithUrl: 0, sabrStreamingUrl: true },
+            { client: 'ANDROID_VR', status: 'OK', audioWithUrl: 4, adaptiveWithUrl: 26, progressiveWithUrl: 1, audioOnlyWithUrl: 4, opusWithUrl: 2, sabrStreamingUrl: true },
+            { client: 'ANDROID', status: 'OK', audioWithUrl: 0, adaptiveWithUrl: 0, progressiveWithUrl: 1, audioOnlyWithUrl: 0, opusWithUrl: 0, sabrStreamingUrl: true },
+        ];
+        const ordered = ['MWEB', 'WEB', 'ANDROID_VR', 'TV', 'IOS', 'ANDROID'];
+        const err403 = 'HTTP 403 Forbidden [rr2---sn-ci5gup-cvhe7.googlevideo.com] body: (empty body), start_byte=0';
+        const errTrunc = 'Truncated download: only 75s of 216s of audio is actually present (>66% missing).';
+
+        // Walk the ladder the way the device did, feeding each rung the failure
+        // the previous one produced, and assert the escalation rather than any
+        // single step — the ordering is the whole point.
+        const run = async (sel, errRaw, budget) => {
+            const calls = [];
+            const obj = {
+                ...downloadMethods,
+                _pendingDownloadContexts: new Map(),
+                extractErrorMessage: (p) => p.error || '',
+                showToast: () => {},
+                getDownloadOptions: () => ({}),
+                downloadResolvedTrack: async (r, f, o) => {
+                    calls.push({
+                        client: r.client,
+                        muxed: !!o.forceLegacyProgressive,
+                        opus: !!o.forceOpusAudio,
+                    });
+                    return { id: 'next' };
+                },
+            };
+            obj._autoRetryBudget = new Map([['yF9nmg_jHNs', budget]]);
+            obj._pendingDownloadContexts.set('dl1', {
+                key: 'yF9nmg_jHNs',
+                resolved: { client: sel.client, orderedClients: ordered, client_report: report, selection: sel },
+                opts: {}, originalUrl: 'https://youtu.be/yF9nmg_jHNs', format: 'm4a', _retrying: false,
+            });
+            global.window = global.window || {};
+            global.window.AuralisYouTube = {
+                resolve: async (_u, o) => ({ kind: 'track', stream_url: 'https://x/', client: o.forceClient, client_report: report }),
+            };
+            await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: errRaw });
+            return calls;
+        };
+
+        const adaptive = { client: 'ANDROID_VR', itag: 140, ext: 'm4a', audioOnly: true, legacyProgressive: false };
+        const muxed = { client: 'ANDROID_VR', itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true };
+
+        // Rung 2: 403 on adaptive, and the winner has a progressive url.
+        let calls = await run(adaptive, err403, { attempts: 0, triedClients: [], forcedLegacy: false, forcedOpus: false });
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].client, 'ANDROID_VR', 're-ask the same client');
+        assert.equal(calls[0].muxed, true, 'ask for its muxed format');
+        assert.equal(calls[0].opus, false, 'opus is not a first response to a 403 — the muxed rung comes first');
+
+        // Rung 3: the muxed fallback arrived truncated, and a client offers opus.
+        calls = await run(muxed, errTrunc, { attempts: 1, triedClients: ['ANDROID_VR'], forcedLegacy: true, forcedOpus: false });
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].opus, true, 'both other classes have failed, so try audio-only opus');
+        assert.equal(calls[0].client, 'ANDROID_VR', 'ANDROID_VR is the only client offering opus, so it must be the one asked');
+        assert.equal(calls[0].muxed, false, 'must not re-ask for the class that just truncated');
+
+        // Gated: with no client offering opus the rung must not fire, or the
+        // retry spends an attempt re-resolving a class already proven bad.
+        // This is the real IOS case — progressiveWithUrl:0 and opusWithUrl:0.
+        const noOpus = report.map((e) => ({ ...e, opusWithUrl: 0 }));
+        const saved = report.splice(0, report.length, ...noOpus);
+        calls = await run({ ...muxed, client: 'IOS' }, errTrunc, { attempts: 2, triedClients: ['ANDROID_VR', 'IOS'], forcedLegacy: true, forcedOpus: false });
+        assert.equal(calls.every((c) => !c.opus), true, 'a client set with no opus must not trigger the opus rung');
+        report.splice(0, report.length, ...saved);
+
+        // ...and the resolver must honour the option, and say so when it cannot.
+        const repoRoot = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../..');
+        const ysrc = fs.readFileSync(path.join(repoRoot, 'ui/js/youtube.js'), 'utf8');
+        assert.ok(/opts\.forceOpusAudio \|\| opts\.force_opus_audio/.test(ysrc), 'youtube.js must honour forceOpusAudio');
+        assert.ok(/forceOpusAudio UNAVAILABLE/.test(ysrc), 'an unavailable opus rung must say so, since IOS reports opusWithUrl=0');
+        // Audio-only and highest bitrate: the point of asking for opus is
+        // quality, and it is also what avoids the 360p remux the muxed rung pays.
+        assert.ok(/isAudioFormat\(f\)/.test(ysrc) && /!f\.has_video/.test(ysrc),
+            'the opus selector must require an audio-only format');
+        assert.ok(/\(b\.bitrate \|\| 0\) - \(a\.bitrate \|\| 0\)/.test(ysrc),
+            'the opus selector must take the highest bitrate, not an arbitrary member');
+    });
+
     it('downloader tops a windowed (SABR) partial download up with explicit ranges', () => {
         const base = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../src/infrastructure/media');
         const dsrc = fs.readFileSync(path.join(base, 'downloader.rs'), 'utf8');
