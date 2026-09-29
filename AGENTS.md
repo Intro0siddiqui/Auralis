@@ -8,7 +8,7 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development — v2.5.18 shipped** — Core architecture is in place and most features are implemented. Background playback is **wired end-to-end** (foreground `MediaPlaybackService` + MediaSession on Android, notification/lockscreen controls routed back into Rust via JNI; see `infrastructure/media/background_service.rs` + `scripts/android/MediaPlaybackService.kt`). YouTube resolver is PO-token aware for all clients (2026) and downloads dual-save to visible `Download/Auralis/` via MediaStore + internal `app_data_dir/downloads` (v2.5.11). Player is queue-aware with `set_queue` + hydration + fallback Next/Prev (v2.5.12) and navigation is free of `viewTransition` races (v2.5.16) / precise `activeView` guard (v2.5.17) / Download form `preventDefault` + `htmx:restored/pageshow` rebind (v2.5.18 fixes `Download→Home` redirect at `00:40.5`). Remaining work is polish + partial smart-playlist presets; macOS/Windows signing remain CI/cert gaps. For verified 2026 platform-compliance (16 KB alignment ✅ enforced via `zipalign -P 16` + `llvm-readelf p_align 0x4000`, targetSdk 36 ✅, background media service ✅ with activity-dead limitation), see `PROJECT.md` §11.
+**Current State: Active Development — v2.6.64 shipped** — Core architecture is in place and most features are implemented. **YouTube downloads are blocked on a single item: an attested PO token.** All three non-SABR URL classes are measured and all three fail on the owner's residential Jio line (adaptive m4a 403 @ byte 0, audio-only opus 403 @ byte 0, muxed itag 18 served but server-windowed to 54s of 216s), and SABR — the only remaining transport — is refused server-side with `STREAM_PROTECTION_STATUS status=3` unless the token is attested. The known root cause and fix are in **§4.7**; read that before touching the resolver. The original architecture notes follow. Background playback is **wired end-to-end** (foreground `MediaPlaybackService` + MediaSession on Android, notification/lockscreen controls routed back into Rust via JNI; see `infrastructure/media/background_service.rs` + `scripts/android/MediaPlaybackService.kt`). YouTube resolver is PO-token aware for all clients (2026) and downloads dual-save to visible `Download/Auralis/` via MediaStore + internal `app_data_dir/downloads` (v2.5.11). Player is queue-aware with `set_queue` + hydration + fallback Next/Prev (v2.5.12) and navigation is free of `viewTransition` races (v2.5.16) / precise `activeView` guard (v2.5.17) / Download form `preventDefault` + `htmx:restored/pageshow` rebind (v2.5.18 fixes `Download→Home` redirect at `00:40.5`). Remaining work is polish + partial smart-playlist presets; macOS/Windows signing remain CI/cert gaps. For verified 2026 platform-compliance (16 KB alignment ✅ enforced via `zipalign -P 16` + `llvm-readelf p_align 0x4000`, targetSdk 36 ✅, background media service ✅ with activity-dead limitation), see `PROJECT.md` §11.
 
 ---
 
@@ -164,7 +164,7 @@ Notes from the audit/upgrade pass:
 
 - `bundle.targets` is `["deb", "app", "dmg", "msi", "nsis"]` (no `"all"`).
 - `identifier` is `com.auralis.v2` (was `com.auralis.app`).
-- `version` is `2.6.26` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
+- `version` is `2.6.64` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
 - CSP is `default-src 'self' tauri: data: blob: ipc: http://ipc.localhost; img-src 'self' data: blob: asset: https://i.ytimg.com https://*.ytimg.com; media-src 'self' data: blob: asset: ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost https://*.googlevideo.com https://*.ytimg.com https://i.ytimg.com https://www.youtube.com https://youtubei.googleapis.com https://*.youtube.com https://jnn-pa.googleapis.com https://www.google.com https://*.google.com; font-src 'self' data: https:;` — all third-party JS vendored under `ui/vendor/` (no CDN), `https:` kept for `youtubei`/`googlevideo`/`jnn-pa` `connect-src` (see `scripts/tests/youtube_resolver.test.js`). `unsafe-eval` is required for `youtube.js` `new Function` decipher (BotGuard) — noted as intentional.
 
 ### 4.3 Android CI Optimization (`.github/workflows/build.yml`) — ✅ DONE (2026-09-03, v2.6.26)
@@ -200,9 +200,14 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 Two residual gaps. **Android code**: the NDK's Linux host toolchain is x86_64 and this box is aarch64 with no `binfmt_misc`, so `cargo check --target aarch64-linux-android` cannot run here; only the `check-android` CI job compiles `cfg(target_os = "android")`. **E2E**: needs a display or a device.
 
-**CI's `stable` floats and yours is dated.** `dtolnay/rust-toolchain@stable` resolves to whatever is current at run time; this box is pinned to 2026-09-01. A newer CI compiler accepted `format!(SOME_CONST, ..)` — a `const &str` is not a string literal, and only the newer one enforces that — so local `cargo check` passing did not mean CI would. The fix was to inline the literal. A `rust-toolchain.toml` would make local and CI identical by construction and is still **owed**; nobody has decided whether pinning CI's compiler is acceptable.
+**The toolchain drift is now CLOSED — `rust-toolchain.toml` exists (v2.6.64).** Previously `dtolnay/rust-toolchain@stable` floated to whatever was current at run time while this box sat on a dated release, and the gap cost two releases: `format!(SOME_CONST, ..)` — a `const &str` is not a string literal — compiled locally and failed `build-android` **and** `check-android` on CI's newer compiler, while `build-linux` compiled the same file as dead code so no host gate could have caught it.
 
-**What *was* available when this line was last true, and is now only a fallback:** bare `rustc` 1.63 on a standalone file, which is enough to verify pure logic by **extracting the functions and their tests verbatim** from the real source and compiling them with `rustc --test` against stubbed collaborators. Keep the requirement that extraction be byte-identical — a mutation of a copy is not a mutation of the shipped code, and one regression test here passed for two versions because it asserted against its own reimplementation. That harness caught a shipped bug (a copy button calling `writeText(undefined)`) the moment it was built, and it is still the right tool for logic that needs a device or a network. But it verifies logic, not compilation, and those are not substitutes.
+- `rust-toolchain.toml` pins `channel = "1.98.1"`, `profile = "minimal"`, `components = ["rustfmt", "clippy"]`. It is the version the whole crate is verified against (192 tests, clippy `-D warnings`, `fmt --check` all pass on it).
+- **All six CI toolchain steps are `dtolnay/rust-toolchain@master` with `toolchain: 1.98.1` as an input.** `@none` is **not** a sentinel in the `@ref` — the action selects the toolchain from the `@rev`, so `@none` resolves as a *version tag* and every job dies at `Set up job` with `Unable to resolve action dtolnay/rust-toolchain@none`. Passing an explicit `toolchain` **input** requires `@master` as the ref. (The sentinel was asserted without checking and broke CI; it is now verified against the action's documented interface.)
+- Because the version now lives in **two** files, the `lint` job has an **"Assert the toolchain pin is consistent"** step that fails when `rust-toolchain.toml` and `build.yml` disagree, or when either carries more than one distinct value. Mutation-verified: drifting one step, drifting all steps together, and removing `channel` are all caught.
+- Bumping is a one-line change on its own PR. Expect Android NDK interactions to move first.
+
+**What *is* only a fallback:** bare `rustc` on a standalone file, enough to verify pure logic by **extracting the functions and their tests verbatim** from the real source and compiling them with `rustc --test` against stubbed collaborators. Keep the requirement that extraction be byte-identical — a mutation of a copy is not a mutation of the shipped code, and one regression test here passed for two versions because it asserted against its own reimplementation. That harness caught a shipped bug (a copy button calling `writeText(undefined)`) the moment it was built. But it verifies *logic, not compilation*, and that distinction has now bitten twice: two of the four errors that kept v2.6.59/v2.6.60 red were in code no harness touched, and both were compile errors a one-second `cargo check` finds. **It is a fallback for logic that needs a device or a network, not a substitute for the gates.**
 
 ### 4.6 YouTube resolver — client strategy + per-client diagnostics (v2.6.43)
 
@@ -310,6 +315,143 @@ New `ui/js/modules/pot_scope.js` owns the decision. A token **we** minted (or re
 
 ---
 
+## 4.7 SABR, and the single blocker (v2.6.64)
+
+**Read this before changing the resolver, the retry ladder, or the client order.** Everything here supersedes the framing in §4.6 about SABR being a "transport layer" problem reached by rotating clients.
+
+### 4.7.1 All three non-SABR URL classes are measured. All three fail.
+
+Device run, `yF9nmg_jHNs` (216.4s), residential Jio. The class ladder (§4.6) reached the **muxed rung for the first time** — it had been computed twice before and lost to the stale-force-flag bug both times, so it had genuinely never been requested:
+
+| # | class | client | itag | outcome |
+|---|-------|--------|------|---------|
+| 1 | adaptive audio | `ANDROID_VR` | 140 m4a | `HTTP 403` at byte 0 |
+| 2 | audio-only opus | `ANDROID_VR` | 251 webm | `HTTP 403` at byte 0 |
+| 3 | muxed | `ANDROID_VR` | 18 mp4 | windowed |
+| 4 | muxed | `ANDROID` | 18 mp4 | windowed (final error) |
+
+**The window, measured precisely.** The muxed object is *complete and self-consistent* — 10992443 B received, every advertised byte present, `stbl` sample table says 216.3s, `audio_data_end=10992443B` exactly at EOF — and yet `decoded=75s measured=54.4s audible_until=54.4s`. So the server windowed the **media, not the transfer**. `Range` top-up returns `416` on all three mechanisms (`url+header`, `header`, `url`), which confirms the object genuinely ends there and that no client-side resume can extend it.
+
+This is the v2.6.45 completeness gate working exactly as designed: it refused to save a 54s file as a 216s track and named the correct cause. **Do not weaken it** — if a future transport yields a window, that is the answer, not a bug to route around.
+
+**Rotation has never changed the outcome class** (3 clients × muxed, 2 × adaptive, identical signature each time). `@audit` and I agree it should stop after exhaustion and surface the real error one attempt sooner rather than spending the last retry on a second opinion. Not yet implemented.
+
+### 4.7.2 The SABR contract (read-from-source + measured)
+
+Established 2026-09-29 by running the reference implementation, not by guessing. Sources: `protos/video_streaming/video_playback_abr_request.proto` and `src/core/SabrStream.ts` in **LuanRT/GoogleVideo**.
+
+- **Body**: a `VideoPlaybackAbrRequest` protobuf (proto2). Relevant fields: `initialization_format_ids` (16), `selected_audio_format_ids` (16), `streamer_context` (19) carrying `po_token`, and `video_playback_ustreamer_config` (5).
+- **URL**: `serverAbrStreamingUrl` + `&rn=<requestNumber>`
+- **Method**: POST, `Range` header removed
+- **Headers**: `content-type: application/x-protobuf`, `accept: application/vnd.yt-ump`, `accept-encoding: identity`
+- **Response framing**: UMP — varint(partId), varint(size), payload. `MEDIA_HEADER=20`, `MEDIA=21`, `SABR_REDIRECT=43`, `SABR_ERROR=44`, `SABR_CONTEXT_UPDATE=57`, `STREAM_PROTECTION_STATUS=58`.
+
+**Both inputs we were unsure about are already present** in our player response — this is why the SABR client is a tractable piece of work and not a research project:
+- `player_config.media_common_config.media_ustreamer_request_config.video_playback_ustreamer_config` (1560 chars, base64)
+- `signatureTimestamp` (20719), already sent in our `playbackContext.contentPlaybackContext`
+
+And the audio formats we receive are **SABR-only**: `itag 140/249/250/251`, `content_length=3503522`, `approxDuration=216433ms` (the full 216s), and **no `url` field at all**. The bytes are not obtainable by plain HTTP GET. Confirmed by the reference implementation: `typeof format.url === 'undefined'` and `decipher()` returns undefined.
+
+### 4.7.3 SABR is refused server-side without an attested token — this is the blocker
+
+```
+[ERROR] [SabrStream] Cannot proceed with stream: attestation required
+```
+
+Traced to source, this is **not** a client-side guard. It is the server's own
+`STREAM_PROTECTION_STATUS` UMP part (58) with `status === 3`, decoded and thrown at
+`SabrStream.js:776-787`. The request itself is well-formed and it selected itag 140 before
+the refusal.
+
+| token supplied | server response |
+|---|---|
+| none | `status=3` — attestation required |
+| cold-start (locally generated) | `status=3` — attestation required |
+
+**Caveat on the second row, because it weakens it:** in that run
+`it.session.context.client.visitor_data` was `undefined`, so the token was generated
+*unbound* (16 chars). A correctly-bound cold-start token is therefore not cleanly
+tested. The direction is nonetheless what the name guarantees — a *cold-start* token is
+by construction not attested.
+
+Per the bgutils-js documentation on `StreamProtectionStatus`: **status 2** = "a PO Token
+is required, but the client can request up to 1–2 MB using a cold start token before
+playback is interrupted"; **status 3** = "the client cannot continue fetching media data
+without a valid PO token." **A cold-start token is what the client already has when
+status 2 is reported — it is not a token you can supply to satisfy status 3.**
+
+### 4.7.4 The correction: there is ONE blocker, not two
+
+**An earlier belief in this repo was wrong and is retracted here rather than deleted.**
+§4.6 and a `@build`↔`@audit` exchange both argued the 403s and the window were
+*independent* problems, on the reasoning that a working token would not help the window
+because `web` is SABR-only. The second half was right and is now the load-bearing part:
+**`web` being SABR-only means the token is exactly what SABR requires.** The problems are
+one chain, not two:
+
+```
+BotGuard mint fails (snapshot pushes nothing)
+   -> no attested token
+   -> SABR refused server-side (STREAM_PROTECTION_STATUS status=3)
+   -> web-family URLs unusable
+   -> the only non-SABR clients left are ANDROID_VR/IOS, whose googlevideo URLs 403
+   -> muxed itag 18 is the only thing served, and it is windowed to 54s of 216s
+```
+
+**Nothing else is worth doing first.** The mint was deprioritised for several versions on
+the reasoning that the ladder had other rungs to try; that was wrong, and it was wrong
+by reasoning from the ladder's *symptoms* instead of testing the one path the ladder
+could not reach. If you find yourself proposing a fifth client, a different itag, or a
+new retry policy — stop and read this section.
+
+Also settled: **a user-supplied token from Settings only helps if it was
+BotGuard-minted.** A cold-start token, however it is obtained, does not satisfy status 3.
+`pot_scope.js` still correctly passes user tokens through untouched, but "the user can
+paste a token" is **not** the shortcut it appeared to be.
+
+### 4.7.5 Root cause of the mint failure, and the fix (⚠️ second-hand — verify before shipping)
+
+Reported by `@audit` (2026-09-29) from **LuanRT/BgUtils#44**; not yet verified by us in
+this repo. **Confidence: read-from-source for the mechanism's inputs, inferred for us.**
+
+**Mechanism:** YouTube now binds the initial attestation challenge to
+`yt.config_.EVENT_ID`. A challenge fetched from `/att/get` is therefore stale, and a token
+minted from it is silently rejected.
+
+**The fix** (per BgUtils#44): fetch `https://www.youtube.com`, extract **both** `ytcfg`
+and the `window.ytAtN` challenge from that single page, inject
+`globalThis.yt = {config_: ytcfg}` so the BotGuard VM can read `EVENT_ID`, and use the
+page-extracted challenge for the snapshot. Fall back to the `tv_config` challenge
+(needs no `EVENT_ID`) if the homepage fetch fails.
+
+**Independently confirmed by me from the live homepage** (so the fix's inputs are real,
+not just plausible):
+
+```
+homepage bytes: 880017
+ytcfg EVENT_ID  -> "qa67avHgFvzYjuMP672WuA4"
+ytAtN           -> present
+"/att/get"      -> not referenced on the page at all
+```
+
+Corroborating projects reported to have applied the same fix: `bgutil-ytdlp-pot-provider`
+#243, FreeTube #9584, starwave `cde6f86`, Moombox `1513c1f`.
+
+**Still unverified, and it matters:** (a) whether the fix works on a residential Indian
+ISP line, which is our actual target and which nobody can confirm without a device;
+(b) whether our specific `PMD:Undefined` / empty-`webPoSignalOutput` symptom shares this
+root cause or is a *separate* VM-environment problem. Our symptom is a hard failure
+(`settleGrew=false`, array length 0 after 609ms, snapshot returns a real 3160-char
+string), whereas the starwave report describes a *silent* rejection — so these may be two
+bugs, not one. **Test the fix and keep both hypotheses alive.**
+
+### 4.7.6 Two traps in the tooling
+
+- **`getInfo(videoId, 'CLIENT_NAME')` ignores the string argument.** `ANDROID_VR`, `IOS`, `TV` and `WEB_SAFARI` all returned an identical 28 formats. An early pass of this investigation wrongly concluded from that output that the web family resolves on the dev box. Use real Client objects (`it.createClient({...})`) for per-client work; per-client numbers from a string argument are meaningless.
+- **The npm package named `bgutils` is not ours.** `registry.npmjs.org/bgutils` is at `1.0.5`, last published **2019-07-16**, and is an unrelated project. Ours is **LuanRT/BgUtils**, vendored at **4.0.3** (`ui/js/modules/po_token.js:3`).
+
+---
+
 ## 5. Testing
 
 ### Running Tests
@@ -341,6 +483,48 @@ bash scripts/android/run_emulator_test.sh            # drives scripts/android/e2
 > **Do not measure a gate through a pipe.** `cargo fmt --check | head; echo $?` reports `head`'s exit code, not rustfmt's, and I reported a formatting violation as clean that way for one turn. Redirect to a file, or drop the pipe.
 >
 > **The bare-`rustc` extraction harness is now a fallback, not the only option.** Keep using it for pure logic where a real `cargo test` needs a device or a network, but it verifies *logic*, not *compilation* — two of the four errors that kept v2.6.59/v2.6.60 red were in code no harness touched, and both were compile errors a one-second `cargo check` finds.
+
+### The dev box is on the same residential line as the phone (2026-09-29) — this changes what is testable
+
+**The single most useful discovery in this project's testing history.** The network that
+refuses our downloads is reproducible from the dev box, so YouTube work no longer needs a
+device round-trip to iterate on. Verified first-hand, not inferred from "it seemed to work":
+
+```
+ipinfo.io    -> 152.58.59.240   AS55836 Reliance Jio Infocomm Limited   Bhopal, IN
+phone report -> 2409:40c4:f9ab:20c:88e5:d5d6:54d0:d75b
+URLs YouTube hands THIS BOX carry
+              ip=2409%3A40c4%3Af9%3Ab20c%3A88e5%3Ad5d6%3A54d0%3Ad75b   <- the phone's address
+```
+
+**The vendored `youtubei.js` runs under node**, using the shims already committed in
+`ui/vendor/` (`process.mjs`, `events.mjs`, `async_hooks.mjs`, `tty.mjs`) — no bundler:
+
+```js
+// scratch dir = a copy of ui/vendor/ plus a package.json containing {"type":"module"}
+const { Innertube, UniversalCache } = await import('./vendor/youtubei.esm.mjs');
+const it = await Innertube.create({ retrieve_player: true, generate_session_locally: true,
+  cache: new UniversalCache(false), fetch: globalThis.fetch });
+const info = await it.getInfo('yF9nmg_jHNs');
+// -> playability_status OK, 28 adaptive formats, streaming_data.server_abr_streaming_url
+// -> it.session.player.signature_timestamp === 20719   (player script fetched, nsig extracted)
+```
+
+Gotchas, each of which cost at least one run:
+
+- **`Platform.shim.eval = async (d) => new Function(d.output)()`** is required for the player script. Without it `decipher` throws *"you must provide your own JavaScript evaluator"*.
+- **`await stream.start(...)`** — it is async. Omitting the `await` does not throw; it silently yields `{}` for the selected formats, which reads like "no audio found" rather than like a bug.
+- **The scratch dir needs `{"type":"module"}`.** The repo-root `package.json` has no `type`, so `node --check` on any `ui/js/**/*.js` fails with `Unexpected token 'export'`. That is a **harness artifact, not a syntax error** — it has been misread as a real failure more than once. Give the scratch dir its own `package.json` and leave the repo's untouched.
+- **There is no package manager on this box** — no `npm`, `pnpm`, `yarn` or `bun`. Fetch tarballs directly: `curl -sL <registry tarball> | tar xz -C <pkg> --strip-components=1`. That is how the SABR reference implementation was obtained.
+- **The audio formats are SABR-only** — `typeof format.url === 'undefined'` and `decipher()` returns undefined. Do not conclude from a node run that "the URLs work".
+- **`start()`/`getInfo` need a real client object to switch clients** — see §4.7.6.
+
+**The SABR reference implementation is available for experiments:** `googlevideo@4.1.1` from
+the npm registry, whose only dependency is `@bufbuild/protobuf`. Run this way it reproduced
+the server's `STREAM_PROTECTION_STATUS status=3` refusal locally, which is how §4.7.3 was
+established without a device. Vendoring the minimal subset into `ui/vendor/` is the eventual
+shipping path — but **do not vendor it before the token works**; see §4.7.4 for why the
+transport is worthless without one.
 
 ### Test Coverage
 
