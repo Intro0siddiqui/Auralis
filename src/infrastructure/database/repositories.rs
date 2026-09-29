@@ -149,27 +149,49 @@ impl SqliteTrackRepository {
 /// ever re-enable prefix optimization for `term.len() > 2`, it would be:
 /// `title LIKE 'term%' OR title LIKE '%term%'` with a `UNION` or `OR` — not
 /// done here to avoid surprising results.
+/// Escape user input for use inside a SQL `LIKE` pattern.
+///
+/// `%`, `_`, and the escape character itself are prefixed with `\`, so a
+/// search for `50%` matches the literal string `50%` instead of acting as a
+/// wildcard. Every `LIKE` clause built from this helper must carry
+/// `ESCAPE '\'` — without it the backslashes are literal characters and the
+/// escaping silently stops working. That clause is load-bearing, not noise.
+fn escape_like_pattern(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\\' || c == '%' || c == '_' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn track_filter_where(filter: &TrackFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut sql = String::from("WHERE 1=1");
     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(search) = &filter.search {
         // Leading `%` defeats index — see doc comment above. No migration now.
-        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
-        let pattern = format!("%{}%", search);
+        // `ESCAPE '\'` pairs with `escape_like_pattern`: it is what makes the
+        // backslash an escape character rather than a literal. Do not drop it.
+        sql.push_str(
+            " AND (title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\' OR album LIKE ? ESCAPE '\\')",
+        );
+        let pattern = format!("%{}%", escape_like_pattern(search));
         params_vec.push(Box::new(pattern.clone()));
         params_vec.push(Box::new(pattern.clone()));
         params_vec.push(Box::new(pattern));
     }
 
     if let Some(artist) = &filter.artist {
-        sql.push_str(" AND artist LIKE ?");
-        params_vec.push(Box::new(format!("%{}%", artist)));
+        sql.push_str(" AND artist LIKE ? ESCAPE '\\'");
+        params_vec.push(Box::new(format!("%{}%", escape_like_pattern(artist))));
     }
 
     if let Some(album) = &filter.album {
-        sql.push_str(" AND album LIKE ?");
-        params_vec.push(Box::new(format!("%{}%", album)));
+        sql.push_str(" AND album LIKE ? ESCAPE '\\'");
+        params_vec.push(Box::new(format!("%{}%", escape_like_pattern(album))));
     }
 
     if filter.downloaded_only {
@@ -1228,6 +1250,73 @@ pub fn parse_format(s: &str) -> AudioFormat {
     }
 }
 
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_format_valid() {
+        assert_eq!(parse_format("mp3"), AudioFormat::Mp3);
+        assert_eq!(parse_format("flac"), AudioFormat::Flac);
+        assert_eq!(parse_format("aac"), AudioFormat::Aac);
+        assert_eq!(parse_format("ogg"), AudioFormat::Ogg);
+        assert_eq!(parse_format("oga"), AudioFormat::Ogg);
+        assert_eq!(parse_format("wav"), AudioFormat::Wav);
+        assert_eq!(parse_format("m4a"), AudioFormat::M4a);
+        assert_eq!(parse_format("mp4"), AudioFormat::M4a);
+        assert_eq!(parse_format("opus"), AudioFormat::Opus);
+        assert_eq!(parse_format("webm"), AudioFormat::Webm);
+    }
+
+    #[test]
+    fn test_parse_format_case_insensitive() {
+        assert_eq!(parse_format("MP3"), AudioFormat::Mp3);
+        assert_eq!(parse_format("FLAC"), AudioFormat::Flac);
+        assert_eq!(parse_format("M4A"), AudioFormat::M4a);
+        assert_eq!(parse_format("Opus"), AudioFormat::Opus);
+        assert_eq!(parse_format("WEBM"), AudioFormat::Webm);
+    }
+
+    #[test]
+    fn test_parse_format_invalid_defaults_to_mp3() {
+        assert_eq!(parse_format("txt"), AudioFormat::Mp3);
+        assert_eq!(parse_format(""), AudioFormat::Mp3);
+        assert_eq!(parse_format("unknown"), AudioFormat::Mp3);
+        assert_eq!(parse_format("jpg"), AudioFormat::Mp3);
+    }
+
+    #[test]
+    fn test_parse_datetime_valid() {
+        let dt = parse_datetime("2026-09-29T12:30:00Z");
+        assert_eq!(dt.timestamp(), 1790685000);
+
+        let dt = parse_datetime("2026-01-01T00:00:00+00:00");
+        assert_eq!(dt.timestamp(), 1767225600);
+
+        let dt = parse_datetime("2026-06-15T08:00:00+05:30");
+        assert_eq!(dt.timestamp(), 1781490600);
+    }
+
+    #[test]
+    fn test_parse_datetime_invalid_returns_now() {
+        // Invalid date strings should return a timestamp close to now
+        let before = Utc::now().timestamp();
+        let dt = parse_datetime("not-a-date");
+        let after = Utc::now().timestamp();
+
+        assert!(dt.timestamp() >= before);
+        assert!(dt.timestamp() <= after);
+
+        let dt = parse_datetime("");
+        assert!(dt.timestamp() >= before);
+        assert!(dt.timestamp() <= after);
+
+        let dt = parse_datetime("2026-13-45T99:99:99Z");
+        assert!(dt.timestamp() >= before);
+        assert!(dt.timestamp() <= after);
+    }
+}
+
 pub fn parse_datetime(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -1237,6 +1326,51 @@ pub fn parse_datetime(s: &str) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_escape_like_pattern_treats_wildcards_literally() {
+        assert_eq!(escape_like_pattern("plain"), "plain");
+        assert_eq!(escape_like_pattern("50%"), "50\\%");
+        assert_eq!(escape_like_pattern("a_b"), "a\\_b");
+        assert_eq!(escape_like_pattern("back\\slash"), "back\\\\slash");
+        assert_eq!(escape_like_pattern("%_%"), "\\%\\_\\%");
+    }
+
+    #[tokio::test]
+    async fn test_search_wildcards_match_literally() {
+        // Behaviour change, asserted as literal interpretation: a user typing
+        // `%` means the character, not "match anything".
+        let db_path =
+            std::env::temp_dir().join(format!("test_auralis_repo_like_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+        let repo = SqliteTrackRepository::new(Arc::new(db));
+
+        let literal = Track::new(
+            "50% off".to_string(),
+            "/path/to/percent.mp3".to_string(),
+            200,
+            AudioFormat::Mp3,
+        );
+        repo.insert(&literal).await.unwrap();
+        let other = Track::new(
+            "50X off".to_string(),
+            "/path/to/other.mp3".to_string(),
+            200,
+            AudioFormat::Mp3,
+        );
+        repo.insert(&other).await.unwrap();
+
+        let filter = TrackFilter {
+            search: Some("50%".to_string()),
+            ..Default::default()
+        };
+        let found = repo.find_all(filter).await.unwrap();
+        assert_eq!(found.len(), 1, "only the literal `%` title must match");
+        assert_eq!(found[0].title, "50% off");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 
     #[tokio::test]
     async fn test_track_repository_crud() {
