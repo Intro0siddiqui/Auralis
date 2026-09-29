@@ -2096,10 +2096,10 @@ mod tests {
         assert!(html.contains("Next Up (1)"));
         assert!(html.contains("Now Playing"));
         assert!(html.contains("Rock &lt;&amp;&gt; Roll &quot;Live&quot; &#39;26"));
-        assert!(html.contains("AC/&lt;DC&gt; &amp; Friends"));
+        assert!(html.contains("AC&#x2F;&lt;DC&gt; &amp; Friends"));
         assert!(html.contains("3:25"));
         assert!(html.contains("1:05"));
-        assert!(html.contains("Thunderstruck &lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("Thunderstruck &lt;script&gt;alert(1)&lt;&#x2F;script&gt;"));
         assert!(html.contains("Artist &amp; Co"));
         assert!(html.contains(&format!(
             "window.Auralis.bridge.removeFromQueue('{}')",

@@ -617,12 +617,20 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
 }
 
 /// Escape HTML special characters for safe insertion into HTML strings.
+///
+/// Covers the five characters that matter in double-quoted attribute and
+/// text contexts (`& < > " '`), plus backtick and forward slash as
+/// defense-in-depth for unquoted-attribute and inline-JS contexts. The
+/// current call sites only use double-quoted attributes, where the first
+/// five suffice — the last two are hardening, not a vulnerability fix.
 pub(crate) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+        .replace('`', "&#96;")
+        .replace('/', "&#x2F;")
 }
 
 /// Format duration in seconds as M:SS.
@@ -1157,12 +1165,25 @@ mod tests {
     }
 
     #[test]
+    fn test_html_escape_hardening() {
+        // The five context-critical characters plus backtick/slash hardening.
+        // `&#x2F;` decodes to `/` in browsers, so escaped paths render identically.
+        assert_eq!(html_escape("&<>\"'"), "&amp;&lt;&gt;&quot;&#39;");
+        assert_eq!(html_escape("`"), "&#96;");
+        assert_eq!(
+            html_escape("/path/to/art.jpg"),
+            "&#x2F;path&#x2F;to&#x2F;art.jpg"
+        );
+        assert_eq!(html_escape("plain"), "plain");
+    }
+
+    #[test]
     fn test_render_art_tag() {
         let empty_tag = render_art_tag(None, "Album", "disc-3");
         assert_eq!(empty_tag, r#"<i data-lucide="disc-3"></i>"#);
 
         let img_tag = render_art_tag(Some("/path/to/art.jpg"), "My Album", "disc-3");
-        assert!(img_tag.contains(r#"src="/path/to/art.jpg""#));
+        assert!(img_tag.contains(r#"src="&#x2F;path&#x2F;to&#x2F;art.jpg""#));
         assert!(img_tag.contains(r#"alt="My Album""#));
         assert!(img_tag.contains("embedArt"));
     }
@@ -1199,8 +1220,8 @@ mod tests {
             false,
         );
         assert!(!html.contains("<script>"));
-        assert!(html.contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"));
-        assert!(html.contains("AC/DC &amp; Friends &quot;Rock&#39;n&#39;Roll&quot;"));
+        assert!(html.contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;&#x2F;script&gt;"));
+        assert!(html.contains("AC&#x2F;DC &amp; Friends &quot;Rock&#39;n&#39;Roll&quot;"));
         assert!(html.contains("Back in Black &gt; White"));
         assert!(html.contains("3:05"));
         assert!(!html.contains("liked"));
