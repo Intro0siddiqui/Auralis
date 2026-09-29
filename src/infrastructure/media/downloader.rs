@@ -4332,11 +4332,47 @@ mod tests {
 
     #[test]
     fn test_sanitize_filename_unicode_boundary() {
+        // The cap is 246 BYTES, not characters: 255 NAME_MAX − 8 for the longest
+        // extension we allow − 1 for the dot. A char-based limit let a 200-char
+        // CJK title reach ~600 bytes and fail the OS with ENAMETOOLONG, so
+        // `sanitize_filename` now truncates on a char boundary at a byte budget.
+        //
+        // This test asserted 200 *characters* and had been failing since that
+        // change landed — which is one of the reasons build-linux stayed red.
+        // 246 / 2 bytes per 'é' is exactly 123 characters, so assert the byte
+        // budget and the boundary, and let the character count follow from it
+        // rather than being a second number that can drift.
         let name = "é".repeat(201);
         let sanitized = sanitize_filename(&name);
 
-        assert_eq!(sanitized.chars().count(), 200);
+        assert!(
+            sanitized.len() <= 246,
+            "must fit the byte budget, got {} bytes",
+            sanitized.len()
+        );
+        assert_eq!(
+            sanitized.chars().count(),
+            123,
+            "246 bytes of 2-byte 'é' is 123 characters"
+        );
         assert!(!sanitized.is_empty());
+
+        // The point of walking back to a boundary: the result must still be valid
+        // UTF-8 and must not end in a replacement or partial scalar. This is the
+        // case the old `String::truncate(200)` PANICKED on.
+        assert!(
+            std::str::from_utf8(sanitized.as_bytes()).is_ok(),
+            "a truncated multibyte name must stay valid UTF-8"
+        );
+
+        // A 3-byte scalar must land on a boundary too, not merely not panic.
+        let cjk = "字".repeat(200);
+        let cut = sanitize_filename(&cjk);
+        assert!(
+            cut.len() <= 246,
+            "3-byte scalars must also respect the budget"
+        );
+        assert!(std::str::from_utf8(cut.as_bytes()).is_ok());
     }
 
     #[test]

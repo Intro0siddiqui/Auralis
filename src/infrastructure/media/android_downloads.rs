@@ -1161,13 +1161,19 @@ fn publish_q<'local>(
     }
 }
 
-#[cfg(target_os = "android")]
-const REMOVED_MSG: &str = "MediaStore copy of '{name}' (api {api}) was not published because {reason}; the pending row {id} was removed";
-#[cfg(target_os = "android")]
-const UNRESOLVED_MSG: &str = "MediaStore copy of '{name}' (api {api}) was not published because {reason}; the pending row {id} could NOT be deleted and is still invisible at {uri}";
-
 /// One-line summary of what happened to a row that never became visible, used
 /// as the error the caller (and its `warn!`) reports.
+///
+/// The two templates are inline literals with `\` continuations, deliberately
+/// NOT hoisted to `const`s. They used to be, and that does not compile:
+/// `format!` requires a string *literal* as its template, and a `const &str` is
+/// not one. Newer rustc enforces this ("format argument must be a string
+/// literal"); the local 1.98.1 does not, which is how it survived to break
+/// `build-android` and `check-android` while `build-linux` compiled the same
+/// file as dead code. Hoisting was tried in v2.6.57 to shorten these lines, and
+/// the consts are the reason this function was the last one outside the fmt
+/// gate — the literal has to live here either way, and a `\` continuation lets
+/// rustfmt format the surrounding call.
 #[cfg(target_os = "android")]
 fn unresolved_note(row: &PendingRow<'_>, outcome: PendingOutcome, reason: &str) -> String {
     match outcome {
@@ -1178,14 +1184,16 @@ fn unresolved_note(row: &PendingRow<'_>, outcome: PendingOutcome, reason: &str) 
             )
         }
         PendingOutcome::Removed => format!(
-            REMOVED_MSG,
+            "MediaStore copy of '{name}' (api {api}) was not published because {reason}; \
+             the pending row {id} was removed",
             name = row.display_name,
             api = row.api,
             reason = reason,
             id = row.id,
         ),
         PendingOutcome::Unresolved => format!(
-            UNRESOLVED_MSG,
+            "MediaStore copy of '{name}' (api {api}) was not published because {reason}; \
+             the pending row {id} could NOT be deleted and is still invisible at {uri}",
             name = row.display_name,
             api = row.api,
             reason = reason,

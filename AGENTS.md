@@ -196,9 +196,13 @@ Notes from the audit/upgrade pass:
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 ```
-(Note: this dev machine is **Void Linux (aarch64) under proot in Termux**. The toolchain is **cargo/rustc 1.63**, and **`cargo check` no longer works at all**: `Cargo.lock` is version `4`, which cargo 1.63 refuses to parse (`lock file version 4 was found, but this version of Cargo does not understand it`). So there is **no whole-crate local verification of any kind** — not check, not clippy, not test. `cargo build` additionally hits the missing `webkit2gtk-4.1`, and test binaries fail with a `__stack_chk_guard` DSO error from ring (proot loader layout).)
+(Note: this dev machine is **Void Linux (aarch64) under proot in Termux**. The toolchain is `rustc`/`cargo` **1.98.1**, installed via rustup and pinned into `/usr/local/bin` so a plain shell gets it: `rustfmt` 1.9.0-stable and `clippy` 0.1.98 come with it. The GTK/WebKit/ALSA dev headers Tauri and rodio need at build-script time are installed too (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libasound2-dev`, `librsvg2-dev`, `libayatana-appindicator3-dev`). `cargo check --all-targets`, `clippy -D warnings`, `cargo fmt --check` and `cargo test --lib` all work — see §5.
 
-**What *is* available locally: `rustc` 1.63 on its own.** It compiles a standalone file with no external crates, which is enough to verify pure logic by **extracting the functions and their tests verbatim** from the real source and compiling them with `rustc --test` against stubbed collaborators. The extraction must be byte-identical or a mutation is a mutation of the copy rather than of the shipped code — one regression test here passed for two versions because it asserted against its own reimplementation. This is the only local Rust verification available, and it caught a shipped bug (a copy button calling `writeText(undefined)`) the moment it was built. Prefer it over reasoning about whether a test "would" pass. `rustfmt --edition 2021` also works, and is 1.63 — older than CI's stable, see the CI-only failure modes above.
+Two residual gaps. **Android code**: the NDK's Linux host toolchain is x86_64 and this box is aarch64 with no `binfmt_misc`, so `cargo check --target aarch64-linux-android` cannot run here; only the `check-android` CI job compiles `cfg(target_os = "android")`. **E2E**: needs a display or a device.
+
+**CI's `stable` floats and yours is dated.** `dtolnay/rust-toolchain@stable` resolves to whatever is current at run time; this box is pinned to 2026-09-01. A newer CI compiler accepted `format!(SOME_CONST, ..)` — a `const &str` is not a string literal, and only the newer one enforces that — so local `cargo check` passing did not mean CI would. The fix was to inline the literal. A `rust-toolchain.toml` would make local and CI identical by construction and is still **owed**; nobody has decided whether pinning CI's compiler is acceptable.
+
+**What *was* available when this line was last true, and is now only a fallback:** bare `rustc` 1.63 on a standalone file, which is enough to verify pure logic by **extracting the functions and their tests verbatim** from the real source and compiling them with `rustc --test` against stubbed collaborators. Keep the requirement that extraction be byte-identical — a mutation of a copy is not a mutation of the shipped code, and one regression test here passed for two versions because it asserted against its own reimplementation. That harness caught a shipped bug (a copy button calling `writeText(undefined)`) the moment it was built, and it is still the right tool for logic that needs a device or a network. But it verifies logic, not compilation, and those are not substitutes.
 
 ### 4.6 YouTube resolver — client strategy + per-client diagnostics (v2.6.43)
 
@@ -321,7 +325,22 @@ xvfb-run node scripts/tests/desktop_download_player_e2e.js  # player-seed E2E: i
 bash scripts/android/run_emulator_test.sh            # drives scripts/android/e2e_player_test.js over CDP 9222 (seeds /sdcard/Music → scan → play, WARN-only MediaStore)
 ```
 
-> **Local (proot/Termux) caveat — there is no local Rust verification of the crate.** `cargo check`/`clippy`/`test` all fail before doing any work: `Cargo.lock` is version `4` and cargo 1.63 cannot parse it. The `cargo check` advice that used to live in §4.4 is stale and has now been corrected there. What remains usable locally: **`rustfmt --edition 2021`**, **bare `rustc --test` on functions extracted verbatim from the real source** (the only way to check Rust logic here — see §4.4), and `node --check` / `node --test` for the frontend. Everything else is CI.
+> **Local (proot/Termux) caveat — the whole crate is verifiable locally now.** The old blockers are gone: the toolchain is `rustc`/`cargo` **1.98.1** with `rustfmt` 1.9.0-stable and `clippy` 0.1.98 (pinned in `/usr/local/bin`), `Cargo.lock` v4 parses, and `libwebkit2gtk-4.1-dev` / `libgtk-3-dev` / `libasound2-dev` / `librsvg2-dev` / `libayatana-appindicator3-dev` are installed. All four of CI's host gates run here:
+>
+> ```bash
+> cargo check --all-targets
+> cargo clippy --all-targets --all-features -- -D warnings
+> cargo fmt --all -- --check          # SAME rustfmt as CI
+> cargo test --lib                    # 192 tests, ~5s — the proot __stack_chk_guard
+>                                     # link failure is gone with the new toolchain
+> node --test scripts/tests/*.test.js # 179 tests
+> ```
+>
+> Two things remain CI-only. **`cfg(target_os = "android")` code**: the NDK's Linux host toolchain is x86_64 (quotable from our own workflow, which hardcodes `prebuilt/linux-x86_64/bin`) and this box is aarch64 with no `binfmt_misc`, so it cannot execute it. **E2E**: needs a display or a device.
+>
+> **Do not measure a gate through a pipe.** `cargo fmt --check | head; echo $?` reports `head`'s exit code, not rustfmt's, and I reported a formatting violation as clean that way for one turn. Redirect to a file, or drop the pipe.
+>
+> **The bare-`rustc` extraction harness is now a fallback, not the only option.** Keep using it for pure logic where a real `cargo test` needs a device or a network, but it verifies *logic*, not *compilation* — two of the four errors that kept v2.6.59/v2.6.60 red were in code no harness touched, and both were compile errors a one-second `cargo check` finds.
 
 ### Test Coverage
 
