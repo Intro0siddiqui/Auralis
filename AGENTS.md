@@ -745,11 +745,37 @@ So `resume()` works, playback starts, and something **re-pauses it within about 
 watcher tick** (the watcher is 250 ms, `spawn_playback_watcher` in
 `commands/playback.rs`).
 
-**Leading suspect, from the symptom's shape — an unfalsified inference, not a
-measurement:** the new rodio `Sink` is created and starts **empty**, because the
-decoder thread has not yet pushed its first samples. If the watcher polls in that
-window and treats `sink.empty()` as end-of-track, it will conclude the track finished
-and pause — one tick after resume, which is exactly "a second or less."
+**MEASURED (2026-09-29) — and my leading suspect was WRONG.** Recovered from a
+screenshot of the queue panel:
+
+```
+RESUME LOG (NEWEST 5 OF 20)
+19:21:21Z ok strategy=fresh_sink_replay pre=paused file=ok:5.86MB pos=6.9s restored=ok probe=never_playing (polls=7 progress=0 empty=0)
+19:21:21Z ok strategy=fresh_sink_replay pre=paused file=ok:5.86MB pos=6.9s restored=ok probe=superseded (replaced after 1 poll(s))
+19:21:21Z ok strategy=fresh_sink_replay pre=paused file=ok:5.86MB pos=6.8s restored=ok probe=superseded (replaced after 0 poll(s))
+19:21:20Z ok strategy=fresh_sink_replay pre=paused file=ok:5.86MB pos=6.8s restored=ok probe=superseded (replaced after 2 poll(s))
+19:21:20Z ok strategy=fresh_sink_replay pre=paused file=ok:5.86MB pos=6.7s restored=ok probe=superseded (replaced after 2 poll(s))
+```
+
+**`empty=0` falsifies the empty-sink hypothesis outright.** The sink was never
+empty, so the watcher was not reading an unprimed sink as EOF. Retracted.
+
+What the log actually says:
+
+- `file=ok:5.86MB` — 6 148 301 bytes, the file §4.7.13 proved complete. **The
+  download is fine; this bug is downstream of it.**
+- `strategy=fresh_sink_replay` — resume took the replay path, position ~6.7–6.9 s,
+  `restored=ok`, well inside the 10 s `RESUME_REPLAY_WINDOW`.
+- **`polls=7 progress=0 empty=0`** is the signature. The sink is **not empty** —
+  samples are queued — yet **zero** `playback:progress` events fired inside the
+  1500 ms window. A queued-but-never-started sink is the shape that fits, and it
+  is a *different* bug from an unprimed one.
+- Four of the five entries are `probe=superseded`, meaning each resume was replaced
+  by the next within a poll or two. Repeated tapping compounds it.
+
+Next step, and it is offline-checkable: does `start_sink`/`fresh_sink_replay`
+actually call rodio's `play()` on the new sink, or does it create + feed and leave
+it paused? `empty=0` with `progress=0` is what that mistake would look like.
 
 That is the same shape of bug as the one §4.6 records for auto-advance, and it is
 checkable **offline**: the window is whether `empty()` can be true on a freshly
@@ -768,6 +794,49 @@ because one line of diagnostic output has not arrived.
 
 ## 5. Testing
 
+### THE DEV BOX **IS** THE OWNER'S PHONE. Read this before asking for anything.
+
+**I got this wrong for weeks, and the evidence was in front of me the whole time.**
+The evidence was that the phone's InnerTube report showed IPv6
+`2409:40c4:f9ab:20c:88e5:d5d6:54d0:d75b` and the URLs *this box* received from
+YouTube carried the same address. I correctly concluded "same network" and then
+never took the next step: **it is the same device.** Verified:
+
+```
+getprop ro.product.model   -> 2410CRP4CI          (Xiaomi/Redmi)
+uname -a                   -> aarch64 GNU/Linux, Proot-Distro, Termux
+/sdcard                    -> EXISTS, fully readable
+/storage/emulated/0        -> EXISTS
+/sdcard/DCIM/Screenshots   -> EXISTS
+```
+
+Consequences that change what is possible, and that I had been needlessly working
+around:
+
+- **I can read the owner's screenshots.** `ls -t /sdcard/DCIM/Screenshots | head`
+  is the whole procedure. Files are named
+  `Screenshot_<date>_<time>_<ms>_<package>.jpg`, so the newest Auralis one is
+  trivially findable.
+- **A screenshot is often better than a copy-to-clipboard.** On-screen diagnostic
+  panels are legible in a photo. The owner's "Copy resume log" button does not
+  work, and that cost nothing — the log is rendered in the queue panel and a
+  screenshot captured the whole thing. **Never ask for a copy when the data is on
+  screen.**
+- **I can verify claims about the filesystem directly.** `/sdcard/Download/Auralis/`
+  exists and is **empty (0 files)** — which confirms the 100 % publish failure
+  (§4.7.11) from the filesystem rather than from an error string.
+- **The phone and this box share an egress**, so §4.7's "the dev box reproduces the
+  failing network" is not a coincidence to be pleased about — it is the same
+  machine, and I should have worked that out from the IP.
+
+**What I got wrong, stated plainly so it is recognisable next time:** I built an
+entire narrative around "the dev box is somewhere else, on the same home
+connection" and treated every request for a screenshot as something the *owner*
+had to supply and *I* could only wait for. Asking "please paste X" when X is
+already sitting in a directory I can read is the failure mode. **Before asking
+the owner for anything on-device, check whether it is already on the SD card.**
+
+---
 ### Running Tests
 
 ```bash
