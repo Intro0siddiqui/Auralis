@@ -409,7 +409,13 @@ BotGuard-minted.** A cold-start token, however it is obtained, does not satisfy 
 `pot_scope.js` still correctly passes user tokens through untouched, but "the user can
 paste a token" is **not** the shortcut it appeared to be.
 
-### 4.7.5 Root cause of the mint failure, and the fix (⚠️ second-hand — verify before shipping)
+### 4.7.5 Root cause of the mint failure, and the fix (⚠️⚠️ **FALSIFIED — see §4.7.6. Kept for the record, do not act on it.**)
+
+> **SUPERSEDED — this whole subsection is falsified.** We implemented the fix, measured
+> it, and it does not work: a different program from a different, fresher challenge
+> source also pushes nothing (`DOWNLOADS.md` §6.3). The fix is real for the symptom it
+> was written for; it is not our symptom. Retained because the belief existed and
+> looked well-cited, which is exactly why it needs to stay visible.
 
 Reported by `@audit` (2026-09-29) from **LuanRT/BgUtils#44**; not yet verified by us in
 this repo. **Confidence: read-from-source for the mechanism's inputs, inferred for us.**
@@ -500,7 +506,7 @@ Patch both transports because we do not know which the player uses, and a null w
 cannot interpret is what cost us the previous fortnight. On `visitor_data`, take the
 **page's** value and adopt it downstream rather than trying to impose ours.
 
-### 4.7.6 Two traps in the tooling
+### 4.7.8 Two traps in the tooling
 
 - **`getInfo(videoId, 'CLIENT_NAME')` ignores the string argument.** `ANDROID_VR`, `IOS`, `TV` and `WEB_SAFARI` all returned an identical 28 formats. An early pass of this investigation wrongly concluded from that output that the web family resolves on the dev box. Use real Client objects (`it.createClient({...})`) for per-client work; per-client numbers from a string argument are meaningless.
 - **The npm package named `bgutils` is not ours.** `registry.npmjs.org/bgutils` is at `1.0.5`, last published **2019-07-16**, and is an unrelated project. Ours is **LuanRT/BgUtils**, vendored at **4.0.3** (`ui/js/modules/po_token.js:3`).
@@ -572,7 +578,7 @@ Gotchas, each of which cost at least one run:
 - **The scratch dir needs `{"type":"module"}`.** The repo-root `package.json` has no `type`, so `node --check` on any `ui/js/**/*.js` fails with `Unexpected token 'export'`. That is a **harness artifact, not a syntax error** — it has been misread as a real failure more than once. Give the scratch dir its own `package.json` and leave the repo's untouched.
 - **There is no package manager on this box** — no `npm`, `pnpm`, `yarn` or `bun`. Fetch tarballs directly: `curl -sL <registry tarball> | tar xz -C <pkg> --strip-components=1`. That is how the SABR reference implementation was obtained.
 - **The audio formats are SABR-only** — `typeof format.url === 'undefined'` and `decipher()` returns undefined. Do not conclude from a node run that "the URLs work".
-- **`start()`/`getInfo` need a real client object to switch clients** — see §4.7.6.
+- **`start()`/`getInfo` need a real client object to switch clients** — see §4.7.8.
 
 **The SABR reference implementation is available for experiments:** `googlevideo@4.1.1` from
 the npm registry, whose only dependency is `@bufbuild/protobuf`. Run this way it reproduced
