@@ -75,6 +75,43 @@ ui/
 - **State is managed via Tauri's `manage()`** — `Database`, `AudioPlayer`, `Settings`, `SyncService`, `Discovery`, `SyncEngine` are registered in the setup hook.
 - **`#[allow(dead_code)]` is used** in service structs for fields reserved for future use — do not remove without understanding the intent.
 
+### Evidence rule: a working example outranks a theory
+
+**This is the rule I break most, and the one this file keeps needing to restate.**
+
+The owner reported at **v2.6.41** that *"some videos download and some don't."*
+That was true then, it is true now, and **I did not write it down or ask about
+it** for roughly twenty releases. In the meantime I framed the download failure as
+**absolute**, built §4.6's entire client-ordering strategy on that framing, and
+generated theory after theory to explain a total failure that was never total.
+The information was available the whole time and simply was not in this file.
+
+**So, stated as a rule rather than a lesson:**
+
+> **A working case next to a failing case is worth more than any amount of
+> theorising, because the difference between them _is_ the answer.** When you have
+> one of each, diff them before you form a hypothesis — do not reason first and
+> look later.
+
+Concretely, this means:
+
+- **Partial success is data, not noise.** "It works sometimes" is a strong
+  constraint, not a footnote. Never round it up to "it does not work."
+- **Before proposing a root cause, ask what the successful cases have in common.**
+  Not after. If you cannot, you do not yet understand the problem.
+- **"Unknown" beats a confident total.** An honest *"we have a working case and a
+  failing case and have not compared them"* is more useful than a unified
+  explanation of a failure mode that is only sometimes true.
+- **The cost of forgetting a stated fact is not zero.** When the owner corrects
+  you, write the correction into this file **in the same turn**. Correcting it
+  only in conversation means the next session repeats the mistake, and that is
+  exactly what happened here.
+
+This sits in Key Conventions rather than in the download section on purpose: the
+failure mode is not download-specific. It is that a fact stated once, in
+conversation, without a home in this file, disappears — and then gets
+rediscovered as a false premise.
+
 ---
 
 ## 3. Implementation Roadmap
@@ -538,10 +575,14 @@ made to work — it is wiring up something the device is already proven to do.**
 That is the strongest statement in this document, and the one most likely to be
 forgotten, which is why it is a numbered section and not a footnote.
 
-**Second fact from the same conversation, also easily forgotten: downloads are
-not uniformly broken.** The owner reports that **some videos download
-successfully and some do not.** Any framing that treats this as an absolute
-failure is wrong, and this document has been wrong in that way more than once.
+**Second fact, and the one this file failed hardest on: downloads are not
+uniformly broken.** The owner reported this at **v2.6.41** — *"some videos
+download and some don't"* — and it was **never written into this file**. For
+the ~20 releases since, the failure was written up as absolute and the client
+order in §4.6 was designed around that. The fact was available the whole time.
+Any framing that treats this as an absolute failure is wrong, and this document
+has been wrong in that way repeatedly. See **Evidence rule: a working example
+outranks a theory** in §2.
 Partial success is the most valuable diagnostic asset we have: a working case
 beside a failing one *is* the answer, because the difference between them is the
 variable. A plausible, untested reading — a token is sometimes obtained, and the
