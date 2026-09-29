@@ -7,6 +7,30 @@
 
 ---
 
+## 0a. The positive control, and the partial success
+
+Two facts that reframe everything above, both from the owner (2026-09-29), and
+both easy to forget:
+
+**1. The device already solves this, daily.** The owner watches YouTube on the
+phone that runs Auralis — same WebView, same residential Jio line, same ISP,
+logged out. That environment demonstrably obtains a valid PO token, minted by
+YouTube's own `botguard.js`, in that engine. **The WebView we are failing inside
+is provably capable.** That is a positive control, and it is why every
+"barren environment / add jsdom" theory is dead: jsdom is *less* realistic than a
+real WebView, so adopting it would be moving away from the working case.
+
+**2. Downloads are not uniformly broken.** Some videos download successfully and
+some do not. Any absolute-failure framing is wrong, and this report has been
+wrong that way more than once. A working case beside a failing one is the most
+valuable diagnostic asset available, because the difference between them is the
+variable. Untested reading: a token is sometimes obtained, and the difference is
+whether a live page in that WebView had already minted — which would make our own
+`minted-stripped` path the whole problem, and the WebView spike merely the wiring
+rather than an experiment.
+
+---
+
 ## 0. Status
 
 **Downloads do not work. The blocker is external, single, and precisely located.**
