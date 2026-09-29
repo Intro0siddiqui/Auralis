@@ -417,7 +417,7 @@ playback is interrupted"; **status 3** = "the client cannot continue fetching me
 without a valid PO token." **A cold-start token is what the client already has when
 status 2 is reported — it is not a token you can supply to satisfy status 3.**
 
-### 4.7.4 The correction: there is ONE blocker, not two
+### 4.7.4 The correction: there is ONE blocker, not two — ⚠️⚠️ **FALSIFIED, see §4.7.10. Kept for the record.**
 
 **An earlier belief in this repo was wrong and is retracted here rather than deleted.**
 §4.6 and a `@build`↔`@audit` exchange both argued the 403s and the window were
@@ -595,6 +595,82 @@ and diff it against `yF9nmg_jHNs`.**
 
 - **`getInfo(videoId, 'CLIENT_NAME')` ignores the string argument.** `ANDROID_VR`, `IOS`, `TV` and `WEB_SAFARI` all returned an identical 28 formats. An early pass of this investigation wrongly concluded from that output that the web family resolves on the dev box. Use real Client objects (`it.createClient({...})`) for per-client work; per-client numbers from a string argument are meaningless.
 - **The npm package named `bgutils` is not ours.** `registry.npmjs.org/bgutils` is at `1.0.5`, last published **2019-07-16**, and is an unrelated project. Ours is **LuanRT/BgUtils**, vendored at **4.0.3** (`ui/js/modules/po_token.js:3`).
+
+### 4.7.10 A DOWNLOAD COMPLETED WITH NO PO TOKEN — §4.7.4 is falsified (2026-09-29)
+
+**This is the most important line in this document. Read it before doing any more
+token work.**
+
+Owner report, v2.6.64, video `94WoNQyK_KY` ("Safari - Serena (Slowed+Reverb+Lyrics)"):
+
+```
+completed • rr1---sn-gwpa-civey.googlevideo.com • 100%
+saved in app storage only — /data/user/0/com.auralis.v2/downloads/Safari - Serena _Slowed_Reverb_Lyrics.mp4
+picked: itag=18 mp4 MUXED video+audio    client=ANDROID
+pot: minted-stripped ... proof=cold-start
+held pot-apply   token withheld: ANDROID is not web-family, so a Web/BotGuard token is not valid for it
+```
+
+**The whole pipeline ran** — resolve, stream, complete, tag, save — and the PO token was
+**explicitly withheld**, because `ANDROID` is not a web-family client. So this
+completed **with no token at all**, on the token-free client, via the muxed ladder rung.
+
+Consequences, in order of importance:
+
+1. **§4.7.4 is falsified by a working case.** Its claim — that the PO token is the
+   single blocker and that everything else is downstream of it — is wrong. The
+   token-free path works for at least some tracks. This is precisely the failure
+   mode **§2's "a working example outranks a theory" rule** exists to catch, and it
+   is the second time the same rule has been needed.
+2. **The WebView spike is no longer the critical path for downloads in general.**
+   It is the path for the SABR class (audio-only adaptive, which has no CDN url at
+   all). Muxed progressive works without it.
+3. **The right question is no longer "why is the token broken"** but **"why does
+   muxed itag 18 window for one track and complete for another."**
+
+### 4.7.11 The `Download/Auralis` publish is now DIAGNOSED — a concrete, 100%-reproducible defect
+
+Item 5 of the open list is closed as an *unknown* and reopened as a *known bug*:
+
+```
+publish failed: MediaStore insert failed for 'Safari - Serena _Slowed_Reverb_Lyrics.mp4' (api 36):
+  java.lang.IllegalArgumentException: Invalid column display_name
+```
+
+`COLUMN_DISPLAY_NAME` is `"display_name"` (`android_downloads.rs:58`), which **is**
+the correct string — `MediaStore.MediaColumns.DISPLAY_NAME` is `"display_name"`. The
+insert is into `MediaStore.Downloads.EXTERNAL_CONTENT_URI` with
+`IS_PENDING=1`, `MIME_TYPE` and `RELATIVE_PATH` — the documented shape.
+
+**So this is not an obvious typo, and the fix must not be guessed.** Read the actual
+MediaProvider contract for API 36 before changing anything. Two things to keep in
+mind while doing it: the file is already correctly written to app storage, so this
+is a *publish* bug and not a download bug; and `publish_q` is the API 29+ path, so
+`publish_legacy` is not implicated.
+
+**The publish fails 100% of the time on API 36.** Every download is app-storage-only
+and invisible in Files. That is the whole explanation for the long-standing mystery.
+
+### 4.7.12 The window is TRACK-SPECIFIC — the highest-value open question now
+
+Same itag, same class, same client ladder, opposite outcomes:
+
+| video | duration | muxed itag 18 outcome |
+|---|---|---|
+| `yF9nmg_jHNs` | 216.4s | windowed — 54.4s audible of a 216.3s container |
+| `94WoNQyK_KY` | unknown | **completed, 100%** |
+
+Duration is the obvious candidate — a ~60s window can only bite tracks longer than
+60s — and it is testable. **The offline diff I attempted did NOT produce a result and
+must not be reported as if it had:** resolving with `client: 'WEB'` returns **zero
+progressive formats carrying urls**, so `itag 18` was absent for all three videos.
+That is the §4.7.9 client-argument trap biting a second time, in a place I had
+already written the trap down for. The diff is still owed, and it needs a client
+that actually returns a progressive url (`ANDROID` or `ANDROID_VR` via real Client
+objects, not a string argument).
+
+Also recorded: **the owner reconfirms the pause/resume error still occurs.** No new
+diagnostic has come back with it; §4.7 open item 6 stays open on the same terms.
 
 ---
 
