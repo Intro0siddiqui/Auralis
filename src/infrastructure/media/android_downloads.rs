@@ -184,6 +184,21 @@ impl From<&str> for PublishErr {
     }
 }
 
+/// The other direction, and the one this file needs most.
+///
+/// `PublishErr` exists only to satisfy `with_local_frame`'s `E: From<Error>`
+/// bound. Every function outside the publish path's own internals still speaks
+/// `String` — it did before this type existed — and several of them call a
+/// `PublishErr`-returning helper such as `service_context` under `?`. Without
+/// this, `check-android` fails with E0277 at each of those sites, which is
+/// exactly how the first two were found.
+#[cfg(target_os = "android")]
+impl From<PublishErr> for String {
+    fn from(e: PublishErr) -> Self {
+        e.0
+    }
+}
+
 /// The `From<jni::errors::Error>` that unlocks `with_local_frame`.
 ///
 /// Only reached for errors `jni` produced but this file did not wrap itself —
@@ -820,8 +835,12 @@ fn describe_uri(env: &mut JNIEnv<'_>, uri: &JObject<'_>) -> (String, String) {
 
 #[cfg(target_os = "android")]
 fn new_content_values<'local>(env: &mut JNIEnv<'local>) -> Result<JObject<'local>, PublishErr> {
+    // `map_err` into `PublishErr`, not into a bare `String`: this function's
+    // return type is `PublishErr`, and a `String` here is E0308. The `?`-in-
+    // expression-position trap does not apply to `map_err`'s closure, so this one
+    // genuinely needs the explicit constructor.
     env.new_object("android/content/ContentValues", "()V", &[])
-        .map_err(|e| format!("new ContentValues: {e}"))
+        .map_err(|e| PublishErr(format!("new ContentValues: {e}")))
 }
 
 #[cfg(target_os = "android")]
