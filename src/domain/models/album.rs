@@ -184,6 +184,31 @@ mod tests {
     }
 
     #[test]
+    fn test_formatted_duration_edge_cases() {
+        let mut album = Album::new("Test".to_string());
+
+        // Zero duration
+        album.total_duration_secs = 0;
+        assert_eq!(album.formatted_duration(), "0 min");
+
+        // Less than a minute
+        album.total_duration_secs = 59;
+        assert_eq!(album.formatted_duration(), "0 min");
+
+        // Exactly one minute
+        album.total_duration_secs = 60;
+        assert_eq!(album.formatted_duration(), "1 min");
+
+        // Exactly one hour
+        album.total_duration_secs = 3600;
+        assert_eq!(album.formatted_duration(), "1 hr 0 min");
+
+        // Multiple hours
+        album.total_duration_secs = 7325;
+        assert_eq!(album.formatted_duration(), "2 hr 2 min");
+    }
+
+    #[test]
     fn test_album_summary() {
         let summary = AlbumSummary {
             album: "Abbey Road".to_string(),

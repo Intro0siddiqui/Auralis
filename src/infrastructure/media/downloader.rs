@@ -2710,6 +2710,49 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     // ---------------------------------------------------------------------
+    // parse_content_range_total
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_content_range_total_valid() {
+        assert_eq!(parse_content_range_total("bytes 0-99/1234"), Some(1234));
+        assert_eq!(parse_content_range_total("bytes 100-199/5000"), Some(5000));
+        assert_eq!(parse_content_range_total("bytes 0-0/1"), Some(1));
+        assert_eq!(
+            parse_content_range_total("bytes 500-600/18446744073709551615"),
+            Some(18446744073709551615)
+        );
+    }
+
+    #[test]
+    fn test_parse_content_range_total_unsatisfied() {
+        // Unsatisfied range: bytes */total
+        assert_eq!(parse_content_range_total("bytes */1234"), Some(1234));
+        assert_eq!(parse_content_range_total("bytes */0"), Some(0));
+    }
+
+    #[test]
+    fn test_parse_content_range_total_invalid() {
+        // Star total
+        assert_eq!(parse_content_range_total("bytes 0-99/*"), None);
+        assert_eq!(parse_content_range_total("bytes */*"), None);
+
+        // Empty string
+        assert_eq!(parse_content_range_total(""), None);
+
+        // No slash
+        assert_eq!(parse_content_range_total("bytes 0-99"), None);
+
+        // Non-numeric total
+        assert_eq!(parse_content_range_total("bytes 0-99/abc"), None);
+
+        // Garbage
+        assert_eq!(parse_content_range_total("garbage"), None);
+        assert_eq!(parse_content_range_total("/"), None);
+        assert_eq!(parse_content_range_total("bytes /"), None);
+    }
+
+    // ---------------------------------------------------------------------
     // Fixtures for the completeness cross-check
     // ---------------------------------------------------------------------
 

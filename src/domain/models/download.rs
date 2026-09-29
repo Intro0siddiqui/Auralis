@@ -581,4 +581,49 @@ mod tests {
         assert_eq!(format_size(1_500_000), "1.4 MB");
         assert_eq!(format_size(1_500_000_000), "1.4 GB");
     }
+
+    #[test]
+    fn test_format_size_boundaries() {
+        // Zero bytes
+        assert_eq!(format_size(0), "0 B");
+
+        // Just below 1 KB
+        assert_eq!(format_size(1023), "1023 B");
+
+        // Exactly 1 KB
+        assert_eq!(format_size(1024), "1.0 KB");
+
+        // Just above 1 KB
+        assert_eq!(format_size(1025), "1.0 KB");
+
+        // Fractional KB rounding: 1.5 KB = 1536 bytes
+        assert_eq!(format_size(1536), "1.5 KB");
+
+        // Just below 1 MB
+        assert_eq!(format_size(1_048_575), "1024.0 KB");
+
+        // Exactly 1 MB
+        assert_eq!(format_size(1_048_576), "1.0 MB");
+
+        // Fractional MB rounding: 1.5 MB
+        assert_eq!(format_size(1_572_864), "1.5 MB");
+
+        // Just below 1 GB
+        assert_eq!(format_size(1_073_741_823), "1024.0 MB");
+
+        // Exactly 1 GB
+        assert_eq!(format_size(1_073_741_824), "1.0 GB");
+
+        // Large value: 2.5 GB
+        assert_eq!(format_size(2_684_354_560), "2.5 GB");
+    }
+
+    #[test]
+    fn test_format_speed() {
+        assert_eq!(format_speed(0), "0 B/s");
+        assert_eq!(format_speed(500), "500 B/s");
+        assert_eq!(format_speed(1024), "1.0 KB/s");
+        assert_eq!(format_speed(1_500_000), "1.4 MB/s");
+        assert_eq!(format_speed(1_500_000_000), "1.4 GB/s");
+    }
 }

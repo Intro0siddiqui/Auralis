@@ -141,4 +141,41 @@ mod tests {
         assert_eq!(summary.artist, "Pink Floyd");
         assert_eq!(summary.track_count, 24);
     }
+
+    #[test]
+    fn test_artist_formatted_duration() {
+        let mut artist = Artist::new("Test".to_string());
+
+        // Zero duration
+        artist.total_duration_secs = 0;
+        assert_eq!(artist.formatted_duration(), "0 min");
+
+        // Less than a minute
+        artist.total_duration_secs = 30;
+        assert_eq!(artist.formatted_duration(), "0 min");
+
+        // Exactly one minute
+        artist.total_duration_secs = 60;
+        assert_eq!(artist.formatted_duration(), "1 min");
+
+        // Multiple minutes, no hours
+        artist.total_duration_secs = 180;
+        assert_eq!(artist.formatted_duration(), "3 min");
+
+        // Exactly one hour
+        artist.total_duration_secs = 3600;
+        assert_eq!(artist.formatted_duration(), "1 hr 0 min");
+
+        // One hour and some minutes
+        artist.total_duration_secs = 3661;
+        assert_eq!(artist.formatted_duration(), "1 hr 1 min");
+
+        // Multiple hours
+        artist.total_duration_secs = 7325;
+        assert_eq!(artist.formatted_duration(), "2 hr 2 min");
+
+        // Large duration: 10 hours
+        artist.total_duration_secs = 36000;
+        assert_eq!(artist.formatted_duration(), "10 hr 0 min");
+    }
 }

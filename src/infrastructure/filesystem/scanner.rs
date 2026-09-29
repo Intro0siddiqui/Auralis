@@ -166,6 +166,39 @@ mod tests {
     }
 
     #[test]
+    fn test_is_audio_file() {
+        use std::path::PathBuf;
+
+        // Valid audio extensions
+        assert!(is_audio_file(&PathBuf::from("/music/song.mp3")));
+        assert!(is_audio_file(&PathBuf::from("/music/song.flac")));
+        assert!(is_audio_file(&PathBuf::from("/music/song.wav")));
+        assert!(is_audio_file(&PathBuf::from("/music/song.m4a")));
+        assert!(is_audio_file(&PathBuf::from("/music/song.aac")));
+        assert!(is_audio_file(&PathBuf::from("/music/song.ogg")));
+        assert!(is_audio_file(&PathBuf::from("/music/song.opus")));
+        assert!(is_audio_file(&PathBuf::from("/music/song.webm")));
+
+        // Case-insensitive
+        assert!(is_audio_file(&PathBuf::from("/music/song.MP3")));
+        assert!(is_audio_file(&PathBuf::from("/music/song.FLAC")));
+        assert!(is_audio_file(&PathBuf::from("/music/song.M4A")));
+
+        // Invalid extensions
+        assert!(!is_audio_file(&PathBuf::from("/music/song.txt")));
+        assert!(!is_audio_file(&PathBuf::from("/music/song.exe")));
+        assert!(!is_audio_file(&PathBuf::from("/music/song.jpg")));
+        assert!(!is_audio_file(&PathBuf::from("/music/song.pdf")));
+
+        // No extension
+        assert!(!is_audio_file(&PathBuf::from("/music/song")));
+        assert!(!is_audio_file(&PathBuf::from("/music/.hidden")));
+
+        // Empty path
+        assert!(!is_audio_file(&PathBuf::from("")));
+    }
+
+    #[test]
     fn test_preserve_track_state_during_rescan() {
         let mut existing = Track::new(
             "Original title".to_string(),
