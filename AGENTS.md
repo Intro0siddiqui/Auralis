@@ -777,18 +777,17 @@ Next step, and it is offline-checkable: does `start_sink`/`fresh_sink_replay`
 actually call rodio's `play()` on the new sink, or does it create + feed and leave
 it paused? `empty=0` with `progress=0` is what that mistake would look like.
 
-That is the same shape of bug as the one §4.6 records for auto-advance, and it is
-checkable **offline**: the window is whether `empty()` can be true on a freshly
-created sink before the source yields. Two things to measure rather than assume:
+Note what this rules out: the watcher is **not** reading an unprimed sink as EOF,
+and the auto-advance path is not involved. The queued-but-silent sink points at
+`start_sink`/`fresh_sink_replay` itself, and it is checkable **offline** by reading
+whether the fresh sink is actually `play()`ed.
 
-1. Is `Sink::empty()` true immediately after creation, before the source is polled?
-2. Does the watcher treat `empty()` as EOF unconditionally, or only after playback
-   has been observed running?
-
-**The queue-panel log still has never been pasted** — `strategy=` / `pre=` / `file=` /
-`replay=` / `probe=` / `progress=`. This is now the third request. It would very
-likely settle it immediately, and we are three rounds into a bug we cannot localise
-because one line of diagnostic output has not arrived.
+**How the log was finally obtained, in case it is needed again:** three requests
+for a clipboard paste failed because the "Copy resume log" button does not work, and
+then a **screenshot of the queue panel** had all of it, legible. The panel renders
+the newest 5 of 20 entries on screen; the button is a convenience that happens to
+be broken. See "THE DEV BOX **IS** THE OWNER'S PHONE" in §5 — a photo was available
+in a directory I can read the whole time.
 
 ---
 
