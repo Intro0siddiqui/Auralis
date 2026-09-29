@@ -462,7 +462,7 @@ handshake completed — and `webPoSignalOutput` is still empty. A barren environ
 is not the variable. A bare Node process genuinely is a poor fingerprint, so their
 sidecar needs it; that is their problem, not ours.
 
-**And there is a positive control that settles it outright — see §4.7.9.** We are
+**And there is a positive control that settles it outright — see §4.7.8.** We are
 not theorising about this: the same WebView, on the same line, plays YouTube fine
 every day.
 
@@ -510,7 +510,7 @@ Patch both transports because we do not know which the player uses, and a null w
 cannot interpret is what cost us the previous fortnight. On `visitor_data`, take the
 **page's** value and adopt it downstream rather than trying to impose ours.
 
-### 4.7.9 THE POSITIVE CONTROL — the device already does this, every day
+### 4.7.8 THE POSITIVE CONTROL — the device already does this, every day
 
 **Read this before proposing an environment / fingerprint / emulation fix. It has
 been proposed three times and refuted three times, and this is why.**
@@ -550,7 +550,7 @@ would make our own `minted-stripped` path the whole problem and the WebView spik
 merely the wiring. **Test it: resolve a known-good video with the same resolver
 and diff it against `yF9nmg_jHNs`.**
 
-### 4.7.8 Two traps in the tooling
+### 4.7.9 Two traps in the tooling
 
 - **`getInfo(videoId, 'CLIENT_NAME')` ignores the string argument.** `ANDROID_VR`, `IOS`, `TV` and `WEB_SAFARI` all returned an identical 28 formats. An early pass of this investigation wrongly concluded from that output that the web family resolves on the dev box. Use real Client objects (`it.createClient({...})`) for per-client work; per-client numbers from a string argument are meaningless.
 - **The npm package named `bgutils` is not ours.** `registry.npmjs.org/bgutils` is at `1.0.5`, last published **2019-07-16**, and is an unrelated project. Ours is **LuanRT/BgUtils**, vendored at **4.0.3** (`ui/js/modules/po_token.js:3`).
@@ -622,7 +622,7 @@ Gotchas, each of which cost at least one run:
 - **The scratch dir needs `{"type":"module"}`.** The repo-root `package.json` has no `type`, so `node --check` on any `ui/js/**/*.js` fails with `Unexpected token 'export'`. That is a **harness artifact, not a syntax error** — it has been misread as a real failure more than once. Give the scratch dir its own `package.json` and leave the repo's untouched.
 - **There is no package manager on this box** — no `npm`, `pnpm`, `yarn` or `bun`. Fetch tarballs directly: `curl -sL <registry tarball> | tar xz -C <pkg> --strip-components=1`. That is how the SABR reference implementation was obtained.
 - **The audio formats are SABR-only** — `typeof format.url === 'undefined'` and `decipher()` returns undefined. Do not conclude from a node run that "the URLs work".
-- **`start()`/`getInfo` need a real client object to switch clients** — see §4.7.8.
+- **`start()`/`getInfo` need a real client object to switch clients** — see §4.7.9.
 
 **The SABR reference implementation is available for experiments:** `googlevideo@4.1.1` from
 the npm registry, whose only dependency is `@bufbuild/protobuf`. Run this way it reproduced
