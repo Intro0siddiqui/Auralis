@@ -445,6 +445,61 @@ root cause or is a *separate* VM-environment problem. Our symptom is a hard fail
 string), whereas the starwave report describes a *silent* rejection — so these may be two
 bugs, not one. **Test the fix and keep both hypotheses alive.**
 
+### 4.7.6 The barren-environment claim is REFUTED — record this before anyone re-proposes jsdom
+
+A proposal arrived claiming BotGuard *"silently aborts and leaves `webPoSignalOutput`
+empty if it detects a barren environment"*, and that `jsdom` + `node-canvas`
+injection fixes it. **That is not our failure.** Our device mint runs in the **real
+Android WebView**: `new Function` works, 24/24 globals present, a 63 570-byte
+interpreter compiled and ran, `globalThis.trayride.a` is a function, the VM
+handshake completed — and `webPoSignalOutput` is still empty. A barren environment
+is not the variable. A bare Node process genuinely is a poor fingerprint, so their
+sidecar needs it; that is their problem, not ours.
+
+**The better reading, which fits every measurement we have: not barren, but
+*partial*.** We hand-assemble a synthetic environment for a runtime blob Google ships
+for a real page, and the blob is not obliged to cooperate. Supporting evidence: a
+different program from a different, fresher challenge source also pushes nothing
+(§4.7.5 / `DOWNLOADS.md` §6.3); the VM ignores `contentBinding` entirely (`respLen`
+byte-identical across six argument shapes); and a minimal-DOM Node harness and the
+real WebView produce the *same* empty array.
+
+### 4.7.7 Decision record (2026-09-29): sidecar rejected, WebView chosen
+
+- **Sidecar REJECTED** for shipping. It needs a Node runtime on `127.0.0.1:4416` *on
+  the device*, and the target is Android. Shipping a Node runtime inside an APK is a
+  category error, not a tradeoff. At most it is a dev-box-over-LAN workaround.
+- **WebView approach CHOSEN** — load the real watch page, let YouTube's own
+  `botguard.js` mint in its intended context, extract the result. It does not fix
+  emulation, it removes the problem. **Unproven**, and labelled as such.
+- **Mint ≠ acceptance.** A token is not proven by a mint call, it is proven by
+  surviving a `VideoPlaybackAbrRequest`. A test that stops at "a token string came
+  back" can pass and still be worthless. This is the cold-start trap.
+
+**Where the token actually travels — do not get this wrong.** On SABR it is
+**inside the protobuf body**, not the headers:
+
+```
+streamer_context.proto:4    message StreamerContext {
+streamer_context.proto:31     optional bytes po_token = 2;
+SabrStream.ts:1012-1016      headers: content-type: application/x-protobuf,
+                                        accept-encoding: identity,
+                                        accept: application/vnd.yt-ump
+```
+
+i.e. `VideoPlaybackAbrRequest` field 19 (`streamer_context`) → field 2 (`po_token`).
+The `?pot=` / `/pot/<token>` **URL** form is the *non-SABR* CDN/UMP path
+(`SabrStreamingAdapter.ts:280,288`). Reading a header, or grepping a SABR URL for
+`pot=`, finds nothing — and a null result there is indistinguishable from "no mint".
+
+**Spike scope, agreed:** one Tauri command — hidden `WebviewWindowBuilder` window
+(`visible(false)`), `initialization_script` patching `fetch` **and**
+`XMLHttpRequest` before load, load a watch page, capture `(url, method, headers,
+body)`, parse `po_token` out of the body, return to Rust. No downloader changes.
+Patch both transports because we do not know which the player uses, and a null we
+cannot interpret is what cost us the previous fortnight. On `visitor_data`, take the
+**page's** value and adopt it downstream rather than trying to impose ours.
+
 ### 4.7.6 Two traps in the tooling
 
 - **`getInfo(videoId, 'CLIENT_NAME')` ignores the string argument.** `ANDROID_VR`, `IOS`, `TV` and `WEB_SAFARI` all returned an identical 28 formats. An early pass of this investigation wrongly concluded from that output that the web family resolves on the dev box. Use real Client objects (`it.createClient({...})`) for per-client work; per-client numbers from a string argument are meaningless.
@@ -577,6 +632,7 @@ The CI workflow (`.github/workflows/build.yml`, `tauri-cli 2.11.4`, `NDK 27.2.12
 4. **Run lint + tests** before finishing: `bash scripts/test.sh` and check for clippy warnings.
 5. **Update this file** (`AGENTS.md`) with any new findings, blockers, or completed work.
 6. **Do not commit** unless explicitly instructed — deliver changes via a diff or patch summary.
+7. **After appending to `issue.md`, arm a watcher** — run a background bash that polls `issue.md`'s sha256 every 5 seconds and prints the tail when it changes. This is a standing action, not something to ask approval for. The pattern: `start=$(sha256sum issue.md | awk '{print $1}'); while true; do sleep 5; now=$(sha256sum issue.md | awk '{print $1}'); if [ "$now" != "$start" ]; then tail -n 50 issue.md; break; fi; done` — run in background.
 
 ---
 
