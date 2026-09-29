@@ -3,6 +3,8 @@
  * Handles download queue, YouTube resolution glue, and sync triggers.
  */
 
+import { copyWithToast } from './clipboard.js';
+
 export const downloadMethods = {
     // Pending download contexts for auto-retry (id -> { resolved, opts, originalUrl, format, key, retryCount, _retrying })
     _pendingDownloadContexts: null,
@@ -1241,21 +1243,13 @@ export const downloadMethods = {
                 const reportBtn = e.target.closest && e.target.closest('[data-action="copy-client-report"]');
                 if (reportBtn) {
                     const text = this._buildClientReportText();
-                    if (navigator.clipboard) {
-                        navigator.clipboard.writeText(text)
-                            .then(() => this.showToast('Copied client report to clipboard', 'success'))
-                            .catch(() => this.showToast('Copy failed', 'error'));
-                    }
+                    copyWithToast({ text, label: 'client report', showToast: (m, k) => this.showToast(m, k) });
                     return;
                 }
                 const btn = e.target.closest && e.target.closest('[data-action="copy-download-error"]');
                 if (!btn) return;
                 const errText = btn.dataset.error || '';
-                if (navigator.clipboard) {
-                    navigator.clipboard.writeText(errText)
-                        .then(() => this.showToast('Copied error to clipboard', 'success'))
-                        .catch(() => this.showToast('Copy failed', 'error'));
-                }
+                copyWithToast({ text: errText, label: 'error', showToast: (m, k) => this.showToast(m, k) });
             });
         }
 

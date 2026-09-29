@@ -3,6 +3,8 @@
  * Handles progress bars, toast indicators, scan log displays and UI feedback.
  */
 
+import { copyWithToast } from './clipboard.js';
+
 export const scanUiMethods = {
     updateScanProgressUI(payload) {
         if (!payload) return;
@@ -112,11 +114,7 @@ export const scanUiMethods = {
         const content = document.getElementById('library-scan-log-content');
         if (content) {
             const text = content.innerText || content.textContent;
-            navigator.clipboard.writeText(text).then(() => {
-                this.showToast('Diagnostic logs copied to clipboard!', 'success');
-            }).catch(() => {
-                this.showToast('Failed to copy logs', 'error');
-            });
+            copyWithToast({ text, label: 'diagnostic logs', showToast: (m, k) => this.showToast(m, k) });
         }
     },
 
