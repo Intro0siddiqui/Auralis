@@ -438,7 +438,7 @@ export const downloadMethods = {
             : isTruncated
             ? `Truncated stream (${shortfall}), every url class has now been tried — re-resolving via ${nextClient || 'another client'}`
             : is403
-                ? `403 on ${resolved.client || 'TV'} (rr1---sn-gwpa-cived), every url class has now been tried — retrying with ${nextClient}`
+                ? `403 on ${resolved.client || 'TV'}, every url class has now been tried — retrying with ${nextClient}`
                 : `Download incomplete (${shortfall}), retrying`;
         this.showToast(`${label}… (attempt ${budget.attempts}/${MAX_AUTO_RETRIES})`, 'info', 5000);
         console.warn(`[Downloads] auto-retry key=${key} attempt=${budget.attempts}/${MAX_AUTO_RETRIES} id=${p.id} 403=${is403} truncated=${isTruncated} sabr=${!!resolved.sabrFallback} failedClass=${failedClass} triedClasses=${JSON.stringify(budget.triedClasses)} nextClass=${nextClass} nextClient=${nextClient} exclude=${JSON.stringify(excludeClients)}`);
@@ -447,15 +447,26 @@ export const downloadMethods = {
             const retryOpts = { ...baseOpts };
             if (nextClient) retryOpts.forceClient = nextClient;
             if (excludeClients.length) retryOpts.excludeClients = excludeClients;
-            if (nextClass === 'muxed') retryOpts.forceLegacyProgressive = true;
-            if (nextClass === 'opus') retryOpts.forceOpusAudio = true;
-            // An explicit move back to the adaptive class must clear a force left
-            // over from a previous rung, or the resolver keeps handing back the
-            // class that just failed.
-            if (nextClass === 'adaptive') {
-                retryOpts.forceLegacyProgressive = false;
-                retryOpts.forceOpusAudio = false;
-            }
+            // The force modes are EXCLUSIVE, and every one of them is set on
+            // every attempt rather than only when it applies.
+            //
+            // Device report 2026-09-29, yF9nmg_jHNs: the ladder correctly moved
+            // from adaptive to opus, and then asked for opus THREE more times
+            // (attempts #2-#4, all `itag=251 ext=webm`) instead of reaching the
+            // muxed rung it had computed next. Two defects, both here:
+            //
+            //   - `ctx.opts` is whatever the previous attempt was called with, so
+            //     a flag set for an earlier rung survives into the next one. Only
+            //     the `adaptive` branch cleared the others.
+            //   - `youtube.js` applies its force blocks in sequence, so a stale
+            //     `forceOpusAudio` overwrote the muxed choice the line above had
+            //     just made. Last block to run won, silently.
+            //
+            // So: set both, always, from `nextClass` alone. `null` (rotation) must
+            // clear them too, or a rotated re-resolve inherits the last rung's
+            // format and the rotation is a no-op.
+            retryOpts.forceLegacyProgressive = nextClass === 'muxed';
+            retryOpts.forceOpusAudio = nextClass === 'opus';
             // A previous attempt came back short. Refuse the legacy-progressive
             // fallback only for the client that actually truncated — the short
             // stream is a SABR window, not a property of the muxed container,

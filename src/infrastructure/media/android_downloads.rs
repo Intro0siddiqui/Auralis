@@ -1161,21 +1161,36 @@ fn publish_q<'local>(
     }
 }
 
+#[cfg(target_os = "android")]
+const REMOVED_MSG: &str = "MediaStore copy of '{name}' (api {api}) was not published because {reason}; the pending row {id} was removed";
+#[cfg(target_os = "android")]
+const UNRESOLVED_MSG: &str = "MediaStore copy of '{name}' (api {api}) was not published because {reason}; the pending row {id} could NOT be deleted and is still invisible at {uri}";
+
 /// One-line summary of what happened to a row that never became visible, used
 /// as the error the caller (and its `warn!`) reports.
 #[cfg(target_os = "android")]
 fn unresolved_note(row: &PendingRow<'_>, outcome: PendingOutcome, reason: &str) -> String {
     match outcome {
         PendingOutcome::Visible => {
-            format!("MediaStore row {} for '{}' is visible", row.id, row.display_name)
+            format!(
+                "MediaStore row {} for '{}' is visible",
+                row.id, row.display_name
+            )
         }
         PendingOutcome::Removed => format!(
-            "MediaStore copy of '{}' (api {}) was not published because {}; the pending row {} was removed",
-            row.display_name, row.api, reason, row.id
+            REMOVED_MSG,
+            name = row.display_name,
+            api = row.api,
+            reason = reason,
+            id = row.id,
         ),
         PendingOutcome::Unresolved => format!(
-            "MediaStore copy of '{}' (api {}) was not published because {}; the pending row {} could NOT be deleted and is still invisible at {}",
-            row.display_name, row.api, reason, row.id, row.uri_string
+            UNRESOLVED_MSG,
+            name = row.display_name,
+            api = row.api,
+            reason = reason,
+            id = row.id,
+            uri = row.uri_string,
         ),
     }
 }

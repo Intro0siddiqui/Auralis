@@ -354,7 +354,8 @@ fn extract_url_param_f64(url: &str, param: &str) -> Option<f64> {
 
 /// Replace filesystem-unsafe characters so titles produce valid filenames.
 /// Strips path separators, control chars, "..", reserved Windows names, and
-/// limits length to 200 chars. Never returns empty or "." / "..".
+/// limits length to fit within the filesystem's 255-byte NAME_MAX. Never
+/// returns empty or "." / "..".
 fn sanitize_filename(name: &str) -> String {
     // Replace control chars and map path separators/unsafe chars to '_'
     let filtered: String = name.chars().filter(|c| !c.is_control()).collect();
@@ -394,8 +395,15 @@ fn sanitize_filename(name: &str) -> String {
     if RESERVED.contains(&lower.as_str()) {
         return format!("{}_{}", trimmed, "track");
     }
-    if trimmed.chars().count() > 200 {
-        trimmed = trimmed.chars().take(200).collect();
+    // Limit stem to 246 bytes (255 NAME_MAX − 8 max ext − 1 dot).
+    // Char-based limit allowed CJK titles (~600 bytes) to exceed the OS limit.
+    const MAX_STEM_BYTES: usize = 246;
+    if trimmed.len() > MAX_STEM_BYTES {
+        let mut end = MAX_STEM_BYTES;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        trimmed = trimmed[..end].to_string();
         trimmed = trimmed.trim_end_matches(['.', '_', ' ']).to_string();
         if trimmed.is_empty() {
             return "audio_track".to_string();
@@ -1628,7 +1636,14 @@ impl Downloader {
                     Err(_) => "(body read timed out)".to_string(),
                 };
                 let hint = match status.as_u16() {
-                    403 => " — 403 Forbidden: googlevideo rejected UA/Referer/Origin/PO-token or URL expired [rr1---sn-gwpa-cived]",
+                    // No host named here on purpose. A previous version hardcoded
+                    // `rr1---sn-gwpa-cived`, and the device report of 2026-09-29 showed
+                    // why that is actively harmful: the refusing host was
+                    // `rr1---sn-gwpa-cive7`, printed a few characters earlier in the same
+                    // message. Two different hosts in one error sends whoever reads it
+                    // after an edge that never refused us. The real host is already in
+                    // the message prefix.
+                    403 => " — 403 Forbidden: googlevideo rejected UA/Referer/Origin/PO-token or the URL expired",
                     404 => " — 404: URL expired or invalid (re-resolve the video)",
                     416 => " — 416 Range Not Satisfiable: resume offset beyond file size",
                     429 => " — 429 Too Many Requests: rate-limited, retry later",

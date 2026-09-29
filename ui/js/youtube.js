@@ -989,6 +989,16 @@ class YouTubeResolver {
         // after a transfer has already been refused, so there is nothing to lose
         // by asking for the other format class.
         if (opts.forceLegacyProgressive || opts.force_legacy_progressive) {
+            if (opts.forceOpusAudio || opts.force_opus_audio) {
+                // Said out loud rather than resolved by precedence. The two
+                // blocks below run in sequence and each assigns `fmt`, so before
+                // the caller was fixed this was a silent last-one-wins: a stale
+                // `forceOpusAudio` from an earlier retry rung overwrote the muxed
+                // choice, and the device saw opus requested three times while the
+                // ladder believed it had moved on. Measured 2026-09-29 on
+                // yF9nmg_jHNs, attempts #2-#4 all `itag=251 ext=webm`.
+                console.warn(`[YouTubeResolver] forceLegacyProgressive and forceOpusAudio are both set for ${videoId} (client=${winningClient}); honouring the muxed request. The caller should send only one.`);
+            }
             const legacy = sd.formats && sd.formats.length ? pickLegacyProgressive(sd.formats) : null;
             if (legacy && isDecipherable(legacy)) {
                 if (!allow_legacy_progressive) {
@@ -1017,16 +1027,22 @@ class YouTubeResolver {
         // `pickOpusAudio` for the measurement that motivates it and for why it
         // is a rung rather than a reordering.
         if (opts.forceOpusAudio || opts.force_opus_audio) {
-            const opus = pickOpusAudio(sd.adaptive_formats || []);
-            if (opus) {
-                console.warn(`[YouTubeResolver] forceOpusAudio: using audio-only opus itag=${opus.itag} bitrate=${opus.bitrate} for ${videoId} (client=${winningClient}) — adaptive m4a and the muxed fallback have both failed for this track.`);
-                fmt = opus;
-                used_legacy_progressive = false;
+            if (fmt && used_legacy_progressive) {
+                // The mirror of the guard above: a muxed request that has already
+                // been honoured must not be undone by a stale opus flag.
+                console.warn(`[YouTubeResolver] forceOpusAudio ignored for ${videoId} (client=${winningClient}): a legacy-progressive request was already honoured.`);
             } else {
-                // Said out loud, because a client with `opusWithUrl: 0` makes
-                // this rung a no-op and the retry would otherwise burn an
-                // attempt re-resolving the same two classes that just failed.
-                console.warn(`[YouTubeResolver] forceOpusAudio UNAVAILABLE for ${videoId} (client=${winningClient}): no decipherable audio-only opus format.`);
+                const opus = pickOpusAudio(sd.adaptive_formats || []);
+                if (opus) {
+                    console.warn(`[YouTubeResolver] forceOpusAudio: using audio-only opus itag=${opus.itag} bitrate=${opus.bitrate} for ${videoId} (client=${winningClient}) — adaptive m4a and the muxed fallback have both failed for this track.`);
+                    fmt = opus;
+                    used_legacy_progressive = false;
+                } else {
+                    // Said out loud, because a client with `opusWithUrl: 0` makes
+                    // this rung a no-op and the retry would otherwise burn an
+                    // attempt re-resolving the same two classes that just failed.
+                    console.warn(`[YouTubeResolver] forceOpusAudio UNAVAILABLE for ${videoId} (client=${winningClient}): no decipherable audio-only opus format.`);
+                }
             }
         }
 

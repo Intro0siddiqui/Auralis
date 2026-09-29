@@ -1103,8 +1103,10 @@ describe('YouTube Search & Streaming Integration', () => {
             sel: { client: 'IOS', itag: 140, ext: 'm4a', audioOnly: true, legacyProgressive: false },
         });
         assert.equal(seen.length, 1);
-        assert.equal(seen[0].opts.forceLegacyProgressive, undefined,
-            'IOS reports progressiveWithUrl=0, so the muxed rung must not fire for it');
+        assert.equal(seen[0].opts.forceLegacyProgressive, false,
+            'IOS reports progressiveWithUrl=0, so the muxed rung must not fire for it. Asserted as an explicit false rather than undefined: the caller now sets every force mode on every attempt, because leaving one unset let a previous rung\'s flag survive — measured 2026-09-29, opus requested three times on yF9nmg_jHNs while the ladder had moved to muxed');
+        assert.equal(seen[0].opts.forceOpusAudio, false,
+            'and the opus rung must be explicitly off too, for the same reason');
         assert.equal(seen[0].client, 'ANDROID_VR', 'rotate to a client that has other classes');
 
         // (ii) The opus rung picks on what each client actually offers. IOS
@@ -1649,6 +1651,22 @@ describe('YouTube Search & Streaming Integration', () => {
             'the opus selector must require an audio-only format');
         assert.ok(/\(b\.bitrate \|\| 0\) - \(a\.bitrate \|\| 0\)/.test(ysrc),
             'the opus selector must take the highest bitrate, not an arbitrary member');
+        // The force modes are exclusive. Before this, `youtube.js` applied its
+        // force blocks in sequence and each assigned `fmt`, so a stale
+        // `forceOpusAudio` silently overwrote a muxed request — measured
+        // 2026-09-29 on yF9nmg_jHNs, where opus was returned three times while
+        // the ladder believed it had moved to muxed.
+        //
+        // This is a SOURCE-SHAPE assertion and says so: the resolver needs
+        // InnerTube and the vendored bgutils, so its behaviour cannot be driven
+        // here. What it buys is that deleting the guard fails the suite, which
+        // is the difference between a guard and a comment. A mutation run
+        // confirmed that removing it does NOT otherwise fail anything — the
+        // reason this assertion exists.
+        assert.ok(/if \(fmt && used_legacy_progressive\) \{/.test(ysrc),
+            'the opus force block must decline to overwrite an honoured muxed request');
+        assert.ok(/forceLegacyProgressive and forceOpusAudio are both set/.test(ysrc),
+            'and the conflict must be reported rather than resolved silently');
     });
 
     it('the class ladder reaches audio-only opus instead of spending retries on classes already refused', async () => {
