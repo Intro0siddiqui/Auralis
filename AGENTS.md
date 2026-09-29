@@ -462,6 +462,10 @@ handshake completed — and `webPoSignalOutput` is still empty. A barren environ
 is not the variable. A bare Node process genuinely is a poor fingerprint, so their
 sidecar needs it; that is their problem, not ours.
 
+**And there is a positive control that settles it outright — see §4.7.9.** We are
+not theorising about this: the same WebView, on the same line, plays YouTube fine
+every day.
+
 **The better reading, which fits every measurement we have: not barren, but
 *partial*.** We hand-assemble a synthetic environment for a runtime blob Google ships
 for a real page, and the blob is not obliged to cooperate. Supporting evidence: a
@@ -505,6 +509,46 @@ body)`, parse `po_token` out of the body, return to Rust. No downloader changes.
 Patch both transports because we do not know which the player uses, and a null we
 cannot interpret is what cost us the previous fortnight. On `visitor_data`, take the
 **page's** value and adopt it downstream rather than trying to impose ours.
+
+### 4.7.9 THE POSITIVE CONTROL — the device already does this, every day
+
+**Read this before proposing an environment / fingerprint / emulation fix. It has
+been proposed three times and refuted three times, and this is why.**
+
+**The owner watches YouTube daily on the phone that runs Auralis.** Same
+WebView. Same residential Jio line. Same ISP. Same Android build.
+
+That environment **demonstrably obtains whatever YouTube requires to play a
+video** — which means a valid PO token, minted by YouTube's own `botguard.js`,
+in that exact engine, on that exact connection, logged out. Every day.
+
+So the WebView we are failing inside is **provably capable**. The capability is
+present; we are simply not using the page that has it. This is not an inference
+from a trace — it is a **positive control**, and it settles three arguments at
+once:
+
+| proposal | status against this control |
+|---|---|
+| "BotGuard detects a barren environment" | **Dead.** The environment plays YouTube daily. It is the opposite of barren. |
+| "add jsdom + node-canvas to fake a browser" | **Dead.** jsdom is *less* realistic than a real WebView. Adopting it moves *away* from the working case. |
+| "try a fifth client / a different itag / a new retry policy" | **Dead.** The working client is YouTube's own page, in an engine we already own. |
+
+**The WebView spike is therefore not an experiment into whether emulation can be
+made to work — it is wiring up something the device is already proven to do.**
+That is the strongest statement in this document, and the one most likely to be
+forgotten, which is why it is a numbered section and not a footnote.
+
+**Second fact from the same conversation, also easily forgotten: downloads are
+not uniformly broken.** The owner reports that **some videos download
+successfully and some do not.** Any framing that treats this as an absolute
+failure is wrong, and this document has been wrong in that way more than once.
+Partial success is the most valuable diagnostic asset we have: a working case
+beside a failing one *is* the answer, because the difference between them is the
+variable. A plausible, untested reading — a token is sometimes obtained, and the
+difference is whether a live page in that WebView had already minted, which
+would make our own `minted-stripped` path the whole problem and the WebView spike
+merely the wiring. **Test it: resolve a known-good video with the same resolver
+and diff it against `yF9nmg_jHNs`.**
 
 ### 4.7.8 Two traps in the tooling
 
