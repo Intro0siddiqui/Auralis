@@ -1,0 +1,27 @@
+# The toolchain is PINNED, deliberately.
+#
+# CI used `dtolnay/rust-toolchain@stable`, which floats to whatever is current at
+# run time, while contributor machines are on whatever they installed. That gap
+# is not theoretical — it cost two releases:
+#
+#   * v2.6.62 failed `build-android` and `check-android` with
+#     `error: format argument must be a string literal`, on `format!(SOME_CONST, ..)`.
+#     A `const &str` is not a string literal. The dev box's rustc accepted it; CI's
+#     newer `stable` did not. `build-linux` compiled the same file as dead code, so
+#     no host-side gate could have caught it either.
+#   * Earlier, the reverse: local rustfmt 1.63 versus CI's stable disagreed about a
+#     method chain near `fn_call_width` 60.
+#
+# Pinning makes local and CI identical by construction, so a disagreement is
+# either impossible or a deliberate bump.
+#
+# BUMPING: change `channel` here and open a PR. Do it on its own, read the diff
+# for anything the new version reformats (`cargo fmt --all`), and expect Android
+# NDK interactions to be the first thing that moves. This version is what the
+# whole crate was verified against: `cargo check --all-targets`,
+# `clippy --all-targets --all-features -D warnings`, `cargo fmt --all -- --check`
+# and `cargo test --lib` (192 tests) all pass on it.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
