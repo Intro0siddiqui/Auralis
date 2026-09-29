@@ -672,6 +672,68 @@ objects, not a string argument).
 Also recorded: **the owner reconfirms the pause/resume error still occurs.** No new
 diagnostic has come back with it; §4.7 open item 6 stays open on the same terms.
 
+### 4.7.13 THE WINDOW IS NOT A WINDOW — it is our decoder. There is no server-side truncation.
+
+**This is the finding that ends the SABR investigation. Read it before anything else in §4.7.**
+
+Measured on the dev box, same residential line, `client: 'ANDROID'`, muxed `itag 18`:
+
+| video | bytes received | audio `stts` samples | audio `mdhd` duration | last audio byte |
+|---|---|---|---|---|
+| `yF9nmg_jHNs` (phone said "windowed") | 10 992 443 | 9 540 608 | **216.34 s** | 10 990 660 — **inside the file** |
+| `94WoNQyK_KY` (phone said "completed") | 6 148 301 | 12 524 544 | 284.00 s | 6 141 368 — inside the file |
+
+The phone received **10 992 443 bytes — the same file.** The audio track's sample table
+declares 9 540 608 samples at 44 100 Hz = **216.34 s**, and the last audio sample ends
+**inside** the file, so the bytes are genuinely there, not merely claimed.
+
+**The phone's own decoder read 2 400 256 of those 9 540 608 samples — 25.2 % — and
+reported `measured=54.4s audible_until=54.4s`.**
+
+**So: no server window exists. The transfer was always complete. The completeness
+gate rejected a perfect 216-second file because the decoder stopped early.**
+
+This is the §4.6 lesson repeating in the worst possible place: *"a decoder's opinion
+is not evidence."* The sharpest version of the failure is that **the phone's own
+forensics already had the right answer and threw it away**:
+
+```
+container=mp4-stbl size=10992443B table=216.3s audio_data_end=10992443B bytes=complete
+decoded=75s measured=54.4s audible_until=54.4s
+```
+
+`bytes=complete` and `table=216.3s` are correct. The gate vetoed anyway, on the
+decoder. **`acceptance()` must trust the container and treat a short decode as
+non-evidence, not as a failure.** For a muxed `itag 18` the container is authoritative:
+`mdhd`/`stts` give the sample count, `stco`/`stsz` prove the last audio byte is in the
+file, and that is sufficient.
+
+#### What this retires
+
+- **§4.7.1's "the server windowed the media, not the transfer"** — wrong.
+- **The ~60 s SABR window** (§4.6's `LuanRT/GoogleVideo#52` citation) — a real
+  library limit, but **not our symptom**. Keep the citation, marked as not-ours.
+- **§4.7.3's `status=3` gate as a blocker for downloads** — SABR is not needed. Muxed
+  progressive completes without a token and without SABR.
+- **The PO token, entirely, for the muxed class.** It is still needed for the
+  audio-only adaptive class, which has no CDN url at all — but that is a quality
+  improvement (audio-only instead of audio+video), not a capability gate.
+
+#### What is actually left
+
+1. **Fix `acceptance()`** to trust the container over the decoder. This is the bug.
+2. **Fix playback duration** — the same short decode will make a 216 s track show as
+   54 s in the progress bar and refuse seeks past it. `reconcile_duration` already
+   lets the decoder only *raise* a duration; it must also be able to **correct one
+   downward against the container**, or the player will inherit this.
+3. **Stop discarding `itag 18`.** A 4-minute muxed file is a perfectly good download.
+4. The publish bug (§4.7.11) and the resume bug (§4.7.14) are independent and still open.
+
+**And the general lesson, which is the same one three times now:** a measurement that
+contradicts a theory should be checked before the theory is written down. Here the
+theory was built on a decoder's output, after §4.6 had already recorded that
+decoders lie about these exact files.
+
 ---
 
 ## 5. Testing
