@@ -106,7 +106,11 @@ export const MINT_STEPS = [
     // step. That is the failure this step exists to name.
     { id: 'botguard-load', label: 'BotGuardClient.load (VM handshake)' },
     // po_token.js:212-224 — `snapshot({ webPoSignalOutput })`, which is where
-    // the minter factory is obtained.
+    // the minter factory is obtained. This is the step the 2026-09-29 device run
+    // died on, and it used to report every way of failing as the same sentence.
+    // `SNAPSHOT_SHAPES` is now the taxonomy; the entry carries `shape` plus the
+    // array's measured length and per-element types, so a reader can tell
+    // "pushed nothing" from "pushed a non-function" from "never answered".
     { id: 'snapshot', label: 'BotGuard snapshot (minter factory)' },
     // po_token.js:226-270 — POST GenerateIT to jnn-pa (or www.youtube.com
     // fallback) for the integrity token. `endpoint` records which one answered.
@@ -453,6 +457,209 @@ export function classifyMintOutcome(report) {
     return MINT_STATES.MINTED_STRIPPED;
 }
 
+// ── the snapshot failure-shape taxonomy ──────────────────────────────────────
+
+/**
+ * The ways `client.snapshot({ webPoSignalOutput })` can fail to leave us holding
+ * a minter factory, each named separately.
+ *
+ * ── Why this taxonomy exists ─────────────────────────────────────────────────
+ *
+ * On the 2026-09-29 device run (v2.6.61) the whole mint succeeded up to
+ * `snapshot`, and then the report said, in full:
+ *
+ *     FAIL snapshot  snapshot returned a response and no minter factory
+ *                     — WebPoMinter.create would throw PMD:Undefined · 123ms
+ *
+ * which is one line standing for at least four independent facts:
+ *
+ *   1. the VM pushed **nothing** (`webPoSignalOutput.length === 0`);
+ *   2. the VM pushed **something that is not a function** — a different bug with
+ *      a different fix, and one that does *not* produce `PMD:Undefined` (a truthy
+ *      non-function passes bgutils' `!getMinter` guard and then throws a
+ *      TypeError when it is called, WebPoMinter.js:16-21);
+ *   3. `snapshot()` returned **nothing at all** (no throw, no response — which
+ *      means the VM never called its completion callback inside the 3s race at
+ *      BotGuardClient.js:131);
+ *   4. `snapshot()` **threw** (3s VM timeout, `EGOU`, `EGLIU`).
+ *
+ * The old message conflated 1 and 2 into "no minter factory" and asserted 3 in
+ * the same breath by printing "returned a response", which is a claim about a
+ * value the report never measured. Worse, the old `ok` flag was
+ * `botguardResponse && webPoSignalOutput.length` — so case 2 was recorded as
+ * **`ok: true`, "and a minter factory"**, a positive lie, and the run then died
+ * two steps later with a `mint` error that named the wrong stage.
+ *
+ * `SNAPSHOT_SHAPES` exists so the next device run can answer *which* of these it
+ * was. That is the whole point: we cannot iterate on a phone, so one run has to
+ * eliminate four hypotheses rather than restate one.
+ */
+export const SNAPSHOT_SHAPES = {
+    /** `webPoSignalOutput[0]` is a function. GenerateIT and `WebPoMinter.create` can run. */
+    OK: 'ok',
+    /** The client object exposes neither `snapshot` nor `snapshotSynchronous`. */
+    UNSUPPORTED: 'unsupported',
+    /** `snapshot()` threw — 3s VM timeout, `EGOU`, or a bad `program`. */
+    THREW: 'threw',
+    /** No throw, no response: the VM never invoked its completion callback. */
+    NO_RESPONSE: 'no-response',
+    /** A response came back and the array is still empty. The measured device case. */
+    EMPTY_ARRAY: 'empty-array',
+    /** Something was pushed, but `[0]` is not a function. */
+    NON_FUNCTION: 'non-function',
+};
+
+/**
+ * Appended to every shape that leaves us without a usable factory.
+ *
+ * This is here to kill a specific, attractive, wrong theory before it is spent a
+ * device run on: *"mint the GenerateIT integrity token first, then snapshot."*
+ * The GenerateIT request body is the protobuf pair `[requestKey, botguardResponse]`
+ * (`po_token.js` builds it from the snapshot's return value), and
+ * `WebPoMinter.create` passes the token **into** the factory as its argument
+ * (`WebPoMinter.js:21`, `getMinter(base64ToU8(integrityTokenResponse.integrityToken))`).
+ * The token is therefore *derived from* the snapshot response and *consumed
+ * after* the factory exists — snapshot-then-GenerateIT is the contract's order,
+ * and it is the order this file already runs in. Reordering is not "an
+ * experiment"; it is a request with no bytes to send.
+ *
+ * Confidence: read-from-source (both citations above are in `ui/vendor/bgutils/`).
+ * What remains genuinely unknown is *why* the VM pushed nothing — the token's
+ * position in the protocol does not prove the VM's push is unconditional, only
+ * that the token cannot be the missing prerequisite.
+ */
+const NO_FACTORY_NOTE =
+    'GenerateIT could not be run first to supply it: the GenerateIT payload IS [requestKey, botguardResponse], ' +
+    'so the integrity token is derived from this snapshot response, not the other way round';
+
+/**
+ * How much room the reasoning half of a snapshot message gets.
+ *
+ * `recordStep` caps `detail` at 120 chars so a phone-width line stays readable,
+ * and `NO_FACTORY_NOTE` does not fit under that — left in `detail` it was
+ * truncated away, and it is the single sentence most worth reading on the next
+ * run. So the measurement goes in `detail` ("what happened") and the reasoning
+ * goes in `note` ("why this is not fixable by reordering"), and `stepDetail`
+ * renders the second with its own budget.
+ */
+const NOTE_BUDGET = 220;
+
+/** Cap on how many element types we will name, so a huge array cannot flood a report. */
+const SIGNAL_TYPE_SAMPLE = 8;
+
+/**
+ * Measure the by-reference `webPoSignalOutput` array without assuming anything
+ * about it. `typeof` per element is the only safe read: the VM wrote it, so the
+ * elements are not ours to trust, and a getter on index 0 could throw.
+ */
+function describeWebPoSignalOutput(arr) {
+    const facts = { signalIsArray: Array.isArray(arr), signalLength: null, signalTypes: [] };
+    if (!Array.isArray(arr)) return facts;
+    let len = null;
+    try { len = arr.length; } catch (_) { /* a hostile `length` getter */ }
+    facts.signalLength = len;
+    if (typeof len !== 'number') return facts;
+    const n = Math.min(len, SIGNAL_TYPE_SAMPLE);
+    for (let i = 0; i < n; i++) {
+        let t = 'threw';
+        try { t = typeof arr[i]; } catch (_) { /* keep 'threw' */ }
+        facts.signalTypes.push(`${i}:${t}`);
+    }
+    if (len > n) facts.signalTruncated = len - n;
+    return facts;
+}
+
+/** Measure what `snapshot()` actually resolved to — the old report assumed "a string". */
+function describeSnapshotResponse(res) {
+    const facts = { responseType: 'undefined', responseLen: null };
+    try {
+        facts.responseType = res === null ? 'null' : typeof res;
+        if (typeof res === 'string' || Array.isArray(res)) facts.responseLen = res.length;
+    } catch (_) {
+        facts.responseType = 'threw';
+    }
+    return facts;
+}
+
+/**
+ * Reduce a snapshot attempt to exactly one `SNAPSHOT_SHAPES` value, with the
+ * measurements attached.
+ *
+ * Pure: no globals, no timers, no bgutils import — it takes the four things the
+ * caller observed and returns a verdict plus a `facts` object to hand to
+ * `recordStep`. That is what makes it unit-testable under node against the real
+ * module rather than a paraphrase of it.
+ *
+ * Precedence is deliberate and is the order the questions are actually asked in:
+ * we did not call it (unsupported) → it threw (threw) → it said nothing
+ * (no-response) → we called it and got a response, so now the only question left
+ * is what it wrote into the array we passed by reference.
+ *
+ * @param {{webPoSignalOutput?: any, botguardResponse?: any, snapshotError?: string|null,
+ *          unsupported?: boolean, settle?: {settleGrew?: boolean, settleWaitedMs?: number}|null}} input
+ * @returns {{shape: string, ok: boolean, detail: string, note?: string, facts: object}}
+ */
+export function classifySnapshotOutcome(input = {}) {
+    const { webPoSignalOutput = null, botguardResponse = null, snapshotError = null, unsupported = false, settle = null } = input || {};
+    const facts = { ...describeWebPoSignalOutput(webPoSignalOutput), ...describeSnapshotResponse(botguardResponse) };
+
+    if (settle) {
+        facts.settleWaitedMs = settle.settleWaitedMs ?? null;
+        facts.settleGrew = settle.settleGrew === true;
+    }
+
+    const finish = (shape, ok, detail, note) => ({ shape, ok, detail, note: note || undefined, facts });
+
+    if (unsupported) {
+        return finish(
+            SNAPSHOT_SHAPES.UNSUPPORTED,
+            false,
+            'this BotGuardClient exposes neither snapshot() nor snapshotSynchronous(), so the minter factory has no route at all'
+        );
+    }
+    if (snapshotError) {
+        return finish(SNAPSHOT_SHAPES.THREW, false, `snapshot threw: ${snapshotError}`);
+    }
+
+    const hasResponse = botguardResponse !== null && botguardResponse !== undefined;
+    if (!hasResponse) {
+        return finish(
+            SNAPSHOT_SHAPES.NO_RESPONSE,
+            false,
+            'snapshot neither threw nor resolved — the VM never called its completion callback within the 3s race in BotGuardClient.js:131',
+            'no response means no GenerateIT payload either, so nothing downstream can run'
+        );
+    }
+
+    // A response came back. Everything from here is a statement about the array,
+    // which the VM holds by reference (BotGuardClient.js:152-157).
+    const len = facts.signalLength;
+    if (len === 0) {
+        const grew = settle && settle.settleGrew === true;
+        return finish(
+            SNAPSHOT_SHAPES.EMPTY_ARRAY,
+            false,
+            `snapshot returned ${facts.responseType}(len=${facts.responseLen ?? '?'}) but pushed NOTHING into webPoSignalOutput` +
+            ` (length=0${settle && !grew ? `, still 0 after waiting ${settle.settleWaitedMs ?? 0}ms for a late push` : ''})` +
+            ` — the VM ran and answered but never handed over a minter factory`,
+            NO_FACTORY_NOTE
+        );
+    }
+    if (typeof webPoSignalOutput[0] !== 'function') {
+        return finish(
+            SNAPSHOT_SHAPES.NON_FUNCTION,
+            false,
+            `webPoSignalOutput has ${len} element(s) but [0] is ${facts.signalTypes[0] || 'unknown'}, not a function — the VM pushed a value WebPoMinter.create cannot call`,
+            'this is NOT the PMD:Undefined case: bgutils\' `!getMinter` guard (WebPoMinter.js:17) passes for a truthy non-function, which then throws when called on line 21. ' + NO_FACTORY_NOTE
+        );
+    }
+    return finish(
+        SNAPSHOT_SHAPES.OK,
+        true,
+        `snapshot returned ${facts.responseType}(len=${facts.responseLen ?? '?'}) and webPoSignalOutput[0] is a function (${len} element(s) total)`
+    );
+}
+
 // ── the page-context experiment ───────────────────────────────────────────────
 
 /**
@@ -649,11 +856,19 @@ function stepMarker(entry) {
 
 function stepDetail(entry) {
     const bits = [entry.detail || ''];
+    // The machine-readable verdict, right after the prose. `detail` is capped at
+    // 120 chars and routinely truncates mid-sentence, so the one field that must
+    // never be the part that got cut off gets its own slot.
+    if (entry.shape) bits.push(`shape=${entry.shape}`);
     if (entry.status !== undefined && entry.status !== null) bits.push(`status=${entry.status}`);
     if (entry.transport) bits.push(`via=${entry.transport}`);
     if (entry.endpoint) bits.push(`endpoint=${entry.endpoint}`);
     if (entry.ms) bits.push(`${entry.ms}ms`);
     if (entry.error) bits.push(`error=${short(entry.error, 160)}`);
+    // Its own line's worth of room, because the reasoning a step carries is
+    // routinely longer than the 120-char `detail` budget allows. Rendered last
+    // so the measurement stays first on a phone.
+    if (entry.note) bits.push(`note: ${short(entry.note, NOTE_BUDGET)}`);
     if (entry.data && typeof entry.data === 'object') {
         for (const [k, v] of Object.entries(entry.data)) {
             if (v === null || v === undefined || v === '' ) continue;

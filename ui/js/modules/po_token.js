@@ -52,12 +52,56 @@
  */
 
 import {
+    SNAPSHOT_SHAPES,
+    classifySnapshotOutcome,
     createMintReport,
     recordStep,
     recordMintOutcome,
     runPageContextProbe,
     recordPageProbe,
 } from './po_diagnostics.js';
+
+/**
+ * How long to keep re-reading `webPoSignalOutput` after `snapshot()` resolves
+ * before concluding the VM will never push, and how often.
+ *
+ * This is an *experiment*, and the number is a guess on purpose: it is bounded
+ * by the cost of being wrong (600ms on a path that has already failed) rather
+ * than by any knowledge of BotGuard's internals, which we do not have — the
+ * interpreter is a blob Google serves at runtime. What it buys is a fact:
+ * "still empty after 600ms" and "populated at 80ms" are different bugs, and
+ * today they are the same line of text.
+ */
+const SNAPSHOT_SETTLE_MS = 600;
+const SNAPSHOT_POLL_MS = 50;
+
+/**
+ * Poll the by-reference signal array for a late push.
+ *
+ * Skipped entirely when the array already holds something, when the snapshot
+ * threw, when the client had no snapshot method, or when the budget is 0 — so
+ * a run that was going to work never waits, and a run that threw never pays for
+ * a second confirmation of something already known.
+ *
+ * @returns {Promise<{settleGrew: boolean, settleWaitedMs: number}>}
+ */
+async function settleWebPoSignalOutput(webPoSignalOutput, { snapshotError, unsupported } = {}) {
+    const none = { settleGrew: false, settleWaitedMs: 0 };
+    if (SNAPSHOT_SETTLE_MS <= 0) return none;
+    if (snapshotError || unsupported) return none;
+    if (!Array.isArray(webPoSignalOutput) || webPoSignalOutput.length) return none;
+
+    const t0 = Date.now();
+    while (Date.now() - t0 < SNAPSHOT_SETTLE_MS) {
+        await new Promise((resolve) => setTimeout(resolve, SNAPSHOT_POLL_MS));
+        // Re-read the length every turn: the VM holds the same array, so this is
+        // the only place a late push can be observed.
+        if (webPoSignalOutput.length) {
+            return { settleGrew: true, settleWaitedMs: Date.now() - t0 };
+        }
+    }
+    return { settleGrew: false, settleWaitedMs: Date.now() - t0 };
+}
 
 let bgUtilsPromise = null;
 
@@ -492,10 +536,23 @@ export async function generatePoTokenForVideo(innertube, videoId, report = null)
                     console.warn('[PoToken] BotGuard load failed:', loadError);
                 }
 
-                // Snapshot with webPoSignalOutput to obtain minter factory
+                // Snapshot with webPoSignalOutput to obtain minter factory.
+                //
+                // ── The call order here is the contract's order, and it is
+                // deliberately NOT being changed. The obvious repair for "the
+                // VM pushed no factory" is to fetch the GenerateIT integrity
+                // token first and try again. That is not available: the
+                // GenerateIT body is the protobuf pair
+                // `[requestKey, botguardResponse]` built just below from
+                // `botguardResponse`, and `WebPoMinter.create` hands the token
+                // to the factory as its *argument*
+                // (ui/vendor/bgutils/core/WebPoMinter.js:21). The token is
+                // derived from this response and consumed after the factory
+                // exists, so there are no bytes to send before the snapshot.
                 const webPoSignalOutput = [];
                 let botguardResponse = null;
                 let snapshotError = null;
+                let snapshotUnsupported = false;
                 const tSnap = Date.now();
                 try {
                     // Try snapshot with webPoSignalOutput (required for WebPoMinter)
@@ -504,25 +561,60 @@ export async function generatePoTokenForVideo(innertube, videoId, report = null)
                     } else if (typeof client?.snapshotSynchronous === 'function') {
                         botguardResponse = await client.snapshotSynchronous({ webPoSignalOutput });
                     } else {
+                        snapshotUnsupported = true;
                         snapshotError = 'client exposes neither snapshot nor snapshotSynchronous';
                     }
                 } catch (e) {
                     snapshotError = e?.message || String(e);
                     console.warn('[PoToken] BotGuard snapshot failed:', snapshotError);
                 }
+                // ── EXPERIMENT, not a fix ──────────────────────────────────────
+                //
+                // `webPoSignalOutput` is handed to the VM **by reference**
+                // (BotGuardClient.js:152-157) while `snapshot()` resolves its
+                // own promise from a *callback the VM invokes*
+                // (BotGuardClient.js:152, `(response) => resolve(response)`).
+                // Nothing in bgutils establishes that the VM's push happens
+                // before it calls that callback. Reading `.length` on the very
+                // next line therefore races the write, and a race is the one
+                // explanation here that is both cheap to rule out and free of
+                // speculation: if the factory lands late, this finds it; if it
+                // does not, "the VM pushed nothing" is established rather than
+                // assumed.
+                //
+                // Bounded, and only ever entered on the path that has already
+                // failed, so it cannot slow a working mint down or change a
+                // successful outcome. Set SNAPSHOT_SETTLE_MS to 0 to disable.
+                const settle = await settleWebPoSignalOutput(webPoSignalOutput, {
+                    snapshotError,
+                    unsupported: snapshotUnsupported,
+                });
+                const snap = classifySnapshotOutcome({
+                    webPoSignalOutput,
+                    botguardResponse,
+                    snapshotError,
+                    unsupported: snapshotUnsupported,
+                    settle,
+                });
                 recordStep(
                     diag,
                     'snapshot',
-                    botguardResponse && webPoSignalOutput.length ? true : false,
-                    botguardResponse && webPoSignalOutput.length
-                        ? `snapshot returned ${String(botguardResponse).length} chars and a minter factory`
-                        : snapshotError
-                            ? `snapshot failed: ${snapshotError}`
-                            : `snapshot returned ${botguardResponse ? 'a response' : 'nothing'} and no minter factory — WebPoMinter.create would throw PMD:Undefined`,
-                    { error: snapshotError, ms: Date.now() - tSnap }
+                    snap.ok,
+                    snap.detail,
+                    // `shape` and the measurements ride into the entry under
+                    // `data`, which `stepDetail` renders — so they reach the
+                    // copied report, not just this module's internals. The whole
+                    // purpose of the taxonomy is that a person reading a phone
+                    // screenshot can tell two runs apart.
+                    { shape: snap.shape, data: { ...snap.facts }, note: snap.note, error: snapshotError, ms: Date.now() - tSnap }
                 );
 
-                if (webPoSignalOutput.length && botguardResponse) {
+                // Gated on the classification rather than on
+                // `webPoSignalOutput.length && botguardResponse`: length>0 with
+                // a non-function at [0] is not a minter factory, and letting it
+                // through only moved the failure to the `mint` step where it
+                // was reported as the wrong stage.
+                if (snap.shape === SNAPSHOT_SHAPES.OK) {
                     // Fetch integrity token via bgutils helpers (BgUtils example) — proper protobuf encoding via buildURL/getHeaders, avoids 400
                     // Example payload is [requestKey, botguardResponse] where requestKey is 'O43z0dpjhgX20SCx4KAo' (same in both examples)
                     const REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo';
@@ -598,7 +690,13 @@ export async function generatePoTokenForVideo(innertube, videoId, report = null)
                 }
 
                 // Fallback: direct mint if snapshot gave us minter without GenerateIT (some bgutils builds)
-                if (!poToken && webPoSignalOutput[0]) {
+                //
+                // `typeof === 'function'`, not truthiness. A truthy non-function
+                // at [0] is exactly the `non-function` snapshot shape, and
+                // calling it produced a `TypeError: getMinter is not a function`
+                // that was then recorded as a *mint* failure — naming the wrong
+                // stage for a problem the snapshot step had already measured.
+                if (!poToken && typeof webPoSignalOutput?.[0] === 'function') {
                     const tDirect = Date.now();
                     try {
                         const getMinter = webPoSignalOutput[0];
@@ -693,7 +791,7 @@ export async function generatePoTokenForVideo(innertube, videoId, report = null)
         recordMintOutcome(diag, 'succeeded', { token: poToken, visitorData, source: 'minted' });
         diag.mint.proofKind = proofKind;
         console.log(`[PoToken] Minted for ${videoId}: ${poToken.slice(0, 20)}… (visitorData ${visitorData ? visitorData.slice(0, 12) + '…' : 'none'})`);
-        return { poToken, visitorData, contentBinding: videoId, report: diag };
+        return { poToken, visitorData, contentBinding: videoId, proofKind, report: diag };
     } catch (e) {
         console.warn('[PoToken] generatePoTokenForVideo error:', e?.message || e);
         recordMintOutcome(diag, 'failed');
@@ -703,7 +801,7 @@ export async function generatePoTokenForVideo(innertube, videoId, report = null)
 }
 
 // Simple in-memory cache (TTL 6h) — visitorData-bound key avoids cross-visitor poisoning
-const poCache = new Map(); // key: videoId::visitorData -> { poToken, visitorData, contentBinding, expires }
+const poCache = new Map(); // key: videoId::visitorData -> { poToken, visitorData, contentBinding, proofKind, expires }
 
 function cacheKey(videoId, visitorData) {
     return visitorData ? `${videoId}::${visitorData}` : videoId;
@@ -757,12 +855,25 @@ export function getCachedPoToken(videoId, visitorData = null, report = null) {
 
     if (hit) {
         recordStep(diag, 'cache-read', true, `hit via ${how}, minted earlier and still within the 6h TTL`, {
-            data: { expiresInMs: Math.max(0, hit.expires - Date.now()) },
+            data: { expiresInMs: Math.max(0, hit.expires - Date.now()), proofKind: hit.proofKind || 'unknown' },
             fatal: false,
         });
         diag.mint.visitorData = hit.visitorData ? String(hit.visitorData).slice(0, 16) : diag.mint.visitorData;
         diag.mint.tokenLen = hit.poToken ? String(hit.poToken).length : null;
         diag.mint.tokenPreview = hit.poToken ? String(hit.poToken).slice(0, 16) : null;
+        // WHICH KIND of proof is now in play, on a run where nothing was minted.
+        //
+        // The cache deliberately suppresses the mint for 6h, and that decision
+        // is NOT being changed here — a cold-start proof is the only kind we
+        // currently produce, cold-start is accepted while `sps` is 2, and
+        // forcing a re-mint on every resolve would buy a 63KB interpreter
+        // download and three round trips per video in exchange for a WebPO path
+        // that has never once succeeded in this WebView. Suppressing retries is
+        // exactly why the *observability* had to change instead: a cache hit was
+        // rendering identically whether it served a cold-start token or a
+        // BotGuard one, so six hours of resolves could not tell the owner that
+        // the only token they have is the one that needs no attestation.
+        diag.mint.proofKind = hit.proofKind || null;
         // No mint ran this time round, but we ARE holding a Web-bound token —
         // and that is the whole reason `classifyMintOutcome` looks at
         // `tokenSource` before `attempted`.
@@ -782,9 +893,16 @@ export function setCachedPoToken(videoId, data, report = null) {
     const diag = report || lastMintReport;
     const vd = data?.visitorData || null;
     const k = cacheKey(videoId, vd);
-    poCache.set(k, { ...data, expires: Date.now() + 6 * 60 * 60 * 1000 });
+    // `proofKind` rides along with the entry. A token is not self-describing: a
+    // cold-start proof and a BotGuard proof are both base64url strings of
+    // similar length, and the only thing that distinguishes them is which branch
+    // of the mint produced it — which is exactly the fact that a cache hit
+    // would otherwise erase. See the note in `getCachedPoToken`.
+    const proofKind = data?.proofKind || diag?.mint?.proofKind || null;
+    const entry = { ...data, proofKind, expires: Date.now() + 6 * 60 * 60 * 1000 };
+    poCache.set(k, entry);
     // Also store under plain key for backward compat callers that don't pass visitorData
-    if (vd) poCache.set(videoId, { ...data, expires: Date.now() + 6 * 60 * 60 * 1000 });
+    if (vd) poCache.set(videoId, entry);
     if (diag) {
         recordStep(diag, 'cache-write', true, `stored under ${k} (and under the plain videoId key) with a 6h TTL`, { fatal: false });
     }

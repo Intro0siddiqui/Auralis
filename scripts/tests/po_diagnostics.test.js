@@ -41,7 +41,9 @@ import {
     MINT_STEPS,
     MINT_STEP_IDS,
     POT_PLACEMENT,
+    SNAPSHOT_SHAPES,
     classifyMintOutcome,
+    classifySnapshotOutcome,
     createMintReport,
     describeProbe,
     firstFailure,
@@ -408,6 +410,121 @@ describe('recordPageProbe — only a cited requirement may be a failure', () => 
     });
 });
 
+// ── the snapshot failure-shape taxonomy ──────────────────────────────────────
+
+describe('classifySnapshotOutcome — the four ways a snapshot can come up empty', () => {
+    // The 2026-09-29 device run produced exactly one line for all of these:
+    //   "snapshot returned a response and no minter factory — PMD:Undefined"
+    // Each test below pins one shape that line was standing in for. They call the
+    // real exported function; the fixtures are inputs, not a copy of the logic.
+
+    it('empty-array: a response came back and the VM pushed nothing (the measured device case)', () => {
+        const r = classifySnapshotOutcome({ webPoSignalOutput: [], botguardResponse: 'SNAPSHOT-OK' });
+        assert.equal(r.shape, SNAPSHOT_SHAPES.EMPTY_ARRAY);
+        assert.equal(r.ok, false);
+        // The number the old report never printed.
+        assert.equal(r.facts.signalLength, 0);
+        assert.equal(r.facts.responseLen, 11);
+        assert.match(r.detail, /length=0/);
+        // …and the reason a run with this shape must not try to "fix" it by
+        // minting the integrity token first. In `note`, not `detail`: the
+        // measurement has a 120-char budget and this does not fit in it.
+        assert.match(r.note, /GenerateIT could not be run first/);
+        assert.match(r.note, /\[requestKey, botguardResponse\]/);
+    });
+
+    it('empty-array after a bounded wait says so, and is not the same as a late push', () => {
+        // The experiment's whole point: "never pushed" and "pushed too late to be
+        // seen" are different bugs, and only the re-read tells them apart.
+        const stale = classifySnapshotOutcome({
+            webPoSignalOutput: [],
+            botguardResponse: 'SNAPSHOT-OK',
+            settle: { settleGrew: false, settleWaitedMs: 600 },
+        });
+        assert.equal(stale.shape, SNAPSHOT_SHAPES.EMPTY_ARRAY);
+        assert.match(stale.detail, /still 0 after waiting 600ms/);
+        const late = classifySnapshotOutcome({
+            webPoSignalOutput: [() => {}],
+            botguardResponse: 'SNAPSHOT-OK',
+            settle: { settleGrew: true, settleWaitedMs: 80 },
+        });
+        assert.equal(late.shape, SNAPSHOT_SHAPES.OK);
+        assert.equal(late.ok, true);
+        assert.equal(late.facts.settleGrew, true);
+    });
+
+    it('non-function: something WAS pushed, and that is a different bug with a different fix', () => {
+        // THE conflation. The old `ok` flag was
+        // `botguardResponse && webPoSignalOutput.length`, so this case was
+        // recorded as `ok: true, "and a minter factory"` — a positive lie — and
+        // the run then died at the `mint` step instead. bgutils agrees this is
+        // not PMD:Undefined: `!getMinter` (WebPoMinter.js:17) passes for a truthy
+        // non-function, which then throws when called on line 21.
+        const r = classifySnapshotOutcome({ webPoSignalOutput: ['not-a-function'], botguardResponse: 'SNAPSHOT-OK' });
+        assert.equal(r.shape, SNAPSHOT_SHAPES.NON_FUNCTION);
+        assert.equal(r.ok, false, 'a non-function is not a minter factory');
+        assert.equal(r.facts.signalLength, 1);
+        assert.equal(r.facts.signalTypes[0], '0:string');
+        assert.match(r.detail, /\[0\] is 0:string/);
+        assert.match(r.note, /NOT the PMD:Undefined case/);
+    });
+
+    it('no-response: the VM never called its completion callback at all', () => {
+        // Distinct from empty-array: here there is no response to report on, so
+        // the 3s race in BotGuardClient.js:131 resolved/rejected without the VM
+        // ever calling back. The old ternary printed "returned nothing" for this
+        // and "returned a response" for empty-array only by accident of which
+        // branch it took.
+        const r = classifySnapshotOutcome({ webPoSignalOutput: [], botguardResponse: null, snapshotError: null });
+        assert.equal(r.shape, SNAPSHOT_SHAPES.NO_RESPONSE);
+        assert.equal(r.ok, false);
+        assert.match(r.detail, /never called its completion callback/);
+    });
+
+    it('threw: the snapshot error is carried verbatim', () => {
+        const r = classifySnapshotOutcome({ webPoSignalOutput: [], botguardResponse: null, snapshotError: 'VM operation timed out' });
+        assert.equal(r.shape, SNAPSHOT_SHAPES.THREW);
+        assert.equal(r.ok, false);
+        assert.match(r.detail, /VM operation timed out/);
+    });
+
+    it('unsupported: no snapshot method at all is its own shape, not a throw', () => {
+        const r = classifySnapshotOutcome({ webPoSignalOutput: [], botguardResponse: null, unsupported: true });
+        assert.equal(r.shape, SNAPSHOT_SHAPES.UNSUPPORTED);
+        assert.match(r.detail, /neither snapshot\(\) nor snapshotSynchronous\(\)/);
+    });
+
+    it('ok: a function at [0] with a response, and the array is measured not assumed', () => {
+        const factory = () => {};
+        const r = classifySnapshotOutcome({ webPoSignalOutput: [factory, 'extra'], botguardResponse: 'SNAPSHOT-OK' });
+        assert.equal(r.shape, SNAPSHOT_SHAPES.OK);
+        assert.equal(r.ok, true);
+        assert.equal(r.facts.signalLength, 2);
+        assert.deepEqual(r.facts.signalTypes, ['0:function', '1:string']);
+    });
+
+    it('precedence: a throw outranks a missing response, which outranks the array contents', () => {
+        // Each of these would individually be a failure. Reporting the array
+        // first would blame the VM's push for a call that never happened.
+        assert.equal(classifySnapshotOutcome({ webPoSignalOutput: [], botguardResponse: 'ok', snapshotError: 'boom' }).shape, SNAPSHOT_SHAPES.THREW);
+        assert.equal(classifySnapshotOutcome({ webPoSignalOutput: [], botguardResponse: null, unsupported: true }).shape, SNAPSHOT_SHAPES.UNSUPPORTED);
+        assert.equal(classifySnapshotOutcome({ webPoSignalOutput: [], botguardResponse: 'ok' }).shape, SNAPSHOT_SHAPES.EMPTY_ARRAY);
+    });
+
+    it('survives a non-array signal and a throwing length getter without lying', () => {
+        // The VM wrote this object; it is not ours to trust. A classifier that
+        // threw here would take the whole mint down with it, replacing a
+        // diagnosis with a stack trace.
+        const hostile = { get length() { throw new Error('nope'); } };
+        const r = classifySnapshotOutcome({ webPoSignalOutput: hostile, botguardResponse: 'ok' });
+        assert.equal(r.facts.signalIsArray, false);
+        assert.equal(r.facts.signalLength, null);
+        // Not `ok`, and not a shape that claims the VM pushed nothing either.
+        assert.equal(r.ok, false);
+        assert.equal(r.shape, SNAPSHOT_SHAPES.NON_FUNCTION);
+    });
+});
+
 // ── the real code, driven end to end ─────────────────────────────────────────
 
 /**
@@ -505,6 +622,82 @@ var ${NAME} = {
 `;
 
 const GOOD_INTEGRITY = () => JSON.stringify([btoa('integrity'), 7200, 1800, null]);
+
+/** A minter factory good enough for a real `WebPoMinter.create` + mint. */
+const WORKING_FACTORY_BODY = `
+    return function (contentBindingBytes) {
+        return new Uint8Array([1, 2, 3, contentBindingBytes.length]);
+    };
+`;
+
+/**
+ * The 2026-09-29 device shape: the VM answers the snapshot and pushes nothing.
+ *
+ * Models a VM that called its completion callback and left `webPoSignalOutput`
+ * empty — the only behaviour the device run could distinguish from a dozen
+ * others. Whether Google's live blob behaves this way is NOT claimed; what is
+ * claimed is that when it does, the report now says so in words.
+ */
+const NON_PUSHING_INTERPRETER = (NAME) => `
+globalThis.${NAME} = {
+    a: function (program, setup) {
+        setup(
+            function (done, args) {
+                done('SNAPSHOT-OK');
+                return ['SNAPSHOT-OK'];
+            },
+            function () {}, function () {}, function () {}
+        );
+        return [function () { return []; }];
+    }
+};
+`;
+
+/**
+ * A VM that pushes the factory AFTER calling its completion callback.
+ *
+ * This is the race the bounded settle exists to rule out, and it is a plausible
+ * reading of the contract rather than an observed one: `webPoSignalOutput` is
+ * passed by reference into the VM while `snapshot()` resolves from a callback
+ * the VM invokes (BotGuardClient.js:150-158), and nothing there orders the push
+ * before the callback. If Google's blob does this, the device trace's
+ * `webPoSignalOutput.length === 0` is our read racing its write.
+ */
+const LATE_PUSHING_INTERPRETER = (NAME, DELAY) => `
+globalThis.${NAME} = {
+    a: function (program, setup) {
+        setup(
+            function (done, args) {
+                const out = args[2];
+                done('SNAPSHOT-OK');
+                setTimeout(function () {
+                    out.push(function (integrityU8) { ${WORKING_FACTORY_BODY} });
+                }, ${DELAY});
+                return ['SNAPSHOT-OK'];
+            },
+            function () {}, function () {}, function () {}
+        );
+        return [function () { return []; }];
+    }
+};
+`;
+
+/** A VM that pushes a truthy value that is not a function. */
+const NON_FUNCTION_PUSHING_INTERPRETER = (NAME) => `
+globalThis.${NAME} = {
+    a: function (program, setup) {
+        setup(
+            function (done, args) {
+                args[2].push({ notAFunction: true });
+                done('SNAPSHOT-OK');
+                return ['SNAPSHOT-OK'];
+            },
+            function () {}, function () {}, function () {}
+        );
+        return [function () { return []; }];
+    }
+};
+`;
 
 describe('po_token.js end to end — the real module, the real vendored bgutils', () => {
     let po;
@@ -730,6 +923,153 @@ describe('po_token.js end to end — the real module, the real vendored bgutils'
         // A hit means we hold a Web-bound token even though nothing was minted.
         recordPotApply(hit, { action: 'stripped' }, 'IOS');
         assert.equal(classifyMintOutcome(hit), MINT_STATES.MINTED_STRIPPED);
+    });
+
+    // ── the snapshot shapes, driven through the real vendored BotGuardClient ──
+    //
+    // These are the tests that would have caught the 2026-09-29 device run being
+    // undiagnosable. They install a fake VM on globalThis and let the *shipped*
+    // `po_token.js` and the *real* `ui/vendor/bgutils` run over it, so what is
+    // asserted is the report the owner would actually receive.
+
+    it('names the device case: the VM answered and pushed nothing', async () => {
+        installFakeWindow(NON_PUSHING_INTERPRETER('bg_nopush1'), GOOD_INTEGRITY());
+        const report = createMintReport();
+        const out = await po.generatePoTokenForVideo(fakeInnertube(challenge({ globalName: 'bg_nopush1' })), 'nopushvid1', report);
+
+        const s = report.steps.find((x) => x.step === 'snapshot');
+        assert.equal(s.ok, false, formatMintReport(report));
+        assert.equal(s.shape, SNAPSHOT_SHAPES.EMPTY_ARRAY);
+        // The measurement the old report never printed. Read through `data`
+        // because that is the channel `stepDetail` renders, so these numbers
+        // reach the copied report and not only this module's internals.
+        assert.equal(s.data.signalLength, 0);
+        assert.equal(s.data.responseType, 'string');
+        assert.equal(s.data.responseLen, 'SNAPSHOT-OK'.length);
+        assert.match(s.detail, /length=0/);
+        // The reasoning half must survive into the *copied report*, not just the
+        // object: `recordStep` caps `detail` at 120 chars, and the sentence that
+        // stops the next device run being spent on the reordering theory is
+        // longer than that. It is asserted through the renderer for that reason.
+        assert.match(s.note, /GenerateIT could not be run first/);
+        assert.match(formatMintReport(report), /GenerateIT could not be run first/);
+        // …alongside the numbers, in the block the owner actually copies.
+        const rendered = formatMintReport(report);
+        assert.match(rendered, /shape=empty-array/);
+        assert.match(rendered, /signalLength=0/);
+        assert.match(rendered, /settleGrew=false/);
+
+        // GenerateIT is still unreachable, and the report must not pretend we
+        // tried: its payload is this very snapshot response.
+        assert.equal(report.steps.filter((x) => x.step === 'generate-it').length, 0);
+        // The cold-start fallback is the only thing producing a token, so it
+        // must still run. Losing it here would be a regression, not a fix.
+        assert.ok(out?.poToken, 'the cold-start fallback must still rescue the run');
+        assert.equal(report.mint.proofKind, 'cold-start');
+        assert.equal(report.mint.outcome, 'succeeded');
+        assert.equal(report.mint.failedAt, 'snapshot');
+    });
+
+    it('finds a factory the VM pushes AFTER answering, instead of racing it', async () => {
+        // The experiment. If the push lands late, the old code read `.length` on
+        // the next line, saw 0, and reported the same PMD:Undefined as the
+        // "never pushed" case above. The bounded settle separates them — and when
+        // it separates them in the direction of "late", the whole WebPO path
+        // completes for the first time in this WebView.
+        installFakeWindow(LATE_PUSHING_INTERPRETER('bg_late1', 80), GOOD_INTEGRITY());
+        const report = createMintReport();
+        const out = await po.generatePoTokenForVideo(fakeInnertube(challenge({ globalName: 'bg_late1' })), 'latepush01', report);
+
+        const s = report.steps.find((x) => x.step === 'snapshot');
+        assert.equal(s.shape, SNAPSHOT_SHAPES.OK, formatMintReport(report));
+        assert.equal(s.ok, true);
+        // Proof that the wait is what found it, and how long it cost.
+        assert.equal(s.data.settleGrew, true);
+        assert.ok(s.data.settleWaitedMs > 0 && s.data.settleWaitedMs < 600, `settleWaitedMs=${s.data.settleWaitedMs}`);
+        assert.equal(s.data.signalTypes[0], '0:function');
+        // A real WebPO proof — not cold-start, not the no-integrity-token one.
+        assert.equal(report.mint.proofKind, 'webpo');
+        assert.equal(report.mint.outcome, 'succeeded');
+        assert.equal(report.mint.failedAt, null, formatMintReport(report));
+        assert.ok(out?.poToken);
+        assert.equal(report.steps.find((x) => x.step === 'generate-it').ok, true);
+    });
+
+    it('does not wait at all when the factory is already there', async () => {
+        // The settle is only allowed to cost anything on a path that has already
+        // failed. A working mint must not acquire 600ms of latency.
+        installFakeWindow(GLOBAL_ASSIGNING_INTERPRETER('bg_nowait1'), GOOD_INTEGRITY());
+        const report = createMintReport();
+        await po.generatePoTokenForVideo(fakeInnertube(challenge({ globalName: 'bg_nowait1' })), 'nowaitvid1', report);
+        const s = report.steps.find((x) => x.step === 'snapshot');
+        assert.equal(s.data.settleWaitedMs, 0, 'a populated array must short-circuit the wait');
+        assert.equal(s.data.settleGrew, false);
+        assert.equal(s.shape, SNAPSHOT_SHAPES.OK);
+    });
+
+    it('reports a truthy non-function as the snapshot failing, not the mint', async () => {
+        // The positive lie the old `ok: length>0` flag told: a run in which the
+        // array held an object was recorded as "and a minter factory", then died
+        // at `mint` with a TypeError that named the wrong stage of BotGuard.
+        installFakeWindow(NON_FUNCTION_PUSHING_INTERPRETER('bg_nonfn1'), GOOD_INTEGRITY());
+        const report = createMintReport();
+        const out = await po.generatePoTokenForVideo(fakeInnertube(challenge({ globalName: 'bg_nonfn1' })), 'nonfuncvid', report);
+
+        const s = report.steps.find((x) => x.step === 'snapshot');
+        assert.equal(s.ok, false, formatMintReport(report));
+        assert.equal(s.shape, SNAPSHOT_SHAPES.NON_FUNCTION);
+        assert.equal(s.data.signalLength, 1);
+        assert.equal(s.data.signalTypes[0], '0:object');
+        // Attributed to the step that measured it, and GenerateIT is not reached
+        // (there is no factory to spend an integrity token on).
+        assert.equal(report.mint.failedAt, 'snapshot');
+        assert.equal(report.steps.filter((x) => x.step === 'generate-it').length, 0);
+        // The direct-mint fallback must not have called a non-function and
+        // reported the resulting TypeError as a mint failure.
+        assert.equal(report.steps.filter((x) => x.step === 'mint').length, 0);
+        // …and the run still ends in a usable proof.
+        assert.ok(out?.poToken);
+        assert.equal(report.mint.proofKind, 'cold-start');
+    });
+
+    it('carries the proof KIND through the 6h cache, so a cold-start hit is visible', async () => {
+        // The cache suppresses the mint for 6h, and it will keep doing that. But
+        // a cached cold-start token rendering identically to a cached BotGuard
+        // one is how six hours of resolves could each look like evidence that
+        // minting works. A token is not self-describing; only this field is.
+        installFakeWindow(NON_PUSHING_INTERPRETER('bg_cp1'), GOOD_INTEGRITY());
+        const cold = createMintReport();
+        const minted = await po.generatePoTokenForVideo(fakeInnertube(challenge({ globalName: 'bg_cp1' })), 'cachekind01', cold);
+        assert.equal(cold.mint.proofKind, 'cold-start');
+        po.setCachedPoToken('cachekind01', minted, cold);
+
+        const hit = createMintReport();
+        const entry = po.getCachedPoToken('cachekind01', minted.visitorData, hit);
+        assert.ok(entry, 'expected a cache hit');
+        assert.equal(hit.mint.proofKind, 'cold-start');
+        assert.equal(hit.mint.tokenSource, 'cache');
+        // …and it survives into the rendered report, not just the object.
+        assert.match(formatMintReportLine(hit), /proof=cold-start/);
+
+        // Second write path, and the reason `setCachedPoToken` normalises
+        // `proofKind` at all rather than trusting the spread: a caller that
+        // stores a hand-built object (no `proofKind` on it) still gets the kind
+        // the mint recorded on its report. Without the normalisation the entry
+        // silently loses the field and the next resolve reports `proofKind=
+        // null` — back to a cached cold-start token looking like any other.
+        const bare = createMintReport();
+        bare.mint.proofKind = 'cold-start';
+        po.setCachedPoToken('cachekind02', { poToken: 'Y'.repeat(40), visitorData: 'CgtMT0NhbA', contentBinding: 'cachekind02' }, bare);
+        const bareHit = createMintReport();
+        assert.ok(po.getCachedPoToken('cachekind02', 'CgtMT0NhbA', bareHit), 'expected a cache hit');
+        assert.equal(bareHit.mint.proofKind, 'cold-start');
+
+        // The suppression itself is unchanged: a hit means no mint machinery ran
+        // at all this resolve. That is the deliberate decision, and this asserts
+        // it so a future "let's retry BotGuard on every cache hit" change cannot
+        // land silently.
+        assert.equal(hit.mint.attempted, null);
+        assert.equal(hit.steps.filter((x) => x.step === 'botguard-load').length, 0);
     });
 
     it('records every step id it uses as a declared step', () => {
