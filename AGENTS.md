@@ -734,6 +734,36 @@ contradicts a theory should be checked before the theory is written down. Here t
 theory was built on a decoder's output, after §4.6 had already recorded that
 decoders lie about these exact files.
 
+### 4.7.14 Resume: it works, then immediately re-pauses (specific symptom, suspect named)
+
+Owner report, corrected — this is **not** "resume does nothing":
+
+> "it pauses, but when I click resume it resumes — for a second or less — and gets
+> paused again."
+
+So `resume()` works, playback starts, and something **re-pauses it within about one
+watcher tick** (the watcher is 250 ms, `spawn_playback_watcher` in
+`commands/playback.rs`).
+
+**Leading suspect, from the symptom's shape — an unfalsified inference, not a
+measurement:** the new rodio `Sink` is created and starts **empty**, because the
+decoder thread has not yet pushed its first samples. If the watcher polls in that
+window and treats `sink.empty()` as end-of-track, it will conclude the track finished
+and pause — one tick after resume, which is exactly "a second or less."
+
+That is the same shape of bug as the one §4.6 records for auto-advance, and it is
+checkable **offline**: the window is whether `empty()` can be true on a freshly
+created sink before the source yields. Two things to measure rather than assume:
+
+1. Is `Sink::empty()` true immediately after creation, before the source is polled?
+2. Does the watcher treat `empty()` as EOF unconditionally, or only after playback
+   has been observed running?
+
+**The queue-panel log still has never been pasted** — `strategy=` / `pre=` / `file=` /
+`replay=` / `probe=` / `progress=`. This is now the third request. It would very
+likely settle it immediately, and we are three rounds into a bug we cannot localise
+because one line of diagnostic output has not arrived.
+
 ---
 
 ## 5. Testing
