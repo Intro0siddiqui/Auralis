@@ -213,7 +213,7 @@ impl SyncService {
             .map_err(|e| SyncError::SettingsError(e.to_string()))?;
 
         // Generate pairing info
-        let pairing_info = PairingInfo::generate();
+        let pairing_info = PairingInfo::generate().map_err(SyncError::QrError)?;
 
         // Store active pairing
         {
@@ -654,6 +654,9 @@ pub enum SyncError {
 
     #[error("Network error: {0}")]
     NetworkError(String),
+
+    #[error("QR code generation failed: {0}")]
+    QrError(String),
 
     #[error("Sync conflict: {0}")]
     Conflict(String),

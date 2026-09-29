@@ -238,8 +238,12 @@ pub struct PairingInfo {
 }
 
 impl PairingInfo {
-    /// Generate a new pairing request
-    pub fn generate() -> Self {
+    /// Generate a new pairing request.
+    ///
+    /// Fails instead of panicking when the QR payload cannot be encoded
+    /// (oversize data) or the PNG encoder errors — a panic here would kill
+    /// the pairing caller mid-flow.
+    pub fn generate() -> Result<Self, String> {
         use rand::prelude::*;
 
         let mut rng = rand::rng();
@@ -248,21 +252,23 @@ impl PairingInfo {
             .collect();
 
         let qr_data = format!("auralis://pair?pin={}", pin);
+        let qr_image = Self::generate_qr_code(&qr_data)?;
 
-        Self {
+        Ok(Self {
             pin,
-            qr_data: qr_data.clone(),
-            qr_image: Self::generate_qr_code(&qr_data),
+            qr_data,
+            qr_image,
             expires_at: Utc::now() + chrono::Duration::minutes(5),
-        }
+        })
     }
 
-    /// Generate QR code as base64 PNG
-    fn generate_qr_code(data: &str) -> String {
+    /// Generate QR code as base64 PNG.
+    fn generate_qr_code(data: &str) -> Result<String, String> {
         use base64::Engine;
         use image::ImageEncoder;
 
-        let qr = qrcode::QrCode::new(data.as_bytes()).unwrap();
+        let qr =
+            qrcode::QrCode::new(data.as_bytes()).map_err(|e| format!("QR encode failed: {e}"))?;
         let image = qr.render::<image::Luma<u8>>().build();
 
         let mut buffer = Vec::new();
@@ -274,12 +280,12 @@ impl PairingInfo {
                 image.height(),
                 image::ExtendedColorType::L8,
             )
-            .unwrap();
+            .map_err(|e| format!("QR PNG encode failed: {e}"))?;
 
-        format!(
+        Ok(format!(
             "data:image/png;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(&buffer)
-        )
+        ))
     }
 
     /// Check if pairing has expired
@@ -302,10 +308,25 @@ mod tests {
 
     #[test]
     fn test_pairing_info() {
-        let info = PairingInfo::generate();
+        let info = PairingInfo::generate().expect("pairing generation must succeed");
         assert_eq!(info.pin.len(), 6);
         assert!(info.pin.chars().all(|c| c.is_ascii_digit()));
         assert!(!info.is_expired());
+    }
+
+    #[test]
+    fn test_qr_code_rejects_oversize_payload() {
+        // ~4 KiB of payload exceeds the largest QR capacity: must be an
+        // Err, never a panic.
+        let oversize = "x".repeat(4096);
+        assert!(PairingInfo::generate_qr_code(&oversize).is_err());
+    }
+
+    #[test]
+    fn test_qr_code_round_trip_prefix() {
+        let img = PairingInfo::generate_qr_code("auralis://pair?pin=123456")
+            .expect("small payload must encode");
+        assert!(img.starts_with("data:image/png;base64,"));
     }
 
     #[test]
