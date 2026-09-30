@@ -52,14 +52,65 @@ use jni::{
 
 /// `MediaStore.MediaColumns` names, spelled out so this module keeps building
 /// (and behaving identically) without the Android SDK on the host.
-#[cfg(target_os = "android")]
+///
+/// **These are deliberately NOT `#[cfg(target_os = "android")]`.** Gating them
+/// is what let `COLUMN_DISPLAY_NAME` ship the wrong value for eleven minor
+/// releases: no host build ever compiled them, so no host test could catch a
+/// one-character typo, and the constants' whole stated purpose — being
+/// checkable without the Android SDK — was defeated by the gate. Ungated, every
+/// `cargo test` on any machine now verifies them.
+/// Unused on host targets; used only from the JNI publish path.
+#[allow(dead_code)]
 const COLUMN_IS_PENDING: &str = "is_pending";
-#[cfg(target_os = "android")]
-const COLUMN_DISPLAY_NAME: &str = "display_name";
-#[cfg(target_os = "android")]
+/// ⚠️ The leading underscore is **required** and was missing here for every
+/// release up to and including v2.6.66, which is why `Download/Auralis/` was
+/// empty on every Android device rather than only on unusual ones.
+///
+/// `MediaStore.MediaColumns.DISPLAY_NAME` is the **ContentProvider key**
+/// `"_display_name"` — quoted from the platform reference, which states for
+/// `DISPLAY_NAME`: "Added in API level 1 … The display name of the media item.
+/// For example, an item stored at /storage/0000-0000/DCIM/Vacation/IMG1024.JPG
+/// would have a display name of IMG1024.JPG. … Constant Value: `_display_name`."
+///
+/// `display_name` is the *underlying SQLite column* in MediaProvider's `files`
+/// table, and the projection map translates the key to it. `enforceStrictColumns`
+/// tests the **key** against the allowed-column map, so sending the column name
+/// directly is rejected as `IllegalArgumentException: Invalid column
+/// display_name` — which is precisely what the device reported, on the
+/// `external/file` collection as well as `external/downloads`.
+///
+/// **This was not a HyperOS fork defect.** That conclusion came from asserting
+/// the constant's value from memory instead of reading the reference, and it
+/// was wrong. Do not "fix" this back to `display_name`; the regression test
+/// below asserts the documented value.
+const COLUMN_DISPLAY_NAME: &str = "_display_name";
+/// Unused on host targets; used only from the JNI publish path.
+#[allow(dead_code)]
 const COLUMN_MIME_TYPE: &str = "mime_type";
-#[cfg(target_os = "android")]
+/// Unused on host targets; used only from the JNI publish path.
+#[allow(dead_code)]
 const COLUMN_RELATIVE_PATH: &str = "relative_path";
+
+/// **Compile-time** enforcement of the column name, so it holds even for a
+/// build that never runs the test suite — `cargo build`, `cargo clippy`,
+/// `cargo check --target aarch64-linux-android`. The runtime test in
+/// `tests::display_name_column_is_the_contentprovider_key_not_the_sql_column`
+/// covers the same ground with a better message; this is what makes the value
+/// impossible to get wrong silently, which is how it stayed wrong for eleven
+/// releases.
+const _: () = {
+    assert!(
+        COLUMN_DISPLAY_NAME.as_bytes()[0] == b'_',
+        "MediaStore.MediaColumns.DISPLAY_NAME is \"_display_name\" (leading \
+         underscore required). Sending \"display_name\" makes MediaProvider \
+         reject the entire insert with 'Invalid column display_name', so \
+         Download/Auralis/ stays empty."
+    );
+    assert!(
+        COLUMN_DISPLAY_NAME.len() == 13,
+        "expected \"_display_name\" (13 bytes)"
+    );
+};
 
 /// Where the public copy lives, as a `MediaStore` relative path (API 29+) and
 /// as the absolute path we hand back to the caller. The legacy branch builds
@@ -1496,7 +1547,7 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
                 .map_err(|e| e.to_string())?;
             let j_display = env.new_string(&display).map_err(|e| e.to_string())?;
             let j_sel = env
-                .new_string("display_name=?")
+                .new_string("_display_name=?")
                 .map_err(|e| e.to_string())?;
             let arr = env
                 .new_object_array(1, "java/lang/String", &j_display)
@@ -1701,6 +1752,58 @@ pub fn cached_copy_for_path(path: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The publish bug that emptied `Download/Auralis/` on every device, from
+    /// v2.5.11 to v2.6.66.
+    ///
+    /// `MediaStore.MediaColumns.DISPLAY_NAME` is `"_display_name"` per the
+    /// platform reference ("Added in API level 1 … Constant Value:
+    /// `_display_name`"). `display_name` is the underlying SQLite column, not
+    /// the ContentProvider key, and `enforceStrictColumns` rejects any key the
+    /// allowed-column map does not contain — hence
+    /// `IllegalArgumentException: Invalid column display_name`.
+    ///
+    /// It is asserted rather than left to review because the wrong value is
+    /// *more* plausible than the right one: the bug shipped for eleven minor
+    /// versions, and it survived an audit that traced the exact AOSP throw site,
+    /// correctly, and then still assumed the constant was right. A correct
+    /// mechanism plus an unchecked premise is how this lasted.
+    #[test]
+    fn display_name_column_is_the_contentprovider_key_not_the_sql_column() {
+        assert_eq!(
+            COLUMN_DISPLAY_NAME, "_display_name",
+            "MediaStore.MediaColumns.DISPLAY_NAME is \"_display_name\"; sending \
+             \"display_name\" makes MediaProvider reject the whole insert with \
+             'Invalid column display_name' and the file never becomes visible"
+        );
+        // The trap this test exists for: the two spellings differ by one
+        // character, so a plausible-looking edit reintroduces the bug silently.
+        assert_ne!(
+            COLUMN_DISPLAY_NAME, "display_name",
+            "reverted to the SQLite column name — this is the v2.6.66 bug"
+        );
+    }
+
+    /// The lookup in `cached_copy_for_path` must use the same key as the insert,
+    /// or a published file is invisible to playback: the row is written and then
+    /// never found.
+    #[test]
+    fn the_lookup_selects_the_same_column_the_insert_writes() {
+        let src = fs2_read_to_string();
+        let expected = format!("{}=?", COLUMN_DISPLAY_NAME);
+        assert!(
+            src.contains(&expected),
+            "cached_copy_for_path must select {expected:?} to match COLUMN_DISPLAY_NAME"
+        );
+        assert!(
+            !src.contains("\"display_name=?\""),
+            "the old unprefixed selection is still present"
+        );
+    }
+
+    fn fs2_read_to_string() -> String {
+        std::fs::read_to_string(file!()).unwrap_or_default()
+    }
 
     #[test]
     fn complete_copy_clears_then_stops() {

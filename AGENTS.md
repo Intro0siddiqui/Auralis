@@ -646,47 +646,74 @@ publish failed: MediaStore insert failed for 'Safari - Serena _Slowed_Reverb_Lyr
   java.lang.IllegalArgumentException: Invalid column display_name
 ```
 
-`COLUMN_DISPLAY_NAME` is `"display_name"` (`android_downloads.rs:58`), which **is**
-the correct string — `MediaStore.MediaColumns.DISPLAY_NAME` is `"display_name"`. The
-insert is into `MediaStore.Downloads.EXTERNAL_CONTENT_URI` with
-`IS_PENDING=1`, `MIME_TYPE` and `RELATIVE_PATH` — the documented shape.
+**ROOT CAUSE FOUND AND FIXED (2026-09-30) — and it is ours, not the device's.**
 
-**So this is not an obvious typo, and the fix must not be guessed.** Read the actual
-MediaProvider contract for API 36 before changing anything. Two things to keep in
-mind while doing it: the file is already correctly written to app storage, so this
-is a *publish* bug and not a download bug; and `publish_q` is the API 29+ path, so
-`publish_legacy` is not implicated.
+`MediaStore.MediaColumns.DISPLAY_NAME` is `"_display_name"` — **with the leading
+underscore**, per the platform reference (DISPLAY_NAME, "Added in API level 1 …
+The display name of the media item. For example, an item stored at
+/storage/0000-0000/DCIM/Vacation/IMG1024.JPG would have a display name of
+IMG1024.JPG. … Constant Value: `_display_name`").
 
-**The publish fails 100% of the time on API 36.** Every download is app-storage-only
-and invisible in Files. That is the whole explanation for the long-standing mystery.
+Our constant was `"display_name"` (`android_downloads.rs:58`). `display_name` is the
+**underlying SQLite column** in MediaProvider's `files` table; `_display_name` is the
+**ContentProvider key**, and the projection map translates key → column. Since
+`enforceStrictColumns` tests the **key** against the allowed-column map, sending the
+column name is rejected outright. Fixed in `publish_q` and in `cached_copy_for_path`'s
+selection (`"display_name=?"` → `"_display_name=?"`, which was a second, independent bug:
+the row was written and then could never be found).
 
-**MEASURED on the device (2026-09-30, owner ran the queries via adb shell).**
+**This means `Download/Auralis/` has been empty on EVERY Android device since v2.5.11,
+not only on this one.** There is no fork defect. Every theory below about HyperOS,
+about a Downloads-specific projection map, and about "the fork removed the name" was
+wrong, and all of it came from **asserting the constant's value from memory instead of
+reading the reference** — while looking for a typo that was never there. The device
+measurement was always consistent with the true cause: `_id` accepted, `display_name`
+refused, on *both* `external/file` and `external/downloads`.
+
+**Why it survived eleven minor releases, and an audit that had the right mechanism.**
+`@refactor` traced the throw to `SQLiteQueryBuilder.enforceStrictColumns` and read the
+map's construction correctly — then assumed the key was correct, because the code said
+`"display_name"` and that looks like the column name. A correct mechanism plus an
+unchecked premise is indistinguishable from a correct diagnosis until someone checks the
+premise. **Quote the premise.**
+
+**Two structural fixes, because the value alone would not have kept it fixed:**
+- The four `MediaColumns` constants are **no longer `#[cfg(target_os = "android")]`.** That
+  gate is *why* the typo survived: their stated purpose is "so this module keeps building
+  without the Android SDK on the host", and gating them defeated exactly that, so no host
+  build or host test ever saw the value.
+- `const _: () = assert!(...)` enforces the column name at **compile time**, so
+  `cargo build`, `cargo clippy` and `cargo check --target aarch64-linux-android` all fail
+  on it — not only `cargo test`. Mutation-verified: reverting the constant to
+  `"display_name"` fails the build with
+  `error[E0080]: MediaStore.MediaColumns.DISPLAY_NAME is "_display_name" …`.
+
+**Verification honesty:** `cfg(target_os = "android")` code cannot be compiled on this box
+(NDK host toolchain is x86_64, this is aarch64), so **only the owner can confirm the
+publish actually works.** The column name is verified against the platform reference and
+enforced at compile time; the end-to-end publish is not verified until a device run. Do
+not read the green host gate as evidence that the file appears in Files.
+
+### 4.7.11b The measured device results, kept for the record
 
 ```
-content://media/external/file       --projection display_name  -> IllegalArgumentException: Invalid column display_name
-content://media/external/downloads  --projection display_name  -> IllegalArgumentException: Invalid column display_name
-content://media/external/downloads  --projection _id           -> 36 rows, WORKS
+content://media/external/file       --projection display_name -> IllegalArgumentException: Invalid column display_name
+content://media/external/downloads  --projection display_name -> IllegalArgumentException: Invalid column display_name
+content://media/external/downloads  --projection _id          -> 36 rows. WORKS.
 ```
 
-Two conclusions, in order of importance:
-
-1. **`display_name` is rejected device-wide, not just on the Downloads collection.**
-   `external/file` is the base table every media collection is a view onto, so the
-   rejection is a property of the provider's allowed-column map as a whole. **The
-   "Downloads-specific projection map" hypothesis is dead** — there is no narrower
-   defect to point at. The shell UID reaches the provider fine (`_id` returns rows),
-   so this is not a permission artefact, and it is the same string our insert sends.
-   The fork removed the name from its map.
+1. **Rejection was device-wide, and that is now explained.** `external/file` is the base
+   table every media collection views, and it refused the key too — consistent with the
+   key simply not being in any map, which is what a wrong constant produces everywhere.
 2. **The column sweep is VOID and must not be cited.** It reported `FAIL` for all 36
-   columns — *including `_id`*, which succeeded standalone in the same session. A
-   sweep whose own control disagrees with a known-good observation measures the
-   harness, not the target; every row in it is discarded. Re-run with the error
-   text classified rather than an exit code, and with `_id` as an in-loop control.
-   (Most likely cause: 36 rapid `adb shell` round-trips, which this device does not
-   survive. Unproven — which is exactly why the control has to be in the loop.)
+   columns *including `_id`*, which succeeded standalone in the same session. A sweep
+   whose own control contradicts a known-good observation measures the harness, not the
+   target; every row was discarded. (Most likely 36 rapid `adb shell` round-trips. Unproven
+   — which is why the control has to be inside the loop.)
 
-So the accepted-column set on this fork is still **unknown**, and no workaround may
-be built until it is measured. Nothing above licenses guessing.
+The lesson generalises past this bug: **the diagnosis was built on a premise nobody
+checked, and the mechanism research was excellent.** Good mechanism work actively hides a
+bad premise, because a correct throw-site trace makes the whole story feel verified.
 
 ### 4.7.12 The window is TRACK-SPECIFIC — the highest-value open question now
 
