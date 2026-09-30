@@ -1,5 +1,7 @@
 //! Download completeness verification by *decoded* length.
 //!
+//! ⚠️ **This is the fallback, not the gate. Read this before trusting it.**
+//!
 //! Why this exists
 //! ---------------
 //! A truncated YouTube download looks perfectly healthy to a metadata reader.
@@ -11,10 +13,28 @@
 //! bytes on disk are short, the header says otherwise, and the download used
 //! to be reported as completed.
 //!
-//! The only trustworthy signal is the decoder's own length: it reflects the
-//! samples that are really present (which is exactly the number the player
-//! shows, and the same value `player.rs` uses to auto-repair a lying database
-//! duration after the fact).
+//! This function was written to answer that with the decoder's own length,
+//! which was believed to reflect the samples really present.
+//!
+//! That belief is **falsified**, and the falsification is in this repo's own
+//! measurements. On `yF9nmg_jHNs` (muxed `itag 18`, verified 2026-09-29 on the
+//! dev box) the file arrived whole — 10 992 443 B, every advertised byte, the
+//! `stbl` sample table describing 216.34 s and the last audio sample ending at
+//! byte 10 990 660, *inside* the file — while the decoder yielded 54.4 s.
+//! **The transfer was always complete and the decoder stopped early.** It is
+//! wrong in the other direction too: on `94WoNQyK_KY` the same decoder measured
+//! 568.0 s of a 284.0 s track. A decoder's opinion of a file's length is not
+//! evidence about the length, which is why `AGENTS.md` §4.6 says so.
+//!
+//! Where that leaves this function: it is consulted **only** when
+//! [`super::forensics::inspect_container`] could not understand the container
+//! and so produced no structural evidence (`downloader::acceptance`, the
+//! unparseable-container branch). When the container *can* be read, the sample
+//! table decides and a short decode here abstains rather than vetoes — see
+//! `downloader::acceptance`, whose step 3 exists only because of the
+//! measurement above. Two real files were checked and both were whole; nothing
+//! here has ever caught a real truncation on its own, and nothing here should
+//! be promoted back to a primary gate.
 //!
 //! Behaviour
 //! ---------
@@ -23,8 +43,8 @@
 //!   Opus-in-WebM), so completeness cannot be judged here. Not an error: the
 //!   byte-accounting gate in `downloader.rs` remains the backstop.
 //! * `Err(_)` — the decodable audio is materially shorter than the track is
-//!   supposed to be, i.e. the download is truncated. The caller must not save
-//!   the file.
+//!   supposed to be. **Only consulted when no container evidence exists**; the
+//!   caller must then refuse the file.
 //!
 //! The threshold is deliberately loose (a file must be >10% short before it is
 //! rejected) so that container-level rounding differences between

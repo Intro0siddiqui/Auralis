@@ -638,8 +638,6 @@ const REASON_MISSING_BYTES: &str = "the sample table references bytes the file d
 const REASON_SHORT_TABLE: &str = "the container itself describes a shorter track than the \
                                    resolver expected, so the server sent a windowed object \
                                    and reported it as complete";
-const REASON_SHORT_AUDIO: &str = "every advertised byte arrived but the decoded audio is \
-                                  shorter than the track";
 const REASON_SILENT_TAIL: &str = "the bytes and the decoded length are complete but audio \
                                  stops well before the end, which is the signature of a \
                                  server-side window rather than of a whole file";
@@ -670,18 +668,26 @@ fn covers(value: f64, expected_secs: f64) -> bool {
 /// 1. Bytes, from the sample table. Exact, needs no decoding, and
 ///    `Verdict::Truncated` is a hard no.
 /// 2. Container coverage — does the table describe the full track?
-/// 3. Decoded length — [`ContentFacts::measured_secs`], the length from
-///    actually iterating the sample stream. Not `audible_secs`: that is a
-///    *position*, so a track that fades out at the end failed a check it should
-///    have passed, and burned four range-top-up rounds trying to add audio the
-///    file already had.
-/// 4. Audible position — consulted last, and only to **veto**.
+/// 3. NOT the decoded length. A short decode is non-evidence, not failure:
+///    measured on `yF9nmg_jHNs` (2026-09-29, dev box) — container `Complete`,
+///    table 216.3 s, every byte present — the decoder walked 25.2 % of the
+///    samples (`measured=54.4s`) and the gate refused a perfect file. The
+///    transfer was always whole; the decoder stopped early. Byte accounting
+///    (step 1) and table coverage (step 2) prove what a decode cannot
+///    disprove, so a short `measured_secs` abstains here unconditionally.
+/// 4. Audible position — consulted last, only as a **veto**, and only when
+///    the decode actually walked the whole track (`measured_secs` covers).
+///    Then a short audible position means observed trailing silence, the
+///    signature of a served window. When measured is short too, audible is
+///    just where the decode ended and adds no information, so the veto
+///    abstains with it.
 ///
-/// Step 4 has to stay. A server-side window is the shape where steps 1-3 all
-/// pass: every advertised byte arrived, the sample table describes the whole
-/// track, and the decoded stream is the right length — because what arrived
-/// after the cutoff is silence. Promoting `measured_secs` without keeping this
-/// veto would have silently deleted the only check that catches it.
+/// Step 4 has to stay in that gated form. A server-side window is the shape
+/// where steps 1-2 pass and the decoded stream is the right length — because
+/// what arrived after the cutoff is silence. Removing the veto would silently
+/// delete the only check that catches it; applying it to a short decode
+/// would refuse every file whose decoder stops early, which is the bug this
+/// ordering exists to prevent.
 fn acceptance(report: &ForensicReport, expected_secs: f64) -> Acceptance {
     match report.container.verdict.as_ref() {
         // The sample table references bytes the file does not have. No amount
@@ -713,30 +719,24 @@ fn acceptance(report: &ForensicReport, expected_secs: f64) -> Acceptance {
         return Acceptance::Reject(REASON_SHORT_TABLE);
     }
 
-    // A measurement that exists must cover the track. One that does not exist
-    // abstains: `measured_secs() == None` means the sample stream could not be
-    // walked at all, and `forensics` is explicit that this "never means empty"
-    // and that a caller must fall back to its other evidence — which here is
-    // the sample table's byte accounting, and that is exact.
+    // A short decode is non-evidence (see the step-3 note above), so there
+    // is no length rejection here at all: byte accounting and table coverage
+    // already decided. What remains is the audible veto, gated on the decode
+    // having walked the whole track — only then is a short audible position
+    // observed silence rather than the place the decoder stopped.
     //
-    // So that fallback is unreachable in production, and deliberately so: this
-    // function is only called once `verify_decoded_duration` reported the file
-    // short, and that call builds its decoder the same way `inspect_content`
-    // does, so a decoder exists by the time we get here.
-    if report
+    // `measured_secs() == None` means the sample stream could not be walked
+    // at all, and `forensics` is explicit that this "never means empty": the
+    // veto abstains with it, and the container's proof stands.
+    let decoded_covers = report
         .content
         .measured_secs()
-        .is_some_and(|measured| !covers(measured, expected_secs))
-    {
-        return Acceptance::Reject(REASON_SHORT_AUDIO);
-    }
-
-    // Supporting evidence, and the only thing that can reject a file whose
-    // bytes and decoded length are both complete.
-    if report
-        .content
-        .audible_secs
-        .is_some_and(|audible| audible < expected_secs * MIN_AUDIBLE_RATIO)
+        .is_some_and(|measured| covers(measured, expected_secs));
+    if decoded_covers
+        && report
+            .content
+            .audible_secs
+            .is_some_and(|audible| audible < expected_secs * MIN_AUDIBLE_RATIO)
     {
         return Acceptance::Reject(REASON_SILENT_TAIL);
     }
@@ -2944,21 +2944,20 @@ mod tests {
     }
 
     #[test]
-    fn the_measured_216_of_75_second_device_case_is_still_rejected() {
+    fn a_complete_container_overrules_a_short_decode() {
+        // Deliberate inversion of the pre-§4.7.13 belief this test used to
+        // pin (it asserted `Reject(REASON_SHORT_AUDIO)` on this exact shape).
         // The 2026-09-27 device download, `yF9nmg_jHNs`: all advertised bytes
-        // received, `end_reason=all-advertised-bytes-received`, then HTTP 416
-        // on every range mechanism. The container claimed `table=216.3s` while
-        // only `decoded=75s measured=54.4s` of audio was really there.
-        //
-        // Promotion of `measured_secs` must not have softened this: the measured
-        // length is short, so the file is refused whatever the container says.
+        // received, container `table=216.3s`, `decoded=75s measured=54.4s`.
+        // Measured on the dev box 2026-09-29, the transfer was always whole —
+        // the decoder walked 25.2 % of the samples and stopped. A short
+        // decode is non-evidence, so the container's proof stands.
         let report =
             complete_container_report(216.3, content_facts(48_000, 54 * 48_000, 54 * 48_000));
-        let verdict = acceptance(&report, 216.0);
         assert_eq!(
-            verdict,
-            Acceptance::Reject(REASON_SHORT_AUDIO),
-            "the 216s-vs-75s case must keep being refused: {}",
+            acceptance(&report, 216.0),
+            Acceptance::Accept,
+            "a complete container overrules a short decode: {}",
             report.content.summary()
         );
     }
@@ -2988,21 +2987,35 @@ mod tests {
     }
 
     #[test]
-    fn length_is_judged_before_the_audible_position() {
-        // The two signals must not be collapsed into one. A file whose decoded
-        // length is short is rejected whatever its audible position says, and a
-        // file whose decoded length covers the track is judged on audible
-        // position only as a veto.
+    fn a_short_decode_is_non_evidence_when_the_container_is_complete() {
+        // The two signals must not be collapsed into one. A short decode is
+        // non-evidence once the container has proven the file whole, so the
+        // audible veto only fires when the decode walked the full track and
+        // found early silence.
         let expected = 240.0;
 
-        // Short measured length, and audible is *fine* (the whole thing is
-        // loud). Still rejected — the length signal came first.
+        // Short decoded length, and audible is *fine* (the whole thing is
+        // loud). Accepted — the container proved the file; the decoder
+        // stopping early disproves nothing.
         let short_but_loud =
             complete_container_report(240.0, content_facts(48_000, 60 * 48_000, 60 * 48_000));
-        assert!(
-            matches!(acceptance(&short_but_loud, expected), Acceptance::Reject(_)),
-            "a loud but short file is still short: {}",
+        assert_eq!(
+            acceptance(&short_but_loud, expected),
+            Acceptance::Accept,
+            "a loud but short decode is non-evidence: {}",
             short_but_loud.content.summary()
+        );
+
+        // Short decoded length, and audible ends where the decode ended.
+        // Accepted — audible == end-of-decode adds no information beyond
+        // "the decoder stopped"; it is not observed trailing silence.
+        let short_and_quiet =
+            complete_container_report(240.0, content_facts(48_000, 60 * 48_000, 48 * 48_000));
+        assert_eq!(
+            acceptance(&short_and_quiet, expected),
+            Acceptance::Accept,
+            "audible-at-decode-end is not trailing silence: {}",
+            short_and_quiet.content.summary()
         );
 
         // Long enough, and the audible tail is 10 % of the track: accepted, so
@@ -3109,13 +3122,16 @@ mod tests {
             report.content.summary()
         );
 
-        // A *present* measurement is a different matter: short is short.
+        // A *present but short* measurement is the same non-evidence: the
+        // container proved the file, the decoder stopped early.
         let measured_short =
             complete_container_report(240.0, content_facts(48_000, 12_000, 12_000));
-        assert!(matches!(
+        assert_eq!(
             acceptance(&measured_short, 240.0),
-            Acceptance::Reject(_)
-        ));
+            Acceptance::Accept,
+            "a short decode does not veto a complete container: {}",
+            measured_short.content.summary()
+        );
     }
 
     // ---------------------------------------------------------------------
