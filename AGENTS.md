@@ -660,6 +660,34 @@ is a *publish* bug and not a download bug; and `publish_q` is the API 29+ path, 
 **The publish fails 100% of the time on API 36.** Every download is app-storage-only
 and invisible in Files. That is the whole explanation for the long-standing mystery.
 
+**MEASURED on the device (2026-09-30, owner ran the queries via adb shell).**
+
+```
+content://media/external/file       --projection display_name  -> IllegalArgumentException: Invalid column display_name
+content://media/external/downloads  --projection display_name  -> IllegalArgumentException: Invalid column display_name
+content://media/external/downloads  --projection _id           -> 36 rows, WORKS
+```
+
+Two conclusions, in order of importance:
+
+1. **`display_name` is rejected device-wide, not just on the Downloads collection.**
+   `external/file` is the base table every media collection is a view onto, so the
+   rejection is a property of the provider's allowed-column map as a whole. **The
+   "Downloads-specific projection map" hypothesis is dead** — there is no narrower
+   defect to point at. The shell UID reaches the provider fine (`_id` returns rows),
+   so this is not a permission artefact, and it is the same string our insert sends.
+   The fork removed the name from its map.
+2. **The column sweep is VOID and must not be cited.** It reported `FAIL` for all 36
+   columns — *including `_id`*, which succeeded standalone in the same session. A
+   sweep whose own control disagrees with a known-good observation measures the
+   harness, not the target; every row in it is discarded. Re-run with the error
+   text classified rather than an exit code, and with `_id` as an in-loop control.
+   (Most likely cause: 36 rapid `adb shell` round-trips, which this device does not
+   survive. Unproven — which is exactly why the control has to be in the loop.)
+
+So the accepted-column set on this fork is still **unknown**, and no workaround may
+be built until it is measured. Nothing above licenses guessing.
+
 ### 4.7.12 The window is TRACK-SPECIFIC — the highest-value open question now
 
 Same itag, same class, same client ladder, opposite outcomes:
