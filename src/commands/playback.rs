@@ -94,7 +94,18 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
             // that is not playing emits no progress, so the cadence below is
             // what decides how much evidence the report gets. Closing the
             // window returns the finished report, if this was the last poll.
-            if let Some(report) = observe_resume_probe(Instant::now(), is_playing, is_empty) {
+            //
+            // The pause bookkeeping rides along on the same tick, because a
+            // `pause` command that lands mid-window is the difference between
+            // "rodio never started the fresh sink" and "something paused the
+            // sink this resume had just built" — a distinction rodio itself
+            // cannot express (see `attribute_pause`).
+            if let Some(report) = observe_resume_probe(
+                Instant::now(),
+                is_playing,
+                is_empty,
+                PauseSample::of(&player),
+            ) {
                 warn!(
                     verdict = %report.probe,
                     detail = %report.probe_detail,
@@ -328,9 +339,23 @@ pub async fn pause(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<(),
 ///    write `tracing` to stdout and the owner has no logcat, so the report is
 ///    also rendered into the queue panel ("Resume log" + a copy button) and a
 ///    bad verdict raises a `playback:error` toast.
+///
+/// **Only one resume runs at a time** ([`RESUME_INFLIGHT`]). That is not a
+/// throughput decision: two of them overlapping interleave inside
+/// `play_track`, and each rebuild of the sink is three separate `.await`s —
+/// `stop()`, the install, then the position restore. A second resume landing
+/// in that window takes the sink out from under the first, and the first's
+/// `seek` then finds no sink at all and reports `No active playback` for a
+/// resume that was working. The device log shows exactly the situation this
+/// guards — five resume attempts inside two seconds, four of them replacing
+/// the one before — and it is also what makes `pre=paused` mean what the log
+/// says it means: the state when *this* resume started, not when it happened
+/// to be scheduled.
 #[tauri::command]
 pub async fn resume(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<(), String> {
     info!("Resume command received");
+
+    let _serialised = RESUME_INFLIGHT.lock().await;
 
     // One snapshot, before anything is touched: `is_playing` is
     // `!is_paused && !empty`, so `(false, false)` is exactly the paused-with-
@@ -378,8 +403,11 @@ pub async fn resume(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<()
                 // already carries `not_probed`).
                 file_resume_report(report);
             } else {
-                // The watcher fills in the verdict once the window closes.
-                arm_resume_probe(report);
+                // The watcher fills in the verdict once the window closes. The
+                // pause epoch is sampled *after* the rebuild, so a `pause` that
+                // cancels this attempt is inside the probe's window and gets
+                // attributed to it (see `attribute_pause`).
+                arm_resume_probe(report, player.pause_epoch());
             }
             emit_state_changed(&app, &player).await;
             background_service::push_now_playing(&player).await;
@@ -957,14 +985,15 @@ async fn emit_queue_updated(app: &AppHandle, queue: &PlaybackQueue) {
 // against its own ticks, and the report is rendered into the queue panel with a
 // copy button — the same shape as the download row's "Copy report".
 //
-// The five shapes the log is built to separate:
+// The six shapes the log is built to separate:
 //
 // | verdict                | meaning                                              |
 // |------------------------|------------------------------------------------------|
 // | `playing_confirmed`    | the sink reported playing; silence here is downstream of our state |
 // | `drained_immediately`  | nothing ever played and the source was already drained |
 // | `played_then_drained`  | audio started and was consumed before the window closed |
-// | `never_playing`        | the sink has a live source but rodio never left `is_paused` |
+// | `never_playing`        | a live source, no command paused it, and rodio still would not play it |
+// | `paused_by_command`    | a `pause` command landed after this resume armed; see [`attribute_pause`] |
 // | `no_observation`       | the watcher did not sample inside the window (task starved) |
 //
 // `playing_confirmed` versus `never_playing` is the pair that matters: the
@@ -972,6 +1001,28 @@ async fn emit_queue_updated(app: &AppHandle, queue: &PlaybackQueue) {
 // means the unpause itself did nothing. `progress=N` in the detail line is the
 // number of `playback:progress` events the run really emitted, so "no audio"
 // can be told apart from "no events reached the frontend" without guessing.
+//
+// **`paused_by_command` exists because `never_playing` was not saying what it
+// looked like it said.** The device run of 2026-09-29 recorded
+// `never_playing (polls=7 progress=0 empty=0)`, and for three releases that
+// line was read as "rodio refused to start the fresh sink". It cannot mean
+// that. `start_sink` builds its player with `Player::connect_new` and never
+// calls `pause()` on it, and in rodio 0.22.2 a new `Player` is born unpaused
+// (`src/player.rs:89`, `pause: AtomicBool::new(false)`) whose pause flag has
+// exactly two writers — `Player::pause()` (`src/player.rs:265`) and
+// `Player::clear()` (`src/player.rs:283`), and this crate calls neither on a
+// live sink. So `empty=0` with `progress=0` is not "rodio did nothing": it is
+// "a live sink is sitting paused", and for a sink this crate built and did not
+// pause itself, that means a `pause` command arrived. The log now says that,
+// and says when.
+//
+// It deliberately does **not** name the actor, because the counter cannot: the
+// in-app button, `PlayerController.pause()`, the Android notification /
+// MediaSession and the audio-focus handler all land in the same
+// [`crate::infrastructure::media::AudioPlayer::pause`]. What it does give is the
+// offset from the arm, which is the discriminator — a pause a few hundred
+// milliseconds after the resume is a user tap, and one landing inside the first
+// poll is a focus or MediaSession event nobody touched the screen for.
 
 /// How many resume attempts the log keeps. Matches the download side's
 /// `window.__auralisClientReports` (last 20), so the evidence for a failure
@@ -1005,8 +1056,13 @@ const VERDICT_CONFIRMED: &str = "playing_confirmed";
 const VERDICT_DRAINED_IMMEDIATE: &str = "drained_immediately";
 /// It played and was consumed inside the window.
 const VERDICT_PLAYED_THEN_DRAINED: &str = "played_then_drained";
-/// A live source is queued, but rodio never left the paused state.
+/// A live source is queued, but rodio never left the paused state **and nothing
+/// paused it** — see [`attribute_pause`] for why the second half is the only
+/// honest reading of the first.
 const VERDICT_NEVER_PLAYING: &str = "never_playing";
+/// A live source is queued and was explicitly paused by a `pause` command that
+/// landed after this resume armed. See [`attribute_pause`].
+const VERDICT_PAUSED_BY_COMMAND: &str = "paused_by_command";
 /// The watcher sampled nothing: the task is starved, which is its own bug.
 const VERDICT_NO_OBSERVATION: &str = "no_observation";
 /// A newer resume replaced this one before its window closed.
@@ -1060,6 +1116,36 @@ const RESUME_LOG_BUTTON: &str = "<button type=\"button\" class=\"btn btn-seconda
 data-action=\"copy-resume-log\" data-report=\"{REPORT}\" onclick=\"{JS}\">Copy resume log</button>";
 
 const RESUME_LOG_CLOSE: &str = "</div>";
+
+/// The two facts [`AudioPlayer`] exposes about pausing, sampled once per tick.
+///
+/// rodio's pause flag is a bare `AtomicBool` with no cause attached, so these
+/// two numbers are the *only* way a caller can tell "rodio never started this
+/// sink" from "something paused it". Sampled by value rather than read from a
+/// lock inside the probe, which is what keeps the probe a pure function.
+///
+/// The pair must be sampled together, which `AudioPlayer::pause` arranges by
+/// storing the instant *before* it bumps the counter: a caller that sees the
+/// new counter is necessarily reading after the instant was stored, so the
+/// offset it derives belongs to the pause that actually cancelled this resume.
+/// The other order hands out the previous pause's timestamp against the new
+/// counter — a plausible-looking but wrong number, which is worse than none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PauseSample {
+    /// [`AudioPlayer::pause_epoch`]: how many `pause` calls have been served.
+    epoch: u64,
+    /// [`AudioPlayer::last_pause_at`]: when the most recent one was served.
+    at: Option<Instant>,
+}
+
+impl PauseSample {
+    fn of(player: &AudioPlayer) -> Self {
+        Self {
+            epoch: player.pause_epoch(),
+            at: player.last_pause_at(),
+        }
+    }
+}
 
 /// Which route a resume takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1194,6 +1280,11 @@ struct ResumeProbe {
     /// An empty sample *after* a playing one: audio started and was consumed,
     /// which is a different failure from never starting.
     drained_after_playing: bool,
+    /// [`AudioPlayer::pause_epoch`] as it stood when the probe was armed. A
+    /// pause that landed *before* the resume is therefore invisible to it,
+    /// which is the point: the question this probe answers is "what happened
+    /// to the sink this resume built", not "was the sink ever paused".
+    pause_epoch_at_arm: u64,
 }
 
 struct ResumeLog {
@@ -1214,6 +1305,16 @@ static RESUME_LOG: Mutex<ResumeLog> = Mutex::new(ResumeLog {
     awaiting_replay: false,
     awaiting_since: None,
 });
+
+/// One resume at a time. See the `resume` command's doc comment for why an
+/// overlapping pair is a correctness problem and not just wasted work.
+///
+/// A `tokio::sync::Mutex` rather than the `std::sync::Mutex` the log uses,
+/// because this one is held across the whole command — `play_track` and the
+/// position restore are both async, and blocking a runtime worker on a
+/// `std::sync::Mutex` is how a `try_seek` (a *blocking* `recv` inside rodio)
+/// turns into a stalled worker.
+static RESUME_INFLIGHT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Poison-tolerant lock: a panic in one resume attempt must not blind every
 /// later one, and the state here is plain data with no invariant a panic could
@@ -1301,7 +1402,22 @@ async fn replay_on_fresh_sink(
         return Ok(());
     }
     match player.seek(pos_before).await {
-        Ok(()) => report.pos_restored = "ok".to_string(),
+        Ok(()) => {
+            // `ok` alone has been the wrong thing to read: when the native
+            // seek fails, `seek_fallback` builds a *replacement* player and
+            // reuses the sink's paused state, so a restore taken while the
+            // fresh sink is paused installs a new sink that has never been
+            // played — the very shape the probe then reports as "never
+            // playing". The distinction is one `take_seek_rebuilt_sink()` away
+            // and it is the difference between "the position was restored on
+            // the sink the resume built" and "the position was restored on a
+            // different, paused sink".
+            report.pos_restored = if player.take_seek_rebuilt_sink() {
+                "rebuilt".to_string()
+            } else {
+                "ok".to_string()
+            };
+        }
         Err(e) => {
             // Not fatal: playback is running, from the wrong offset. The log
             // says so, because "resume restarted my track" is otherwise
@@ -1367,7 +1483,7 @@ fn file_resume_report_opening_replay(report: ResumeReport) {
     push_resume_report(&mut log.reports, report);
 }
 
-fn arm_resume_probe(report: ResumeReport) {
+fn arm_resume_probe(report: ResumeReport, pause_epoch: u64) {
     let mut log = resume_log();
     if let Some(stale) = log.pending.take() {
         // Two resumes inside one window: the newer attempt is the one the user
@@ -1384,6 +1500,7 @@ fn arm_resume_probe(report: ResumeReport) {
         playing_polls: 0,
         empty_polls: 0,
         drained_after_playing: false,
+        pause_epoch_at_arm: pause_epoch,
     });
 }
 
@@ -1398,7 +1515,19 @@ fn resume_probe_pending() -> bool {
 /// for this attempt, because the watcher emits that event on exactly this
 /// condition — which is what makes "no audio" and "no events reached the
 /// frontend" separable from here at all.
-fn observe_resume_probe(now: Instant, is_playing: bool, is_empty: bool) -> Option<ResumeReport> {
+///
+/// `pause` is this tick's sample of [`AudioPlayer`]'s pause bookkeeping; it is
+/// compared against the value the probe was armed with, so a `pause` that
+/// arrives mid-window is attributed to the resume it cancelled. Pure
+/// arithmetic on values the caller already holds, so the whole thing stays
+/// headlessly testable — no audio device is needed to say "this sink was
+/// paused by a command".
+fn observe_resume_probe(
+    now: Instant,
+    is_playing: bool,
+    is_empty: bool,
+    pause: PauseSample,
+) -> Option<ResumeReport> {
     let mut log = resume_log();
     let probe = log.pending.as_mut()?;
     probe.polls = probe.polls.saturating_add(1);
@@ -1422,13 +1551,64 @@ fn observe_resume_probe(now: Instant, is_playing: bool, is_empty: bool) -> Optio
         probe.empty_polls,
         probe.drained_after_playing,
     );
+    let paused_by = attribute_pause(probe.armed_at, probe.pause_epoch_at_arm, pause);
+    report.probe = apply_pause_attribution(report.probe, paused_by);
     report.probe_detail = format!(
-        "polls={} progress={} empty={}",
-        probe.polls, probe.playing_polls, probe.empty_polls
+        "polls={} progress={} empty={}{}",
+        probe.polls,
+        probe.playing_polls,
+        probe.empty_polls,
+        match paused_by {
+            Some(offset) => format!(" paused_cmd=+{}ms", offset.as_millis()),
+            None => String::new(),
+        }
     );
     log.awaiting_replay = false;
     push_resume_report(&mut log.reports, report.clone());
     Some(report)
+}
+
+/// Whether a `pause` command was served between the probe being armed and the
+/// tick being judged, and how long after arming it landed.
+///
+/// The offset is measured from the arming instant, so the report reads "how
+/// long into the resume did the cancellation arrive" — the number that
+/// separates a user tapping again from an audio-focus or MediaSession pause
+/// nobody asked for. `None` means no pause was served in the window, which is
+/// the only case in which a paused sink is our own fault.
+///
+/// The epoch decides and the timestamp only decorates: a pause with no
+/// recorded instant (which [`AudioPlayer::pause`] does not produce, but which
+/// this code does not assume away) still reports `Some(ZERO)` rather than
+/// silently degrading to "nothing paused it", because wrongly blaming rodio is
+/// the failure mode this whole mechanism exists to stop.
+fn attribute_pause(armed_at: Instant, epoch_at_arm: u64, sample: PauseSample) -> Option<Duration> {
+    if sample.epoch <= epoch_at_arm {
+        return None;
+    }
+    Some(
+        sample
+            .at
+            .map(|at| at.saturating_duration_since(armed_at))
+            .unwrap_or(Duration::ZERO),
+    )
+}
+
+/// Re-attribute a verdict once it is known that a `pause` command landed
+/// inside the window.
+///
+/// Only the verdicts that mean "the sink was there and produced nothing" are
+/// rewritten. `playing_confirmed` is left alone (audio ran, whatever a later
+/// pause did to it), and so are the two bookkeeping verdicts — `superseded`
+/// and `not_probed` are not observations of a sink at all.
+fn apply_pause_attribution(
+    verdict: &'static str,
+    paused_by_command: Option<Duration>,
+) -> &'static str {
+    match (verdict, paused_by_command) {
+        (VERDICT_NEVER_PLAYING | VERDICT_DRAINED_IMMEDIATE, Some(_)) => VERDICT_PAUSED_BY_COMMAND,
+        _ => verdict,
+    }
 }
 
 /// Stamp the outcome of the replay the frontend runs after a rejected resume
@@ -1523,7 +1703,23 @@ fn format_resume_report(report: &ResumeReport) -> String {
 }
 
 /// The toast text for a resume that was accepted and then produced nothing.
+///
+/// The `paused_by_command` case gets its own sentence rather than the generic
+/// one, because it is the only verdict whose cause is already known: a release
+/// build writes `tracing` to stdout and the owner has no logcat, so a toast
+/// that says "Resume produced no audio" and stops there has cost three
+/// releases of forensics to decode one log line. Naming the cancellation — and
+/// saying how long after the resume it arrived — is the difference between a
+/// report the owner can act on and one they have to send back.
 fn resume_failure_toast(report: &ResumeReport) -> String {
+    if report.probe == VERDICT_PAUSED_BY_COMMAND {
+        return format!(
+            "Resume was cancelled: a pause command landed after it ({}). \
+             A second tap on the play button, the notification, or an audio-focus pause all \
+             arrive here. Details: queue panel > Resume log.",
+            report.probe_detail
+        );
+    }
     format!(
         "Resume produced no audio ({}). Details: queue panel > Resume log.",
         report.probe
@@ -1678,11 +1874,213 @@ mod tests {
             VERDICT_DRAINED_IMMEDIATE,
             VERDICT_PLAYED_THEN_DRAINED,
             VERDICT_NEVER_PLAYING,
+            VERDICT_PAUSED_BY_COMMAND,
             VERDICT_NO_OBSERVATION,
             VERDICT_FAILED,
         ] {
             assert!(verdict_is_failure(bad), "{bad} must be reported");
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Pause attribution
+    //
+    // The device line that motivated all of this
+    // (`never_playing (polls=7 progress=0 empty=0)`) cannot mean "rodio never
+    // started the fresh sink", because `start_sink` never calls `pause()` and a
+    // new rodio `Player` is born unpaused. It means "a live sink is sitting
+    // paused", and these tests are what stops the log saying otherwise.
+    // ---------------------------------------------------------------------
+
+    /// The exact shape from the device run, with the pause that produced it
+    /// accounted for. Before the epoch existed this reported
+    /// `never_playing`, which sent three releases of forensics looking at rodio.
+    #[test]
+    fn a_pause_inside_the_window_is_reported_as_a_cancelled_resume() {
+        let _guard = RESUME_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        reset_resume_log();
+        let track = sample_track();
+        // The resume armed with nothing paused, then a `pause` command landed.
+        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay), 0);
+        let sample = PauseSample {
+            epoch: 1,
+            at: Some(Instant::now()),
+        };
+        let past_window = Instant::now() + RESUME_PROBE_WINDOW + Duration::from_millis(1);
+        let report = observe_resume_probe(past_window, false, false, sample).expect("closes");
+        assert_eq!(
+            report.probe, VERDICT_PAUSED_BY_COMMAND,
+            "a live paused sink with a pause on record is a cancelled resume, not a rodio failure"
+        );
+        // The original evidence is still on the line — the attribution
+        // narrows the reading, it does not replace the measurement.
+        assert!(report.probe_detail.contains("polls=1 progress=0 empty=0"));
+        assert!(report.probe_detail.contains("paused_cmd=+"));
+        assert!(verdict_is_failure(report.probe));
+        reset_resume_log();
+    }
+
+    /// The counter is sampled at arm time, so a pause that happened *before*
+    /// this resume is invisible to it. Without this, every resume after the
+    /// owner's first pause would be blamed on a command that had nothing to do
+    /// with it — the attribution would be as wrong as the verdict it replaced.
+    #[test]
+    fn a_pause_before_the_resume_is_not_charged_to_it() {
+        let _guard = RESUME_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        reset_resume_log();
+        let track = sample_track();
+        // Epoch 7 at arm time: seven pauses have already been served.
+        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay), 7);
+        let sample = PauseSample {
+            epoch: 7,
+            at: Some(Instant::now()),
+        };
+        let past_window = Instant::now() + RESUME_PROBE_WINDOW + Duration::from_millis(1);
+        let report = observe_resume_probe(past_window, false, false, sample).expect("closes");
+        assert_eq!(
+            report.probe, VERDICT_NEVER_PLAYING,
+            "an unchanged epoch is the only case where a paused sink is our fault"
+        );
+        assert!(
+            !report.probe_detail.contains("paused_cmd"),
+            "detail was {}",
+            report.probe_detail
+        );
+        reset_resume_log();
+    }
+
+    /// A resume that really did play is not rewritten by a later pause: audio
+    /// ran, and whatever stopped it afterwards is a separate fact. Rewriting
+    /// this would make the new verdict *less* honest than the old one.
+    #[test]
+    fn a_confirmed_resume_survives_a_later_pause_untouched() {
+        let _guard = RESUME_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        reset_resume_log();
+        let track = sample_track();
+        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay), 0);
+        assert!(
+            observe_resume_probe(Instant::now(), true, false, PauseSample::default()).is_none()
+        );
+        let sample = PauseSample {
+            epoch: 3,
+            at: Some(Instant::now()),
+        };
+        let past_window = Instant::now() + RESUME_PROBE_WINDOW + Duration::from_millis(1);
+        let report = observe_resume_probe(past_window, true, false, sample).expect("closes");
+        assert_eq!(report.probe, VERDICT_CONFIRMED);
+        assert!(
+            report.probe_detail.contains("progress=2"),
+            "detail was {}",
+            report.probe_detail
+        );
+        reset_resume_log();
+    }
+
+    /// A superseded probe was never judged against a sink, so a pause landing
+    /// while it waited must not invent a verdict for it — the newer resume owns
+    /// the sink and the newer report.
+    #[test]
+    fn a_superseded_probe_is_not_rewritten_by_a_pause() {
+        let _guard = RESUME_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        reset_resume_log();
+        let track = sample_track();
+        arm_resume_probe(sample_report(&track, ResumeStrategy::Unpause), 0);
+        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay), 0);
+        let snapshot = resume_log_snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].probe, VERDICT_SUPERSEDED);
+        assert!(
+            !snapshot[0].probe_detail.contains("paused_cmd"),
+            "detail was {}",
+            snapshot[0].probe_detail
+        );
+        reset_resume_log();
+    }
+
+    /// The offset is the only thing in the log that separates the two actors the
+    /// counter cannot tell apart: a user tapping the button again a few hundred
+    /// milliseconds in, versus a focus or MediaSession pause nobody asked for.
+    #[test]
+    fn the_pause_offset_is_measured_from_arming() {
+        let armed = Instant::now();
+        let sample = PauseSample {
+            epoch: 1,
+            at: Some(armed + Duration::from_millis(310)),
+        };
+        assert_eq!(
+            attribute_pause(armed, 0, sample),
+            Some(Duration::from_millis(310)),
+            "a pause 310ms in is a tap; the report has to say so in ms"
+        );
+        // No epoch movement: nothing was served, whatever the timestamp says.
+        assert_eq!(attribute_pause(armed, 4, sample), None);
+        // A pause with no recorded instant still counts. Degrading to `None`
+        // here would silently restore the old "blame rodio" verdict, which is
+        // the exact failure this mechanism exists to prevent.
+        assert_eq!(
+            attribute_pause(armed, 0, PauseSample { epoch: 1, at: None }),
+            Some(Duration::ZERO)
+        );
+    }
+
+    /// `drained_immediately` is re-attributed too. A paused source never ends,
+    /// so a pause and a drain in the same window means the drain was a
+    /// *consequence* of the pause and naming the pause first is the more
+    /// specific claim. The `empty=N` count stays on the line either way, so the
+    /// drain is still visible to whoever reads the next line.
+    #[test]
+    fn attribution_rewrites_every_verdict_that_means_the_sink_was_silent() {
+        assert_eq!(
+            apply_pause_attribution(VERDICT_NEVER_PLAYING, Some(Duration::from_millis(5))),
+            VERDICT_PAUSED_BY_COMMAND
+        );
+        assert_eq!(
+            apply_pause_attribution(VERDICT_DRAINED_IMMEDIATE, Some(Duration::from_millis(5))),
+            VERDICT_PAUSED_BY_COMMAND
+        );
+        // And with no pause on record, nothing is rewritten.
+        assert_eq!(
+            apply_pause_attribution(VERDICT_NEVER_PLAYING, None),
+            VERDICT_NEVER_PLAYING
+        );
+        assert_eq!(
+            apply_pause_attribution(VERDICT_PLAYED_THEN_DRAINED, Some(Duration::from_millis(5))),
+            VERDICT_PLAYED_THEN_DRAINED,
+            "audio started: a later pause is a separate fact, not this resume's story"
+        );
+        assert_eq!(
+            apply_pause_attribution(VERDICT_CONFIRMED, Some(Duration::from_millis(5))),
+            VERDICT_CONFIRMED
+        );
+    }
+
+    /// A release build writes `tracing` to stdout and the owner has no logcat,
+    /// so this toast is the only user-visible account of a cancelled resume. It
+    /// has to name the cancellation rather than send the owner to the log.
+    #[test]
+    fn a_cancelled_resume_toast_says_what_cancelled_it() {
+        let track = sample_track();
+        let mut report = sample_report(&track, ResumeStrategy::FreshSinkReplay);
+        report.probe = VERDICT_PAUSED_BY_COMMAND;
+        report.probe_detail = "polls=7 progress=0 empty=0 paused_cmd=+310ms".to_string();
+        let toast = resume_failure_toast(&report);
+        assert!(toast.contains("cancelled"), "toast was {toast}");
+        assert!(toast.contains("+310ms"), "toast was {toast}");
+        assert!(toast.contains("pause command"), "toast was {toast}");
+
+        // The generic wording is still correct for every other verdict.
+        report.probe = VERDICT_NEVER_PLAYING;
+        let generic = resume_failure_toast(&report);
+        assert!(generic.contains("produced no audio"), "toast was {generic}");
+        assert!(!generic.contains("cancelled"), "toast was {generic}");
     }
 
     // ---------------------------------------------------------------------
@@ -1741,15 +2139,17 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         reset_resume_log();
         let track = sample_track();
-        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay));
+        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay), 0);
         assert!(resume_probe_pending());
 
         // Inside the window: counted, not judged.
-        assert!(observe_resume_probe(Instant::now(), true, false).is_none());
+        assert!(
+            observe_resume_probe(Instant::now(), true, false, PauseSample::default()).is_none()
+        );
         assert!(resume_probe_pending());
 
         let past_window = Instant::now() + RESUME_PROBE_WINDOW + Duration::from_millis(1);
-        let report = observe_resume_probe(past_window, true, false)
+        let report = observe_resume_probe(past_window, true, false, PauseSample::default())
             .expect("the window must close on this tick");
         assert_eq!(report.probe, VERDICT_CONFIRMED);
         assert_eq!(report.probe_detail, "polls=2 progress=2 empty=0");
@@ -1768,9 +2168,10 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         reset_resume_log();
         let track = sample_track();
-        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay));
+        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay), 0);
         let past_window = Instant::now() + RESUME_PROBE_WINDOW + Duration::from_millis(1);
-        let report = observe_resume_probe(past_window, false, false).expect("closes");
+        let report = observe_resume_probe(past_window, false, false, PauseSample::default())
+            .expect("closes");
         assert_eq!(report.probe, VERDICT_NEVER_PLAYING);
         assert_eq!(report.probe_detail, "polls=1 progress=0 empty=0");
         reset_resume_log();
@@ -1783,12 +2184,15 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         reset_resume_log();
         let track = sample_track();
-        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay));
+        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay), 0);
         let past_window = Instant::now() + RESUME_PROBE_WINDOW + Duration::from_millis(1);
         // First tick plays, second tick is drained: the real "audio started and
         // was consumed" shape.
-        assert!(observe_resume_probe(Instant::now(), true, false).is_none());
-        let report = observe_resume_probe(past_window, false, true).expect("closes");
+        assert!(
+            observe_resume_probe(Instant::now(), true, false, PauseSample::default()).is_none()
+        );
+        let report =
+            observe_resume_probe(past_window, false, true, PauseSample::default()).expect("closes");
         assert_eq!(report.probe, VERDICT_PLAYED_THEN_DRAINED);
         assert_eq!(report.probe_detail, "polls=2 progress=1 empty=1");
         reset_resume_log();
@@ -1801,9 +2205,11 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         reset_resume_log();
         let track = sample_track();
-        arm_resume_probe(sample_report(&track, ResumeStrategy::Unpause));
-        assert!(observe_resume_probe(Instant::now(), false, false).is_none());
-        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay));
+        arm_resume_probe(sample_report(&track, ResumeStrategy::Unpause), 0);
+        assert!(
+            observe_resume_probe(Instant::now(), false, false, PauseSample::default()).is_none()
+        );
+        arm_resume_probe(sample_report(&track, ResumeStrategy::FreshSinkReplay), 0);
         let snapshot = resume_log_snapshot();
         assert_eq!(snapshot.len(), 1, "the superseded probe is still on record");
         assert_eq!(snapshot[0].probe, VERDICT_SUPERSEDED);
