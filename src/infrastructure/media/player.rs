@@ -6,6 +6,7 @@ use rodio::{mixer::Mixer, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, S
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -66,6 +67,34 @@ pub struct AudioPlayer {
     /// When the current playback session started.
     play_started_at: Arc<RwLock<Option<Instant>>>,
     track_duration: Arc<RwLock<Duration>>,
+    /// How many [`AudioPlayer::pause`] calls this player has served.
+    ///
+    /// rodio cannot answer "why is this sink paused". `Player::is_paused`
+    /// reads one `AtomicBool` **per `Player`** — read-from-source, rodio
+    /// 0.22.2 `src/player.rs`: `pause: AtomicBool::new(false)` in `new()`
+    /// (line 89), stored only by `pause()` (line 265) and by `clear()`
+    /// (line 283), which this crate never calls. So for a sink we built, and
+    /// did not pause ourselves, "is paused" and "a `pause` command arrived"
+    /// are *the same statement*, and the resume log could not tell them apart.
+    /// That is what made a `never_playing (empty=0)` verdict — a live sink
+    /// that is paused — read for three releases as "rodio never started the
+    /// fresh sink", when in fact something paused it a moment after the
+    /// resume did.
+    ///
+    /// Monotonic, so a probe can snapshot it when it arms and compare on every
+    /// tick without a lock, and a pause that landed *before* the resume armed
+    /// is correctly invisible to that resume.
+    pause_epoch: Arc<AtomicU64>,
+    /// When the most recent [`AudioPlayer::pause`] was served. Paired with
+    /// `pause_epoch`: the counter says *that* a pause happened, this says
+    /// *when*, and a resume needs the offset to tell a user tapping again from
+    /// an audio-focus pause nobody asked for. Kept out of the `AtomicU64`
+    /// because `Instant` is 16 bytes and cannot be packed into one.
+    last_pause_at: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// Whether the most recent [`AudioPlayer::seek`] had to replace the sink
+    /// rather than seek the live one. Read-and-cleared by the caller via
+    /// [`AudioPlayer::take_seek_rebuilt_sink`].
+    last_seek_rebuilt_sink: Arc<AtomicBool>,
     /// Test-only observer, called with the queue index in effect at the moment a
     /// start is attempted. `next` / `previous` have to move the index *before*
     /// starting so the commit's duration repair lands on the incoming track (see
@@ -80,8 +109,9 @@ pub struct AudioPlayer {
     start_observer: StartObserverSlot,
 }
 
-// SAFETY: `AudioPlayer` is a bag of `Arc<RwLock<_>>` / `Arc<Mutex<_>>`
-// around `Send` primitives (`Duration`, `Track`, `Player`, `bool`, etc.)
+// SAFETY: `AudioPlayer` is a bag of `Arc<RwLock<_>>` / `Arc<Mutex<_>>` /
+// `Arc<Atomic*>` around `Send` primitives (`Duration`, `Track`, `Player`,
+// `bool`, `u64`, etc.)
 // and the `OutputStreamHolder` above, which is itself documented as
 // `Send + Sync` under the invariants noted there. All interior state is
 // behind `Arc` + synchronization primitives, so sharing `&AudioPlayer`
@@ -97,23 +127,55 @@ unsafe impl Sync for AudioPlayer {}
 /// Reconcile the library's recorded duration with what a decoder reports.
 ///
 /// The decoder's number is a **lower bound, not an authority**. rodio's
-/// `total_duration()` reads a container header, and for the MP4s YouTube serves
-/// (fragmented, and muxed 360p progressives among them) it can stop at the first
-/// fragment it manages to parse: a 4:26 track came back as 1:32. The library
-/// value comes from the container's own sample table and is the same number the
-/// download gate verifies before saving a file, so when the two disagree the
-/// container wins and the decoder is only allowed to add information by
-/// claiming *more*.
+/// Reconcile three duration claims about one file: the library's, the
+/// decoder's, and the container's sample table.
 ///
-/// Before this, a >5s disagreement overwrote the library value with the
-/// decoder's, which shortened the progress bar, capped seeking at the wrong
-/// point and made the player report a long track as over.
-fn reconcile_duration(db: Duration, decoded: Option<Duration>) -> Duration {
+/// The container is authoritative whenever it is known: `total_duration()`
+/// reads a container header, and for the MP4s YouTube serves (fragmented,
+/// and muxed 360p progressives among them) it can stop at the first fragment
+/// it manages to parse — measured on `yF9nmg_jHNs` (2026-09-29, dev box),
+/// whose 216.34 s table decoded as 75 s by `total_duration()` and 54.4 s by
+/// a full sample walk. A decoder that claims less than the table miscounted,
+/// so the table wins in both directions: it corrects a stale-long library
+/// value *down* and an unscanned/zero one *up*.
+///
+/// Without a container reading, the legacy rule holds: the decoder may only
+/// ever *raise* the library value, never lower it. Before that rule, a >5 s
+/// disagreement overwrote the library value with the decoder's, which
+/// shortened the progress bar, capped seeking at the wrong point and made
+/// the player report a long track as over.
+fn reconcile_duration(
+    db: Duration,
+    decoded: Option<Duration>,
+    container: Option<Duration>,
+) -> Duration {
+    if let Some(table) = container.filter(|c| !c.is_zero()) {
+        return table;
+    }
     match decoded {
         Some(dec) if !db.is_zero() => db.max(dec),
         Some(dec) => dec,
         None => db,
     }
+}
+
+/// The container's own duration claim for a file, off the async runtime.
+///
+/// `inspect_container` walks MP4 box structure (unparsable containers yield
+/// no table), so this is `None` for anything but a readable MP4 — in which
+/// case the caller keeps its existing answer. Only invoked when the library
+/// and decoder already disagree, so the common path pays nothing.
+async fn container_table_secs(path: &str) -> Option<Duration> {
+    let owned = std::path::PathBuf::from(path);
+    tokio::task::spawn_blocking(move || {
+        super::forensics::inspect_container(&owned)
+            .table_secs
+            .filter(|t| *t > 0.0)
+            .map(Duration::from_secs_f64)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// A start that rodio has accepted: a sink exists and holds the decoded source.
@@ -153,6 +215,9 @@ impl AudioPlayer {
             play_anchor: Arc::new(RwLock::new(None)),
             play_started_at: Arc::new(RwLock::new(None)),
             track_duration: Arc::new(RwLock::new(Duration::ZERO)),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            last_pause_at: Arc::new(std::sync::Mutex::new(None)),
+            last_seek_rebuilt_sink: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             start_observer: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -255,10 +320,25 @@ impl AudioPlayer {
         let source = create_decoder(file, path)?;
 
         // Reconcile the duration the decoder reports with the one the library
-        // recorded. The decoder may only ever *raise* it, never lower it: see
-        // `reconcile_duration` for why.
+        // recorded. The decoder may only ever *raise* it, never lower it —
+        // unless the container's own sample table is consulted (below), which
+        // is authoritative in both directions: see `reconcile_duration`.
         let decoded = source.total_duration();
-        let duration = reconcile_duration(library_duration, decoded);
+        let mut duration = reconcile_duration(library_duration, decoded, None);
+        let disagree_secs = decoded.is_some_and(|dec_dur| {
+            (dec_dur.as_secs() as i64 - library_duration.as_secs() as i64).unsigned_abs() > 5
+        });
+        if disagree_secs {
+            // The two cheap signals disagree by more than the warn threshold,
+            // and one of them is wrong in a way `max()` cannot settle: a stale
+            // library value can be too *long* as well as too short. Ask the
+            // sample table, which is the same oracle the download gate trusts.
+            // Rare path (only these MP4s disagree), off the runtime thread,
+            // and a parse failure keeps today's answer — never a worse one.
+            if let Some(table) = container_table_secs(path).await {
+                duration = reconcile_duration(library_duration, decoded, Some(table));
+            }
+        }
         if let Some(dec_dur) = decoded {
             let db_secs = library_duration.as_secs();
             let dec_secs = dec_dur.as_secs();
@@ -300,11 +380,12 @@ impl AudioPlayer {
     /// That is deliberately not "only when the decoder corrected the library":
     /// without an opinion `duration` is the library's value, which is exactly
     /// what both copies already hold — `play_track` receives the queue entry as
-    /// its `Track`, and `reconcile_duration` never lowers a value — so the extra
-    /// guard would change no byte. With one, stamping is the whole point: the
-    /// decoder is the only thing that can raise a placeholder duration, and the
-    /// queue is a copy that has to follow or the UI disagrees with the player
-    /// bar.
+    /// its `Track`, and without a container arbitration `reconcile_duration`
+    /// never lowers a value — so the extra guard would change no byte. With
+    /// one, stamping is the whole point: the decoder is the only thing that
+    /// can raise a placeholder duration (and the container the only thing that
+    /// can correct a stale one), and the queue is a copy that has to follow
+    /// or the UI disagrees with the player bar.
     ///
     /// The queue entry is re-stamped at whatever `current_index` names *at this
     /// moment*, which is why every caller moves the index before starting the
@@ -417,6 +498,18 @@ impl AudioPlayer {
         Ok(())
     }
 
+    /// Pause the current sink, and record that a pause command was served.
+    ///
+    /// The counter is the whole point of the method being here rather than at
+    /// the call site: rodio's pause flag is per-`Player` and has no cause
+    /// attached (see [`AudioPlayer::pause_epoch`]), so a resume that is
+    /// silently undone a moment later is otherwise indistinguishable from a
+    /// sink rodio refused to start. Bumped **after** the flag is applied, so
+    /// "the epoch moved" means "the sink is paused by this call".
+    ///
+    /// It records *that* a pause was served, not *who* asked: the in-app
+    /// button, the frontend's `PlayerController.pause()`, the notification and
+    /// the Android audio-focus path all arrive here and are not told apart.
     pub async fn pause(&self) -> Result<(), PlayerError> {
         debug!("Pausing playback");
         if let Some(s) = self.sink.read().await.as_ref() {
@@ -432,7 +525,45 @@ impl AudioPlayer {
             *self.played.write().await += elapsed;
         }
         *self.play_anchor.write().await = None;
+        // Instant first, counter second. The two are read separately by the
+        // probe, and this order is what makes the pair consistent: a reader
+        // that sees the new counter is necessarily reading after the instant
+        // was stored, so the offset it reports is *this* pause's. The other
+        // order hands out the previous pause's timestamp against the new
+        // counter — a plausible-looking but wrong number, which is worse than
+        // no number.
+        {
+            let mut at = self
+                .last_pause_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *at = Some(Instant::now());
+        }
+        self.pause_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// How many [`AudioPlayer::pause`] calls this player has served.
+    ///
+    /// A caller that wants to know whether a sink went quiet *because of a
+    /// pause* snapshots this, does its work, and compares. Equal values prove
+    /// nothing paused the sink in between — which for a sink this crate built
+    /// and did not pause itself, is the interesting case, because rodio leaves
+    /// no other trace of a start having been undone.
+    pub fn pause_epoch(&self) -> u64 {
+        self.pause_epoch.load(Ordering::SeqCst)
+    }
+
+    /// When the most recent [`AudioPlayer::pause`] was served, if any.
+    ///
+    /// Poison-tolerant for the same reason as `resume_log()`: a panic inside
+    /// the critical section must not make every later pause in the process
+    /// unwrap-fail, and the only thing stored here is a copyable `Instant`.
+    pub fn last_pause_at(&self) -> Option<Instant> {
+        *self
+            .last_pause_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Un-pause playback, or report that there is nothing left to resume.
@@ -494,8 +625,19 @@ impl AudioPlayer {
     }
 
     /// Seek using rodio's native `try_seek` with fallback for unseekable MP3 bitstreams.
+    ///
+    /// Whether the seek had to *replace* the sink is recorded and readable with
+    /// [`AudioPlayer::take_seek_rebuilt_sink`]. The fallback builds a brand-new
+    /// player and reuses `was_paused` to decide whether to pause it, so a seek
+    /// taken while the sink is paused installs a **new, paused, never-played**
+    /// sink — the exact shape the resume log was reading as "rodio never
+    /// started it". The seek itself returns `Ok` either way, which is why
+    /// `restored=ok` on its own was never evidence of anything.
     pub async fn seek(&self, position: Duration) -> Result<(), PlayerError> {
         debug!(?position, "Seeking to position");
+        // Cleared on entry so a caller that reads the flag after a *failed*
+        // seek is not handed the previous seek's answer.
+        self.last_seek_rebuilt_sink.store(false, Ordering::SeqCst);
 
         let total = *self.track_duration.read().await;
         if !total.is_zero() && position > total {
@@ -536,6 +678,11 @@ impl AudioPlayer {
                     )));
                 }
                 info!(?position, "Fallback seek completed successfully");
+                // Only now: the fallback can itself fail (unreadable file, no
+                // output device), and in that case nothing was replaced. Set
+                // before the `?`-free early return so a failed replacement
+                // never reads as a completed one.
+                self.last_seek_rebuilt_sink.store(true, Ordering::SeqCst);
                 return Ok(());
             } else {
                 return Err(PlayerError::StateError(format!("Seek failed: {e}")));
@@ -614,6 +761,15 @@ impl AudioPlayer {
         }
 
         Ok(())
+    }
+
+    /// Read and clear the flag left by the most recent [`AudioPlayer::seek`]:
+    /// did that seek have to build a replacement sink?
+    ///
+    /// Read-and-clear so two consecutive seeks cannot be confused for one, and
+    /// so a caller that never asks pays nothing.
+    pub fn take_seek_rebuilt_sink(&self) -> bool {
+        self.last_seek_rebuilt_sink.swap(false, Ordering::SeqCst)
     }
 
     pub async fn set_volume(&self, volume: f32) -> Result<(), PlayerError> {
@@ -1240,13 +1396,13 @@ mod tests {
         // The real case: container says 4:26, rodio says 1:32.
         let db = Duration::from_secs(266);
         let decoded = Duration::from_secs(92);
-        assert_eq!(reconcile_duration(db, Some(decoded)), db);
+        assert_eq!(reconcile_duration(db, Some(decoded), None), db);
     }
 
     #[test]
     fn reconcile_uses_the_decoder_when_the_library_has_nothing() {
         assert_eq!(
-            reconcile_duration(Duration::ZERO, Some(Duration::from_secs(92))),
+            reconcile_duration(Duration::ZERO, Some(Duration::from_secs(92)), None),
             Duration::from_secs(92)
         );
     }
@@ -1255,16 +1411,166 @@ mod tests {
     fn reconcile_raises_the_duration_when_the_decoder_claims_more() {
         // A library row with a placeholder duration must still be corrected.
         assert_eq!(
-            reconcile_duration(Duration::from_secs(30), Some(Duration::from_secs(92))),
+            reconcile_duration(Duration::from_secs(30), Some(Duration::from_secs(92)), None),
             Duration::from_secs(92)
         );
     }
 
     #[test]
+    fn reconcile_trusts_the_container_downward_against_a_stale_library() {
+        // `yF9nmg_jHNs` shape with a stale-long library row: the table says
+        // 216.34 s, the decoder says 75 s, the library still claims 300 s.
+        // `max()` would keep the wrong 300; the container corrects it down.
+        assert_eq!(
+            reconcile_duration(
+                Duration::from_secs(300),
+                Some(Duration::from_secs(75)),
+                Some(Duration::from_secs_f64(216.34)),
+            ),
+            Duration::from_secs_f64(216.34)
+        );
+    }
+
+    #[test]
+    fn reconcile_trusts_the_container_upward_from_an_unscanned_library() {
+        // Same file, library value missing: the container corrects up past
+        // what the decoder managed, and seeks are capped at the true length.
+        assert_eq!(
+            reconcile_duration(
+                Duration::ZERO,
+                Some(Duration::from_secs(75)),
+                Some(Duration::from_secs_f64(216.34)),
+            ),
+            Duration::from_secs_f64(216.34)
+        );
+    }
+
+    #[test]
+    fn reconcile_ignores_a_zero_container_reading() {
+        // A zero table is absence of evidence, not a zero-length track.
+        assert_eq!(
+            reconcile_duration(
+                Duration::from_secs(216),
+                Some(Duration::from_secs(75)),
+                Some(Duration::ZERO),
+            ),
+            Duration::from_secs(216)
+        );
+    }
+
+    #[test]
+    fn reconcile_container_agrees_with_a_healthy_library() {
+        // The common case for the fixture file: lofty stored 216 s, rodio
+        // says 75 s, the table says 216.34 s. Answer 216 s either way.
+        let with_container = reconcile_duration(
+            Duration::from_secs(216),
+            Some(Duration::from_secs(75)),
+            Some(Duration::from_secs_f64(216.34)),
+        );
+        let without_container = reconcile_duration(
+            Duration::from_secs(216),
+            Some(Duration::from_secs(75)),
+            None,
+        );
+        assert_eq!(with_container, Duration::from_secs_f64(216.34));
+        assert_eq!(without_container, Duration::from_secs(216));
+    }
+
+    #[tokio::test]
+    async fn container_table_secs_abstains_on_an_unparseable_file() {
+        // The arbitration input must fail safe: garbage in, `None` out, and
+        // the caller keeps the reconciled answer — never a worse one.
+        let path =
+            std::env::temp_dir().join(format!("auralis_no_container_{}.bin", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"not an mp4 at all").expect("seed garbage file");
+        let table = container_table_secs(path.to_str().expect("temp path is UTF-8")).await;
+        assert_eq!(table, None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn reconcile_keeps_the_library_value_without_a_decoder_opinion() {
         assert_eq!(
-            reconcile_duration(Duration::from_secs(266), None),
+            reconcile_duration(Duration::from_secs(266), None, None),
             Duration::from_secs(266)
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Pause attribution
+    //
+    // rodio's pause flag is a bare `AtomicBool` on the `Player` with no cause
+    // attached, so "the sink is paused" and "a pause command was served" are
+    // the same statement to anything reading it. These are the two fields that
+    // pull them apart, and they are the reason a `never_playing (empty=0)`
+    // verdict stopped meaning "rodio refused to start the fresh sink".
+    // ---------------------------------------------------------------------
+
+    /// The baseline the fresh-sink replay arms its probe with: a player nobody
+    /// has paused. If this drifts, every resume would inherit a stale epoch
+    /// and the attribution would be a no-op.
+    #[tokio::test]
+    async fn a_fresh_player_has_served_no_pause() {
+        let player = AudioPlayer::new().unwrap();
+        assert_eq!(player.pause_epoch(), 0);
+        assert_eq!(player.last_pause_at(), None);
+    }
+
+    /// `pause()` is recorded even when there is no sink to pause. That is the
+    /// point: the frontend's `PlayerController.pause()` fires
+    /// `invoke('pause')` without asking the backend anything first, so a pause
+    /// issued against a sink that is about to be replaced still has to leave a
+    /// trace — otherwise the resume that replaces it cannot tell it was
+    /// cancelled.
+    #[tokio::test]
+    async fn pause_is_recorded_even_with_no_sink_to_pause() {
+        let player = AudioPlayer::new().unwrap();
+        player.pause().await.expect("pause must not fail");
+        assert_eq!(player.pause_epoch(), 1);
+        assert!(
+            player.last_pause_at().is_some(),
+            "the instant is what turns 'a pause happened' into 'a pause happened 300ms in'"
+        );
+
+        player.pause().await.expect("pause must not fail");
+        assert_eq!(
+            player.pause_epoch(),
+            2,
+            "the counter has to be monotonic: a resume snapshots it and compares"
+        );
+    }
+
+    /// The flag has to be cleared by a seek that did not rebuild, or a resume's
+    /// position restore would be reported as `restored=rebuilt` on the strength
+    /// of an earlier, unrelated seek. Headless-safe: a `seek` with no sink
+    /// errors before touching anything, which is exactly the case that has to
+    /// leave the flag clear.
+    #[tokio::test]
+    async fn a_failed_seek_does_not_claim_to_have_rebuilt_the_sink() {
+        let player = AudioPlayer::new().unwrap();
+        assert!(!player.take_seek_rebuilt_sink());
+        player
+            .seek(Duration::from_secs(7))
+            .await
+            .expect_err("there is no sink to seek");
+        assert!(
+            !player.take_seek_rebuilt_sink(),
+            "a seek that never reached a sink must not leave a rebuild on record"
+        );
+    }
+
+    /// Read-and-clear: two consecutive callers must not both be told the same
+    /// seek rebuilt the sink.
+    #[tokio::test]
+    async fn the_seek_rebuild_flag_is_consumed_by_reading_it() {
+        let player = AudioPlayer::new().unwrap();
+        player
+            .last_seek_rebuilt_sink
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(player.take_seek_rebuilt_sink());
+        assert!(
+            !player.take_seek_rebuilt_sink(),
+            "the second reader must get its own answer"
         );
     }
 
