@@ -715,6 +715,68 @@ The lesson generalises past this bug: **the diagnosis was built on a premise nob
 checked, and the mechanism research was excellent.** Good mechanism work actively hides a
 bad premise, because a correct throw-site trace makes the whole story feel verified.
 
+### 4.7.16 THE 403 IS AN IP-BINDING MISMATCH — proven by tampering, not inferred
+
+**This is the root cause of the `HTTP 403 … start_byte=0, ct=text/plain, body: (empty)`
+that has been logged as "googlevideo rejected UA/Referer/Origin/PO-token".** Every one of
+those hypotheses was wrong. The URL is refused because **the request left from a different
+IP than the one the URL was bound to.**
+
+**The proof (dev box, 2026-09-30).** Take a working muxed itag-18 URL and change nothing
+except the `ip=` query parameter:
+
+```
+A  untouched, ip=152.59.49.22 (this box's own egress)  ->  HTTP 206 Partial Content, 1024 bytes
+B  identical URL, ip= tampered to 203.0.113.7            ->  HTTP 403 Forbidden, ct=text/plain, BODY ""
+```
+
+`203.0.113.0/24` is TEST-NET-3 (RFC 5737) — unroutable, so no real CDN node could serve it.
+The 403 is therefore produced by the **binding check**, not by any node. And it is
+byte-for-byte the device's signature: `403`, `ct=text/plain`, empty body, `start_byte=0`.
+
+**Why the device trips it and this box does not.** googlevideo URLs carry `ip=<the address
+the URL was minted for>`:
+
+| | bound `ip=` | actual egress | result |
+|---|---|---|---|
+| dev box | `152.59.49.22` (IPv4) | `152.59.49.22` | **206** |
+| phone (`Ral6kFSx7ZY`, failing) | `2409:40c4:f9ab:20c:4491:a454:74b0:abd1` (**IPv6**) | a *different* IPv6, `…:88e5:d5d6:54d0:d75b` | **403** |
+
+The box resolves and fetches in one process over one family, so they always match. **The app
+does not: resolution runs in JavaScript inside the WebView, the transfer runs in Rust
+(`reqwest`) — two HTTP stacks, two network paths, two address families.** A URL minted over
+IPv6 and fetched over IPv4 is exactly case B.
+
+**This explains every previously unexplained observation:**
+- **Why rotating clients never helped** — the client changes the URL's *contents*, not the
+  `ip=` it is bound to.
+- **Why all four retries failed identically** — every re-resolve re-binds to the WebView's
+  address while Rust keeps egressing from a different one. The ladder was re-rolling the same
+  losing dice.
+- **Why "some videos download and some don't"** — it depends on whether the two stacks happen
+  to agree, which is per-attempt and per-network-state, not per-video.
+- **Why UA/Referer/Origin/`pot` were all irrelevant** — none of them is the bound variable.
+
+**Also settled, and it kills a hypothesis I was about to build:** the CDN host is a property
+of the **video**, not the client (`ANDROID` and `IOS` both got `rr8---sn-gwpa-civd` for
+`Ral6kFSx7ZY`, `rr3---sn-gwpa-civee` for `94WoNQyK_KY`), and **re-resolving returns the same
+host** (2/2 resolves identical). So "rotate to a different edge" is not available by any
+means — it was measured and abandoned rather than assumed.
+
+**The fix, and it is testable on this box** (unlike the Android-only publish bug): read `ip=`
+out of the resolved URL in `downloader.rs` and pin the request to it —
+`reqwest::ClientBuilder::resolve(hostname, SocketAddr)` — and constrain the local socket to the
+same address family. If `ip=` is absent or unparseable, fall back to current behaviour. That
+makes the transfer independent of which stack resolved. The alternative, moving resolution
+into Rust so one client is used throughout, is architecturally cleaner but much larger.
+
+**Confidence, separated:** the tampering result (A/B) is **measured**. The claim that the
+phone's resolve and fetch take different paths is **inferred** from the mismatch between the
+URL's IPv6 `ip=` and the previously-recorded device IPv6 — strongly supported, and the fix is
+worthwhile either way because pinning cannot make a correct request worse. **Not yet measured:
+that pinning actually turns the phone's 403 into a 206.** Only the owner can confirm that,
+and it is one APK.
+
 ### 4.7.12 The window is TRACK-SPECIFIC — the highest-value open question now
 
 Same itag, same class, same client ladder, opposite outcomes:
