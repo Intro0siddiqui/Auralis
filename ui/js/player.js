@@ -560,6 +560,20 @@ class PlayerController {
     }
 
     togglePlay() {
+        // A second tap while the resume round-trip is still in flight is a
+        // misread, not a request to stop.
+        //
+        // play() sets isPlaying = true *before* its invoke returns, so without
+        // this guard a fast second tap is dispatched as pause() and cancels the
+        // resume that is still starting. That is exactly what the device was
+        // doing: probe=superseded (tap 3 replaced tap 1's probe), and
+        // never_playing polls=7 progress=0 empty=0 (tap 2 paused a sink that
+        // was still queued). Both verdicts, one cause.
+        //
+        // Only togglePlay() is guarded. pause() itself is deliberately NOT:
+        // the notification and MediaSession buttons call it directly, and a
+        // real stop request must never be swallowed.
+        if (this.resumeInFlight) return;
         if (this.isPlaying) {
             this.pause();
         } else {
@@ -583,27 +597,34 @@ class PlayerController {
         // If we have a current track, resume is correct — it preserves position.
         if (this.currentTrack && this.currentTrack.id) {
             const resumeTrackId = this.currentTrack.id;
-            // Arm the proof-of-life check *before* the invoke: the `resume`
-            // command emits `playback:state_changed` from inside Rust, so that
-            // event can arrive before the invoke's reply does.
-            const started = this.awaitPlaybackStart(resumeTrackId, this.RESUME_VERIFY_MS);
+            this.resumeInFlight = true;
             try {
-                await window.Auralis.bridge.invoke('resume');
-            } catch (err) {
-                this.settleResumeWatch(false);
-                const msg = String(err || 'resume failed');
-                console.warn('Resume failed:', msg);
-                window.Auralis.bridge.showToast(`Resume failed: ${msg} — retrying track`, 'error', 6000);
-                // fallback: replay the current track from start
-                window.Auralis.bridge.playTrack(resumeTrackId);
-                return;
+                // Arm the proof-of-life check *before* the invoke: the `resume`
+                // command emits `playback:state_changed` from inside Rust, so that
+                // event can arrive before the invoke's reply does.
+                const started = this.awaitPlaybackStart(resumeTrackId, this.RESUME_VERIFY_MS);
+                try {
+                    await window.Auralis.bridge.invoke('resume');
+                } catch (err) {
+                    this.settleResumeWatch(false);
+                    const msg = String(err || 'resume failed');
+                    console.warn('Resume failed:', msg);
+                    window.Auralis.bridge.showToast(`Resume failed: ${msg} — retrying track`, 'error', 6000);
+                    // fallback: replay the current track from start
+                    window.Auralis.bridge.playTrack(resumeTrackId);
+                    return;
+                }
+                // The invoke round-trip above consumed part of the window, so top it
+                // back up to a full budget measured from here.
+                this.renewResumeWatch(this.RESUME_VERIFY_MS);
+                // Resolves true when playback is confirmed; false means nothing
+                // started and the track has already been replayed for us.
+                await started;
+            } finally {
+                // `finally`, not a plain clear: if anything above throws, a flag
+                // left set would disable togglePlay() for the rest of the session.
+                this.resumeInFlight = false;
             }
-            // The invoke round-trip above consumed part of the window, so top it
-            // back up to a full budget measured from here.
-            this.renewResumeWatch(this.RESUME_VERIFY_MS);
-            // Resolves true when playback is confirmed; false means nothing
-            // started and the track has already been replayed for us.
-            await started;
             return;
         }
         // No track loaded (fresh start / "No track playing") — resume has nothing

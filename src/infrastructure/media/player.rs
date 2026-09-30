@@ -1549,6 +1549,10 @@ mod tests {
     async fn a_failed_seek_does_not_claim_to_have_rebuilt_the_sink() {
         let player = AudioPlayer::new().unwrap();
         assert!(!player.take_seek_rebuilt_sink());
+        // A rebuild recorded by some earlier seek, deliberately left unconsumed:
+        // without it this test passes whether or not `seek` clears the flag,
+        // because the flag starts out false either way.
+        player.last_seek_rebuilt_sink.store(true, Ordering::SeqCst);
         player
             .seek(Duration::from_secs(7))
             .await
@@ -1564,9 +1568,7 @@ mod tests {
     #[tokio::test]
     async fn the_seek_rebuild_flag_is_consumed_by_reading_it() {
         let player = AudioPlayer::new().unwrap();
-        player
-            .last_seek_rebuilt_sink
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        player.last_seek_rebuilt_sink.store(true, Ordering::SeqCst);
         assert!(player.take_seek_rebuilt_sink());
         assert!(
             !player.take_seek_rebuilt_sink(),

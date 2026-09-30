@@ -859,10 +859,78 @@ Next step, and it is offline-checkable: does `start_sink`/`fresh_sink_replay`
 actually call rodio's `play()` on the new sink, or does it create + feed and leave
 it paused? `empty=0` with `progress=0` is what that mistake would look like.
 
+### 4.7.15 The resume re-pause is SOLVED — it was never rodio, and it was a two-line frontend trap
+
+**The rodio hypothesis is falsified for the third time, and this time by reading the crate's
+source rather than inferring.** rodio 0.22.2 has **no `play()` call to forget**:
+
+- `Player::new()` initialises `pause: AtomicBool::new(false)` (`src/player.rs:89`) — a new
+  `Player` is **born running**.
+- That flag has exactly two writers: `Player::pause()` (`src/player.rs:265`) and
+  `Player::clear()` (`src/player.rs:283`). This crate calls neither on a live sink.
+- `start_sink` (`player.rs:248-337`) never calls `pause()`.
+
+So the chain is forced and short, and `empty=0` is what makes it a **proof** rather than an
+inference — the source is still queued, so nothing drained and nothing ended:
+
+```
+classify_probe -> never_playing  iff  playing == 0 && empty == 0      (playback.rs:1394)
+sink_snapshot  -> (!is_paused && !empty, empty)                      (player.rs:910)
+  => never_playing  ==  every sample had is_paused() == true && sound_count > 0
+  => Player::pause() was called on the sink the resume had just built.
+```
+
+**The sink does not fail to start. It is paused again, by a `pause` command, after the
+resume armed its probe.** The earlier suggestion in this file — "does `start_sink` create +
+feed and leave it paused?" — was wrong, and so was this file's own `next step`.
+
+**And the actor is the owner's own thumb, settled by elimination rather than argument.**
+
+Three producers of a `resume` *command* exist. `PlayerController.play()` is the only one in
+the tree (`ui/js/player.js:591`); the frontend replay path calls the **`play`** command, not
+`resume`; `RESUME_REPLAY_WINDOW` bookkeeping never calls either. The log confirms it
+independently: **`replay=` is absent from all five lines**, and `note_replay_outcome` is
+called unconditionally from the `play` command (`playback.rs:250/256`), so the replay path
+never ran. The four supersedes were four extra taps.
+
+`PlayerController.play()` set `this.isPlaying = true` **optimistically, before the
+round-trip** (`ui/js/player.js:571`), so any tap inside that window was dispatched as
+`pause()`. **That single mistake produces both observed verdicts** — `probe=superseded`
+(tap 3 replaced tap 1's armed probe) and `never_playing polls=7 progress=0 empty=0`
+(tap 2 paused a sink that was still queued). Not two bugs. One.
+
+**The fix** is a `resumeInFlight` guard in `togglePlay()` — a tap during an in-flight resume
+is a misread, not a stop request. **`pause()` itself is deliberately not guarded**, because
+`MediaPlaybackService.kt` calls it through JNI and a real stop must never be swallowed; one
+test pins exactly that. Released in `finally` so a throw cannot leave the play button dead
+for the session.
+
+**What the pause attribution bought (shipped in `02d4c20`):** a new verdict `paused_by_command`
+with a `paused_cmd=+Nms` offset, plus `RESUME_INFLIGHT` in Rust, because two overlapping
+resumes interleave inside `play_track` across three separate `.await`s and the second can
+take the sink out from under the first. `never_playing` now means what its doc always said:
+*nothing paused it, and rodio still would not play it.*
+
+**Also falsified along the way:** `restored=ok` was never evidence of anything. `seek_fallback`
+builds a **replacement** `Player` and reuses `was_paused`, so a position restore taken while
+the sink is paused installs a new sink that has never been played. It is now `restored=rebuilt`.
+
+**Still unverified, and honestly so:** `cfg(target_os = "android")` cannot be compiled on
+this box, so if a pause still arrives that is *not* a tap, the next suspect is the audio-focus
+path (`MediaPlaybackService.kt:410-414`, LOSS/TRANSIENT → `NativeBridge.command("pause")`,
+with `pausedByFocusLoss` only cleared by notification actions at `:321-322`). The new log
+makes that **one run** decisive instead of three: `paused_cmd=+0ms` inside the first poll
+means nobody touched the screen.
+
 Note what this rules out: the watcher is **not** reading an unprimed sink as EOF,
 and the auto-advance path is not involved. The queued-but-silent sink points at
 `start_sink`/`fresh_sink_replay` itself, and it is checkable **offline** by reading
 whether the fresh sink is actually `play()`ed.
+
+> ⚠️ **The `next step` immediately above is WRONG and is left in place deliberately.**
+> It asks whether `start_sink` forgets to call rodio's `play()`. **There is no such call
+> to forget** — a new `Player` is born running. The answer is in **§4.7.15**, which
+> solves this section. Do not act on the paragraph above.
 
 **How the log was finally obtained, in case it is needed again:** three requests
 for a clipboard paste failed because the "Copy resume log" button does not work, and

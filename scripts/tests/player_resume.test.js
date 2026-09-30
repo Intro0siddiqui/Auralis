@@ -213,6 +213,130 @@ describe('play() resume path: a successful resume reply is not proof of sound', 
     });
 });
 
+describe('togglePlay(): a second tap must not cancel an in-flight resume', () => {
+    // The device bug, in full. play() sets isPlaying = true before its invoke
+    // returns, so a fast second tap used to be dispatched as pause() and cancel
+    // the resume that was still starting. The resume agent localised this by
+    // elimination: only PlayerController.play() produces a `resume` command,
+    // `replay=` is absent from every log line so the replay path never ran, and
+    // therefore the two extra `resume` commands were the owner's own taps.
+    //
+    // Both observed verdicts follow from that one cause:
+    //   probe=superseded                  -> tap 3 replaced tap 1's armed probe
+    //   never_playing polls=7 progress=0  -> tap 2 paused a sink still queued
+    //                                         (empty=0 proves nothing drained)
+    it('ignores a tap that lands while the resume round-trip is still open', async () => {
+        const env = makeEnv();
+        const ctrl = env.create();
+        ctrl.currentTrack = { id: 't1', title: 'A', duration_secs: 100 };
+
+        // Hold the `resume` invoke open so the tap provably lands mid-round-trip.
+        let releaseResume;
+        env.bridge.invoke = async (command) => {
+            env.record.invokes.push(command);
+            if (command === 'resume') {
+                await new Promise((r) => { releaseResume = r; });
+                env.bridge.emit('playback:state', { is_playing: true });
+            }
+            return null;
+        };
+
+        const playing = ctrl.play();
+        await delay(10);
+        assert.equal(ctrl.resumeInFlight, true, 'the resume should be in flight');
+
+        // The second tap. Without the guard this dispatches `pause`.
+        ctrl.togglePlay();
+        assert.ok(
+            !env.record.invokes.includes('pause'),
+            `a tap during an in-flight resume must not dispatch pause, got ${JSON.stringify(env.record.invokes)}`
+        );
+        assert.equal(ctrl.isPlaying, true, 'the resume must still be treated as playing');
+
+        releaseResume();
+        await playing;
+        await delay(20);
+        assert.equal(ctrl.resumeInFlight, false, 'the guard must be released afterwards');
+    });
+
+    it('still pauses normally once the resume has settled', async () => {
+        const env = makeEnv();
+        const ctrl = env.create();
+        ctrl.currentTrack = { id: 't1', title: 'A', duration_secs: 100 };
+
+        env.bridge.invoke = async (command) => {
+            env.record.invokes.push(command);
+            if (command === 'resume') env.bridge.emit('playback:state', { is_playing: true });
+            return null;
+        };
+
+        await ctrl.play();
+        await delay(20);
+        assert.equal(ctrl.resumeInFlight, false);
+
+        ctrl.togglePlay();
+        assert.ok(
+            env.record.invokes.includes('pause'),
+            'a settled player must still pause on tap, or the button is simply broken'
+        );
+        assert.equal(ctrl.isPlaying, false);
+    });
+
+    it('does not swallow a real pause() from the notification or MediaSession', async () => {
+        // The guard lives in togglePlay(), not pause(), precisely so that the
+        // hardware/notification stop path still works mid-resume. If this ever
+        // moves into pause(), the user cannot stop playback until a round-trip
+        // completes.
+        const env = makeEnv();
+        const ctrl = env.create();
+        ctrl.currentTrack = { id: 't1', title: 'A', duration_secs: 100 };
+
+        let releaseResume;
+        env.bridge.invoke = async (command) => {
+            env.record.invokes.push(command);
+            if (command === 'resume') await new Promise((r) => { releaseResume = r; });
+            return null;
+        };
+
+        const playing = ctrl.play();
+        await delay(10);
+        ctrl.pause();               // what MediaPlaybackService.kt calls via JNI
+        assert.ok(
+            env.record.invokes.includes('pause'),
+            'a direct pause() during an in-flight resume must reach the backend'
+        );
+        assert.equal(ctrl.isPlaying, false);
+
+        releaseResume();
+        await playing;
+        await delay(20);
+    });
+
+    it('releases the guard even when the resume invoke throws', async () => {
+        // A guard left set by an exception would disable the play button for
+        // the rest of the session — a worse bug than the one being fixed.
+        const env = makeEnv();
+        const ctrl = env.create();
+        ctrl.currentTrack = { id: 't1', title: 'A', duration_secs: 100 };
+
+        env.bridge.invoke = async (command) => {
+            env.record.invokes.push(command);
+            if (command === 'resume') throw new Error('boom');
+            return null;
+        };
+
+        await ctrl.play();
+        assert.equal(ctrl.resumeInFlight, false, 'the guard must not survive a failed resume');
+        assert.deepEqual(env.record.playTrackCalls, ['t1'], 'the fallback replay still happens');
+
+        // And the button works again.
+        env.record.invokes.length = 0;
+        ctrl.isPlaying = false;
+        ctrl.togglePlay();
+        assert.ok(env.record.invokes.includes('resume'), 'play must work again after a failed resume');
+    });
+});
+
 describe('source guards: the fix must not be silently reverted', () => {
     it('player.js no longer treats a bare resume as success', () => {
         // The old shape was: invoke('resume') … return;  with no verification.
