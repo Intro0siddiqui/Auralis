@@ -348,6 +348,15 @@ New `ui/js/modules/pot_scope.js` owns the decision. A token **we** minted (or re
   - `unresolved_note` is still half outside the gate: two `format!` strings of 108 and 146 columns freeze the whole 7-line `match`. Owed — needs the strings hoisted plus inline-capture named args, which rewrites user-facing message construction.
 - **The ceiling, recorded so it is not re-litigated.** The token-free client set is only `tv`, `android_vr` and `web_embedded`, and it is shrinking as enforcement rolls out. `bgutils-js` buys us the web family — which on a Jio residential line refused to *resolve* at all. The real fallback is `ANDROID_VR`/`TV`, which is why their DRM caveats matter and why the ordering is load-bearing rather than cosmetic. `visionos` was declined: the guide does not list its token family, so adding it would guess, which is the same mistake as the `TVHTML5` trap in the opposite direction.
 
+**Commit-attribution wart (v2.6.66), so a future bisect is not misled.** The gate
+fix landed as `7b8f9d9` (`downloader.rs` + `completeness.rs`) and `d72223f`
+(`player.rs`). **`d72223f`'s `player.rs` diff also carries an unrelated
+`pause_epoch` / seek-replay instrumentation change from a concurrent agent**,
+interleaved at hunk granularity. It was not stripped afterwards: hand-editing a
+merged hunk risks a patch that no longer matches its tree, and rewriting shipped
+history for cosmetics is worse. If you bisect the reconcile fix, expect the pause
+attribution in the same commit and ignore it.
+
 **Safety nets (keep all three):** byte accounting in `run_stream` (`downloader.rs`), decoded-duration verification (`completeness.rs` `verify_decoded_duration`, 90 % / 2 s slack) plus the range top-up it triggers, and the JS retry that rotates clients on `Truncated download`.
 
 ---
@@ -707,6 +716,51 @@ decoder. **`acceptance()` must trust the container and treat a short decode as
 non-evidence, not as a failure.** For a muxed `itag 18` the container is authoritative:
 `mdhd`/`stts` give the sample count, `stco`/`stsz` prove the last audio byte is in the
 file, and that is sufficient.
+
+#### The decoder is not a length oracle in EITHER direction (v2.6.66)
+
+The verification that made the fix safe, from a standalone MP4 box walker — not
+the crate's own parser, which would have proved nothing:
+
+| file | audio `stts` (truth) | last audio byte | our `inspect_content` says |
+|---|---|---|---|
+| `yF9nmg_jHNs` | 9 540 608 @ 44100 = **216.34 s** | inside the file | `measured=54.4s` — **25.2 %** |
+| `94WoNQyK_KY` | 12 524 544 = **284.00 s** | inside the file | `measured=568.0s` — **200 %** |
+
+**The second row is the load-bearing evidence, and it corrects a belief this file
+carried.** The problem was recorded as "the decoder under-reports", which is only
+half of it: on one file it reads **4× short**, on the other it reads **2× long**.
+A decoder that overshoots the track's own length by 2× is not producing a length
+measurement at all.
+
+**So the fix could not be "accept when short."** `acceptance()` now orders the
+signals: bytes (hard reject) → container table coverage → *not* the decoded
+length (that step is deleted, with `REASON_SHORT_AUDIO`) → the audible position as
+a **veto**, and the veto only fires when the decode actually *walked the whole
+track*. A short decode that ends audibly is the decoder giving up, not a windowed
+file. `Verdict::Unknown` keeps the old decoder path byte-for-byte.
+
+The test that pinned the falsified belief is **inverted, not deleted**:
+`a_complete_container_overrules_a_short_decode`. Seven mutations were run; the
+one that matters is dropping the `decoded_covers` gate, which is the original bug
+returning verbatim, caught by 3 tests.
+
+**Two honest gaps.** (1) *Why* rodio stops at frame 2344 is unknown — it is not a
+byte limit, not file length, and not an interleave boundary. (2) Whether the
+audible veto can still catch a **real** windowed file is unverified: it needs
+`measured_secs` to cover while `audible_secs` does not, and symphonia
+under-reports `measured_secs` on these files, so the veto may now abstain where it
+caught v2.6.44's `BElct8HWkp8`. It was **not** weakened to compensate. This is the
+check to revisit if a genuine window ever appears.
+
+**No fixture was committed, and the reason is worth keeping.** `.gitignore`
+already excludes `scripts/tests/fixtures/*.wav|*.mp3` and `scratch/`; the repo
+carries 5.4 MiB tracked. Two ~10 MB YouTube-derived MP4s would be a ~4× increase,
+one of them 6 MB of someone else's copyrighted content. A synthetic reproducer was
+attempted and **failed**: truncating the real file at 1000/2344/3000/5000/9317
+frames gives the identical 2 400 256-sample decode every time, so any faithful
+reproducer needs >2344 frames, a ~1.3 MB floor, and both moov-rewriting attempts
+failed to decode. Recorded rather than implied. The files live in `/tmp/opencode/`.
 
 #### What this retires
 
