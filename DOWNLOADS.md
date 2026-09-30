@@ -7,63 +7,88 @@
 
 ---
 
+## 0. Status
+
+**A download completes end-to-end with no PO token at all. The blocker was ours.**
+
+Resolved 2026-09-29, and the conclusion is the inverse of what this document
+asserted for twenty releases. Three findings, in order of importance:
+
+1. **There is no server-side window.** The file the app called "windowed to 54 s
+   of 216 s" is complete. Proven from the container, on the same machine and the
+   same network, from the same URL the phone used — **10 992 443 bytes, all
+   received**, audio `stts` declaring **9 540 608 samples at 44 100 Hz =
+   216.34 s**, and the last audio sample ending **inside** the file. The device's
+   decoder read **25.2 %** of those samples and reported `measured=54.4s`.
+2. **The PO token is not required for this path.** `itag 18` muxed completed at
+   100 % with the token **explicitly withheld** (`held pot-apply: ANDROID is not
+   web-family`). SABR, and therefore the whole `status=3` gate, is off the critical
+   path.
+3. **The completeness gate rejected a perfect file.** The sharpest form: the
+   device's own forensics printed `bytes=complete` and `table=216.3s` — both
+   correct — and `acceptance()` vetoed anyway, on the decoder.
+
+```
+                    ┌──────────────────────────────────┐
+                    │ rodio stops decoding at ~25% of   │
+                    │ a muxed itag-18 file              │
+                    └────────────────┬─────────────────┘
+                                     │  measured=54.4s, audible_until=54.4s
+                    ┌────────────────▼─────────────────┐
+                    │ acceptance() sees a short decode │
+                    │ and REJECTS a complete file     │   <-- the bug
+                    └────────────────┬─────────────────┘
+                                     │
+                    ┌────────────────▼─────────────────┐
+                    │ owner sees "windowed download"  │
+                    └──────────────────────────────────┘
+```
+
+The real chain — note there is no token anywhere in it:
+
+```
+muxed itag 18 from the ANDROID client
+   → googlevideo serves the WHOLE object  (the 403 does not apply to this class)
+   → every advertised byte arrives
+   → the file is complete and self-consistent
+   → our decoder reads 25% and says "54 seconds"
+   → our own gate calls it truncated and throws the download away
+```
+
+### What is actually open
+
+| # | Item | State |
+|---|---|---|
+| 1 | `acceptance()` must trust the container over the decoder | agent in flight |
+| 2 | `reconcile_duration` must allow a downward correction, or a 216 s track shows as 54 s and seeks past it are refused | agent in flight |
+| 3 | Resume re-pauses: `polls=7 progress=0 empty=0` | agent in flight |
+| 4 | MediaStore publish fails 100 %: `Invalid column display_name`, API 36 — **this is why `Download/Auralis/` is always empty** | `@refactor` |
+| 5 | PO token / SABR — needed only for the **audio-only adaptive** class, i.e. audio instead of audio+video. A quality difference, not a capability gate | on hold |
+
+---
+
 ## 0a. The positive control, and the partial success
 
-Two facts that reframe everything above, both from the owner (2026-09-29), and
-both easy to forget:
+Two facts that reframe everything above, both from the owner, and both easy to
+forget:
 
 **1. The device already solves this, daily.** The owner watches YouTube on the
 phone that runs Auralis — same WebView, same residential Jio line, same ISP,
 logged out. That environment demonstrably obtains a valid PO token, minted by
 YouTube's own `botguard.js`, in that engine. **The WebView we are failing inside
-is provably capable.** That is a positive control, and it is why every
-"barren environment / add jsdom" theory is dead: jsdom is *less* realistic than a
-real WebView, so adopting it would be moving away from the working case.
+is provably capable.** That is a positive control, and it is why every "barren
+environment / add jsdom" theory is dead: jsdom is *less* realistic than a real
+WebView, so adopting it would be moving away from the working case.
 
 **2. Downloads are not uniformly broken.** Some videos download successfully and
-some do not. Any absolute-failure framing is wrong, and this report has been
-wrong that way more than once. A working case beside a failing one is the most
-valuable diagnostic asset available, because the difference between them is the
-variable. Untested reading: a token is sometimes obtained, and the difference is
-whether a live page in that WebView had already minted — which would make our own
-`minted-stripped` path the whole problem, and the WebView spike merely the wiring
-rather than an experiment.
-
----
-
-## 0. Status
-
-**Downloads do not work. The blocker is external, single, and precisely located.**
-
-Every non-SABR URL class has been measured on the owner's network and all of them
-fail. The one remaining transport, SABR, is implemented well enough to be
-*refused by the server* for a missing PO token — a token we cannot mint. The
-mint's failure has been narrowed by experiment to "the live BotGuard VM does not
-hand out a minter factory to us under any input we can construct", which is
-presently **broken upstream with no known public fix**.
-
-Nothing in our own code is known to be at fault in this path. The completeness
-gate, the byte accounting, the forensics, and the retry ladder have all been
-observed working *correctly* on device, including refusing a truncated file.
-
-```
-                        ┌─────────────────────────┐
-                        │  BotGuard mint fails    │
-                        │  (no minter factory)    │
-                        └───────────┬─────────────┘
-                                    │  no attested PO token
-                        ┌───────────▼─────────────┐
-                        │  SABR refused server-   │
-                        │  side: status=3         │
-                        └───────────┬─────────────┘
-                                    │  web family unusable
-              ┌─────────────────────▼─────────────────────┐
-              │  Remaining: ANDROID_VR / IOS adaptive+opus│
-              │  → googlevideo returns 403 at byte 0      │
-              │  Remaining: muxed itag 18                 │
-              │  → served, but windowed to 54s of 216s    │
-              └───────────────────────────────────────────┘
-```
+some do not. Any absolute-failure framing is wrong, and this report was wrong that
+way for ~20 releases — the owner said so at **v2.6.41** and it was never written
+down here. A working case beside a failing one is the most valuable diagnostic
+asset available, because the difference between them is the variable. Untested
+reading: a token is sometimes obtained and the difference is whether a live page
+in that WebView had already minted — which would make our own `minted-stripped`
+path the whole problem, and the WebView spike merely the wiring rather than an
+experiment.
 
 ---
 
@@ -158,7 +183,11 @@ stale flag made the ladder request opus three times instead of reaching muxed.
 
 ---
 
-## 4. Measurements — all three classes fail
+## 4. Measurements — per class, per track
+
+**Read this alongside §0: the classes below all failed on `yF9nmg_jHNs`, but on
+`94WoNQyK_KY` the muxed rung completed at 100 %.** Outcome is per track, not per
+class — which is the other half of why the "all classes fail" framing was wrong.
 
 Device run, `yF9nmg_jHNs` (216.4 s), residential Jio. v2.6.64.
 
@@ -250,7 +279,7 @@ when status 2 is reported — it cannot satisfy status 3.**
 
 ---
 
-## 6. The PO token — the single blocker
+## 6. The PO token — was the single blocker; not on the path that works
 
 ### 6.1 How we try to get one
 
@@ -368,6 +397,16 @@ which needs `new Function`, so it cannot live in Rust.
 
 Recording these so nobody re-litigates them:
 
+- **The server does not window the media.** The sharpest thing this project got
+  wrong, and it is settled: `yF9nmg_jHNs` is a complete 10 992 443-byte file whose
+  audio sample table declares 216.34 s with the last sample inside the file. Our
+  decoder read 25.2 % of it. **`AGENTS.md` §4.7.13 has the measurement.**
+- **The PO token is not required for muxed.** `itag 18` completed with the token
+  explicitly withheld. SABR is off the critical path.
+- **`~60 s` is not a SABR cutoff here.** The `LuanRT/GoogleVideo#52` citation is
+  still a real library limit and still worth quoting — it is simply *not our
+  symptom*.
+
 - **The 403 is not a header problem.** Client-matched `UA`/`Referer`/`Origin` are
   all injected (`commands/downloads.rs`). A Web token was once appended to a
   non-web client's URL; that was fixed in v2.6.50 and is not recurring.
@@ -386,6 +425,10 @@ Recording these so nobody re-litigates them:
 ## 9. Open questions
 
 Ordered by information-per-effort.
+
+0. **Does the gate accept a complete file with a short decode, and still reject a
+   genuinely short one?** Both directions, or it has merely been made permissive.
+   In flight.
 
 1. **Does a correctly visitorData-bound cold-start token satisfy status 3?** Our
    test was imperfect (`visitor_data` was `undefined`, so the token was unbound).
