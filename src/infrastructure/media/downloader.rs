@@ -196,6 +196,71 @@ fn extract_url_param_u64(url: &str, param: &str) -> Option<u64> {
     val_str[..end].parse::<u64>().ok()
 }
 
+/// The address a googlevideo URL is **bound to**, from its `ip=` parameter.
+///
+/// A googlevideo URL is minted for one specific client address and is refused with
+/// `403 / text=text-plain / empty body / start_byte=0` when the request leaves from a
+/// different one. Measured, not inferred — tampering with `ip=` alone on an otherwise
+/// working URL reproduces that exact response (see `AGENTS.md` §4.7.16).
+///
+/// This matters here specifically because **resolution and transfer use different HTTP
+/// stacks**: the URL is resolved by JavaScript inside the WebView and fetched by `reqwest`
+/// in this process. Those two can egress through different address families, which is why
+/// a URL minted over IPv6 and fetched over IPv4 is refused. Pinning the request to the
+/// bound address removes that dependency.
+///
+/// Returns `None` for any URL without a parseable `ip=`, in which case the caller must
+/// behave exactly as before — non-googlevideo URLs (SoundCloud, direct `.mp3`) have no
+/// such binding and must not be pinned.
+fn bound_ip_from_url(url: &str) -> Option<std::net::IpAddr> {
+    // The parameter must START the query string or follow a `&`. Searching for the
+    // bare substring "ip=" also matches inside other names — `&xip=1.2.3.4` is a
+    // different parameter that happens to contain those letters, and reading it as a
+    // binding would pin the request to an address the CDN never agreed to.
+    let key = "ip=";
+    let mut from = 0usize;
+    let start = loop {
+        let off = url[from..].find(key)?;
+        let abs = from + off;
+        // `&` separates parameters after the first; `?` starts the query string, so a
+        // first parameter can also be preceded by it. Both are valid boundaries and
+        // `?` is the one that is easy to forget — `?ip=` is the shape every
+        // hand-written test URL has, so a check that only allows `&` looks correct
+        // until it meets one.
+        let prev = url.as_bytes().get(abs.wrapping_sub(1)).copied();
+        if abs == 0 || prev == Some(b'&') || prev == Some(b'?') {
+            break abs + key.len();
+        }
+        from = abs + key.len();
+    };
+    let val = &url[start..];
+    let end = val.find('&').unwrap_or(val.len());
+    let raw = &val[..end];
+    // The value is percent-encoded in real URLs: an IPv6 literal arrives as
+    // `2409%3A40c4%3A…`, so decoding only `%3A`/`%3a` is enough and avoids pulling in a
+    // percent-decoding dependency for a single parameter.
+    let decoded = raw.replace("%3A", ":").replace("%3a", ":");
+    // Some responses wrap the literal in brackets, as URL syntax requires for a
+    // v6 host: `[2409:40c4::1]`. `"1.2.3.4".parse::<IpAddr>()` works but
+    // `"2409:…".parse::<IpAddr>()` does not, and a bracketed v6 fails outright.
+    let unbracketed = decoded
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(&decoded);
+    unbracketed.parse::<std::net::IpAddr>().ok()
+}
+
+/// The host a URL points at, for use as the `resolve()` override key.
+fn url_host(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://")?.1;
+    let authority = after_scheme.split(['/', '?', '#']).next()?;
+    if authority.is_empty() {
+        None
+    } else {
+        Some(authority)
+    }
+}
+
 /// Slack allowed when comparing received bytes against the advertised object
 /// size. A few tens of KiB absorbs container/manifest rounding differences
 /// between what the resolver reports and what the edge serves.
@@ -1380,24 +1445,43 @@ impl Downloader {
             .and_then(|h| h.get("User-Agent").or_else(|| h.get("user-agent")).cloned())
             .unwrap_or_else(|| "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36".to_string());
 
-        debug!(download_id = %id, host = %host, ua = %ua, "Building HTTP client for stream");
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .user_agent(ua.clone())
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .map_err(|e| {
-                error!(download_id = %id, error = %e, "Failed to build HTTP client");
-                DownloaderError::HttpError(format!("failed to build HTTP client: {e}"))
-            })?;
-
         const MAX_CONSECUTIVE_ERRORS: usize = 5;
 
         // A resolved googlevideo URL can still carry a `range=start-end` window.
         // Request the full object so the byte accounting below is judged against
         // the real file size instead of a capped window.
         let request_url = strip_response_range_params(&job.stream_url);
+
+        // Pin the request to the address the URL was minted for, when it declares one.
+        //
+        // `request_url` has already had its `range=` params stripped, but `ip=` is left
+        // intact on purpose: it is not a response-window hint, it is the binding that
+        // decides whether this request is served at all. See `bound_ip_from_url`.
+        //
+        // `resolve_to_addrs` with port 0 lets reqwest use the conventional port for the
+        // scheme, so this stays correct if the resolver ever hands back an http URL.
+        let pinned_ip = bound_ip_from_url(&request_url);
+        let pinned_host = pinned_ip.and_then(|_| url_host(&request_url));
+        debug!(
+            download_id = %id,
+            host = %host,
+            bound_ip = ?pinned_ip,
+            pinned = pinned_host.is_some(),
+            "Building HTTP client for stream"
+        );
+        let mut client_builder = reqwest::Client::builder()
+            .use_rustls_tls()
+            .user_agent(ua.clone())
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(300));
+        if let (Some(h), Some(ip)) = (pinned_host, pinned_ip) {
+            client_builder =
+                client_builder.resolve_to_addrs(h, &[std::net::SocketAddr::new(ip, 0)]);
+        }
+        let client = client_builder.build().map_err(|e| {
+            error!(download_id = %id, error = %e, "Failed to build HTTP client");
+            DownloaderError::HttpError(format!("failed to build HTTP client: {e}"))
+        })?;
 
         // Why the stream loop stopped. Surfaced in failure messages so a
         // truncated download is explainable from the app UI alone (Android
@@ -2705,6 +2789,163 @@ impl Downloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this fixes, pinned as a test so it cannot silently return.
+    ///
+    /// Measured 2026-09-30 on the dev box (`AGENTS.md` §4.7.16): taking a working
+    /// muxed itag-18 URL and changing ONLY `ip=` to an unroutable RFC 5737
+    /// TEST-NET-3 address turned `206 Partial Content` into
+    /// `403 Forbidden / ct=text/plain / empty body` — byte-for-byte the failure
+    /// the device reported on every ladder attempt. So `ip=` is not decoration; it
+    /// is the binding the CDN checks.
+    #[test]
+    fn the_ip_param_is_the_binding_we_pin_to() {
+        let real = "https://rr3---sn-gwpa-civee.googlevideo.com/videoplayback?expire=1790817150&ei=Hl-9arK3E4uz9fwPxMOk6AY&ip=152.59.49.22&id=o";
+        assert_eq!(
+            bound_ip_from_url(real).map(|ip| ip.to_string()),
+            Some("152.59.49.22".to_string()),
+            "the IPv4 binding must be read back so the request can be pinned to it"
+        );
+
+        let tampered = real.replace("ip=152.59.49.22", "ip=203.0.113.7");
+        assert_eq!(
+            bound_ip_from_url(&tampered).map(|ip| ip.to_string()),
+            Some("203.0.113.7".to_string()),
+            "a tampered binding is still read — pinning is what stops it being used"
+        );
+    }
+
+    /// Real googlevideo IPv6 bindings arrive percent-encoded (`%3A`), which is what
+    /// the phone's failing URL looked like: `ip=2409%3A40c4%3Af9%3A…`. A parser
+    /// that forgets the decoding returns None here, silently un-pins, and the
+    /// device is back to 403 with no error to explain why.
+    #[test]
+    fn a_percent_encoded_ipv6_binding_is_decoded_and_pinned() {
+        // Taken verbatim from the device's own failing URL (`issue.md`, 2026-09-30).
+        // `%3A` is the group separator, so `f9%3Ab20c` really is the group `f9:b20c`
+        // — an IPv6 address is 8 groups and this is one, which is the check that
+        // matters: a mis-transcribed group count is the easy mistake here.
+        let url = "https://rr8---sn-gwpa-civd.googlevideo.com/videoplayback?expire=1790817146&ei=Gl-9ap3rMIDq1_oPx6qkoQc&ip=2409%3A40c4%3Af9%3Ab20c%3A88e5%3Ad5d6%3A54d0%3Ad75b&id=o";
+        assert_eq!(
+            bound_ip_from_url(url).map(|ip| ip.to_string()),
+            Some("2409:40c4:f9:b20c:88e5:d5d6:54d0:d75b".to_string()),
+            "a device on IPv6 is exactly the case that needs pinning, so it must parse"
+        );
+        // A truncated binding is NOT a valid address.
+        // Asserting that it is rejected is the point: silently "fixing" a malformed
+        // binding into a plausible one would pin to an address nobody agreed to.
+        assert_eq!(
+            bound_ip_from_url(&url.replace("%3A88e5%3Ad5d6%3A54d0%3Ad75b", "%3A88e5")),
+            None
+        );
+        // Bracketed literals are handled even though we have NOT observed one in a real
+        // `ip=` parameter — that is the honest reason the code is here: defensive,
+        // not measured. Asserted anyway, because untested defensive code is the
+        // kind that quietly stops working and a mutation removing it is otherwise
+        // invisible. Scope is deliberately narrow: the UNENCODED `[...]` form only.
+        // The percent-encoded `%5B…%5D` form is NOT handled and is not claimed to
+        // be — widening the decoder for a case nobody has observed would be
+        // speculative, and the assertion below records that as the current limit.
+        assert_eq!(
+            bound_ip_from_url("https://h.googlevideo.com/v?ip=[2409:40c4:f9:1:2:3:4:5]&id=o")
+                .map(|ip| ip.to_string()),
+            Some("2409:40c4:f9:1:2:3:4:5".to_string()),
+            "an unencoded bracketed literal must parse"
+        );
+        assert_eq!(
+            bound_ip_from_url(
+                "https://h.googlevideo.com/v?ip=%5B2409%3A40c4%3Af9%3A1%3A2%3A3%3A4%3A5%5D"
+            )
+            .map(|ip| ip.to_string()),
+            None,
+            "documented limit: only %3A is decoded, so an encoded bracket yields None \
+             (behaviour is unchanged from before this fix — no regression)"
+        );
+        // Lowercase hex must work too; YouTube is not consistent about it.
+        // Eight groups, exactly as the real binding has. A seven-group string is not
+        // an IPv6 address and must be rejected rather than padded into one.
+        let lower =
+            "https://h.googlevideo.com/videoplayback?ip=2409%3a40c4%3af9%3a1%3a2%3a3%3a4%3a5&id=o";
+        assert_eq!(
+            bound_ip_from_url(lower).map(|ip| ip.to_string()),
+            Some("2409:40c4:f9:1:2:3:4:5".to_string())
+        );
+        assert_eq!(
+            bound_ip_from_url("https://h.googlevideo.com/v?ip=2409%3a40c4%3af9%3a1%3a2%3a3%3a4"),
+            None,
+            "a 7-group value is not an address; padding it would pin somewhere the CDN never agreed to"
+        );
+    }
+
+    /// `ip=` must not be matched inside another parameter's value or name, and a
+    /// missing parameter must yield `None` so the caller behaves exactly as before
+    /// on URLs that have no binding at all (SoundCloud, a direct `.mp3`).
+    #[test]
+    fn urls_without_a_binding_are_left_alone() {
+        assert_eq!(bound_ip_from_url("https://example.com/song.mp3"), None);
+        assert_eq!(bound_ip_from_url("https://example.com/v?clip=1"), None);
+        // A parameter whose *value* merely contains "ip=" must not be read as one.
+        assert_eq!(
+            bound_ip_from_url("https://h.googlevideo.com/v?xip=1.2.3.4"),
+            None
+        );
+        // Trailing param with no value.
+        assert_eq!(
+            bound_ip_from_url("https://h.googlevideo.com/v?id=o&ip="),
+            None
+        );
+        // Non-IP values are not bindings.
+        assert_eq!(
+            bound_ip_from_url("https://h.googlevideo.com/v?ip=notanip"),
+            None
+        );
+    }
+
+    /// `resolve_to_addrs` keys on the authority, so the host must be extracted
+    /// without the scheme, path, query or port noise. Getting this wrong makes the
+    /// pin a no-op that still looks correct in the logs.
+    #[test]
+    fn the_pinned_host_is_the_bare_authority() {
+        assert_eq!(
+            url_host("https://rr8---sn-gwpa-civd.googlevideo.com/videoplayback?ip=1.2.3.4"),
+            Some("rr8---sn-gwpa-civd.googlevideo.com")
+        );
+        assert_eq!(
+            url_host("http://example.com:8080/a"),
+            Some("example.com:8080")
+        );
+        assert_eq!(url_host("not-a-url"), None);
+        assert_eq!(url_host("https:///nohost"), None);
+        // The case a path-only split cannot catch: a `/` INSIDE the query string.
+        // Real googlevideo URLs carry `/` in `range=0-1023` and in the `ip=` value
+        // itself once decoded, so splitting on `/` alone returns
+        // `rr8---sn-gwpa-civd.googlevideo.com` here by luck only — the authority
+        // must be terminated by `?` or `#` as well as `/`, or the override key
+        // silently stops matching and the pin becomes a no-op that still logs
+        // as if it were applied.
+        assert_eq!(
+            url_host("https://rr8---sn-gwpa-civd.googlevideo.com/videoplayback?range=0-1023&x=a/b"),
+            Some("rr8---sn-gwpa-civd.googlevideo.com")
+        );
+        assert_eq!(
+            url_host("https://example.com/p#frag/more"),
+            Some("example.com")
+        );
+    }
+
+    /// The pin is only correct if the host and the IP come from the SAME url. This
+    /// guards the pairing, because `bound_ip_from_url` searches the whole string and
+    /// a future caller could easily pair a host from one URL with an ip from another.
+    #[test]
+    fn host_and_bound_ip_come_from_the_same_url() {
+        let url = "https://rr3---sn-gwpa-civee.googlevideo.com/videoplayback?ip=152.59.49.22&id=o";
+        let ip = bound_ip_from_url(url);
+        let host = url_host(url);
+        assert!(ip.is_some() && host.is_some());
+        // The host reqwest will ask for must be the one we override, so a TLS/SNI
+        // mismatch cannot silently downgrade the request.
+        assert!(host.unwrap().contains("googlevideo.com"));
+    }
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
