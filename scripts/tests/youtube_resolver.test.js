@@ -1548,7 +1548,7 @@ describe('YouTube Search & Streaming Integration', () => {
             'DownloadProgress must carry the reason on its own field, separate from the download error');
     });
 
-    it('the retry ladder is adaptive -> same-client muxed -> audio-only opus, and each rung is gated on the report', async () => {
+    it('the retry ladder is muxed-first after the adaptive attempt, and each rung is gated on the report', async () => {
         // The real per-client report from the device, 2026-09-27, track
         // yF9nmg_jHNs, which exhausted four attempts and still failed:
         //
@@ -1612,32 +1612,37 @@ describe('YouTube Search & Streaming Integration', () => {
         const muxed = { client: 'ANDROID_VR', itag: 18, ext: 'mp4', audioOnly: false, legacyProgressive: true };
         const opus = { client: 'ANDROID_VR', itag: 251, ext: 'webm', mime: 'audio/webm; codecs="opus"', audioOnly: true, legacyProgressive: false };
 
-        // Rung 2 is OPUS, not the muxed fallback. This test previously asserted
-        // the opposite, and the device run of 2026-09-27 is why that was wrong:
-        // the muxed class has never succeeded (403 once, truncated twice) while
-        // opus was never tried at all, so spending rung 2 on muxed guaranteed the
-        // untried class would not be reached. See the class-ladder test below for
-        // the full four-attempt replay.
+        // Rung 2 is the MUXED class, and that reverses what this test asserted
+        // before. The old order put muxed last because it "has never succeeded",
+        // and that premise has since died twice: the truncations were our own
+        // decoder miscounting a complete 216s file (v2.6.66), and muxed then
+        // completed end to end (v2.6.67).
+        //
+        // Re-measured 2026-10-02, dev box on the same phone and residential line as
+        // the failing device, on BOTH tracks that 403'd there (Ral6kFSx7ZY,
+        // ALclXvd0QCU): muxed itag 18 from ANDROID returned HTTP 206, while the
+        // adaptive class is measured 403-at-byte-0 on this line (§4.7.1). The ladder
+        // was spending its first attempt on the class that cannot work.
         let calls = await run(adaptive, err403, { attempts: 0, triedClients: [], triedClasses: [] });
         assert.equal(calls.length, 1);
-        assert.equal(calls[0].client, 'ANDROID_VR', 'ANDROID_VR is the only client offering opus, so it must be the one asked');
-        assert.equal(calls[0].opus, true, 'the untried class must be rung 2');
-        assert.equal(calls[0].muxed, false, 'muxed has never succeeded and must not outrank an untried class');
+        assert.equal(calls[0].muxed, true, 'muxed is rung 2 — the only class measured to serve on this line');
+        assert.equal(calls[0].opus, false, 'opus must not outrank a class that is measured to work');
+        assert.equal(calls[0].client, 'ANDROID_VR', 'ANDROID_VR reports progressiveWithUrl=1, so it is the client asked');
 
-        // Rung 3: opus also refused, so the muxed class is the last one left.
-        calls = await run({ ...opus, client: 'ANDROID_VR' }, err403, { attempts: 1, triedClients: ['ANDROID_VR'], triedClasses: ['adaptive', 'opus'] });
+        // Rung 3: muxed also refused, so audio-only opus is the last class left.
+        calls = await run({ ...muxed, client: 'ANDROID_VR' }, err403, { attempts: 1, triedClients: ['ANDROID_VR'], triedClasses: ['adaptive', 'muxed'] });
         assert.equal(calls.length, 1);
-        assert.equal(calls[0].muxed, true, 'with adaptive and opus refused, muxed is what remains');
-        assert.equal(calls[0].opus, false, 'must not re-ask for the class that just failed');
+        assert.equal(calls[0].opus, true, 'with adaptive and muxed refused, opus is what remains');
+        assert.equal(calls[0].muxed, false, 'must not re-ask for the class that just failed');
 
-        // Gated: with no client offering opus the rung must not fire, or the
-        // retry spends an attempt re-resolving a class already proven bad.
-        // This is the real IOS case — progressiveWithUrl:0 and opusWithUrl:0.
-        const noOpus = report.map((e) => ({ ...e, opusWithUrl: 0 }));
-        const saved = report.splice(0, report.length, ...noOpus);
+        // Gated on the report: with no client offering a muxed progressive the rung
+        // must not fire, or the retry spends an attempt re-resolving a class already
+        // proven bad. This is the real IOS case — progressiveWithUrl:0.
+        const noMuxed = report.map((e) => ({ ...e, progressiveWithUrl: 0 }));
+        const saved = report.splice(0, report.length, ...noMuxed);
         calls = await run(adaptive, err403, { attempts: 0, triedClients: [], triedClasses: ['adaptive'] });
-        assert.equal(calls.every((c) => !c.opus), true, 'a client set with no opus must not trigger the opus rung');
-        assert.equal(calls[0].muxed, true, 'with no opus available the ladder must go to the muxed class instead');
+        assert.equal(calls.every((c) => !c.muxed), true, 'a client set with no progressive url must not trigger the muxed rung');
+        assert.equal(calls[0].opus, true, 'with no muxed available the ladder must fall through to opus instead');
         report.splice(0, report.length, ...saved);
 
         // ...and the resolver must honour the option, and say so when it cannot.
@@ -1669,7 +1674,7 @@ describe('YouTube Search & Streaming Integration', () => {
             'and the conflict must be reported rather than resolved silently');
     });
 
-    it('the class ladder reaches audio-only opus instead of spending retries on classes already refused', async () => {
+    it('the class ladder walks muxed then opus instead of spending retries on classes already refused', async () => {
         // Replay of the real device run, 2026-09-27, track yF9nmg_jHNs, on the
         // build that shipped the opus rung. Four attempts, all failed, and opus
         // was never requested:
@@ -1684,6 +1689,18 @@ describe('YouTube Search & Streaming Integration', () => {
         // truncation landed on the last attempt the budget allows — so the one
         // untried class was structurally unreachable, and two of three retries
         // went to classes already proven bad.
+        //
+        // The order asserted below is now muxed-first rather than opus-first. The
+        // four attempts in that replay were all run against a muxed class that
+        // "had never succeeded", and that premise has since died twice: the
+        // truncations were our own decoder miscounting a complete file (v2.6.66),
+        // and muxed then completed end to end (v2.6.67). Re-measured 2026-10-02 on
+        // the same phone and line as the failing device, on both tracks that 403'd
+        // there, muxed itag 18 from ANDROID returned HTTP 206 while adaptive is
+        // measured 403-at-byte-0 (§4.7.1). So the replay below is kept as the
+        // structural test it always was — every class reached exactly once, no
+        // rotation until the classes are spent, the budget still terminating — but
+        // its rung order now reflects what actually serves.
         const report = [
             { client: 'MWEB', status: 'UNPLAYABLE', adaptiveWithUrl: 0, audioWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0 },
             { client: 'WEB', status: 'UNPLAYABLE', adaptiveWithUrl: 0, audioWithUrl: 0, progressiveWithUrl: 0, opusWithUrl: 0 },
@@ -1742,31 +1759,32 @@ describe('YouTube Search & Streaming Integration', () => {
             await obj._handle403AutoRetry({ id: 'dl1', status: 'failed', error: errRaw });
         };
 
-        // Attempt #1 failed: adaptive refused at byte 0. The very next rung must
-        // be the class nobody has tried, not the muxed fallback that the old
-        // error-type gate jumped to.
+        // Attempt #1 failed: adaptive refused at byte 0. The next rung is muxed —
+        // the only class measured to serve on this line. This is the reverse of what
+        // the assertion used to be, and the reversal is the point: the ladder was
+        // trying the refused class first and leaving the working one until last.
         await feed(adaptive, err403);
         assert.equal(calls.length, 1, 'one retry per failure');
-        assert.equal(calls[0].opus, true, 'the untried class (opus) must be rung 2, not the muxed fallback');
-        assert.equal(calls[0].muxed, false, 'muxed has never succeeded and must not be tried before opus');
-        assert.equal(calls[0].client, 'ANDROID_VR', 'ANDROID_VR is the only client reporting opusWithUrl > 0');
+        assert.equal(calls[0].muxed, true, 'muxed must be rung 2 — it is the only class measured to serve here');
+        assert.equal(calls[0].opus, false, 'opus must not be reached before muxed');
+        assert.equal(calls[0].client, 'ANDROID_VR', 'ANDROID_VR reports progressiveWithUrl=1');
 
-        // Attempt #2 (opus) also refused. The only class left is muxed, and it
+        // Attempt #2 (muxed) also refused. The only class left is opus, and it
         // must still be reached rather than burning the budget on a rotation.
-        await feed(opus, err403);
+        await feed(muxed, err403);
         assert.equal(calls.length, 2, 'a second retry must happen');
-        assert.equal(calls[1].muxed, true, 'with adaptive and opus both refused, muxed is the last class');
-        assert.equal(calls[1].opus, false, 'must not re-ask the class that just failed');
-        assert.deepEqual(budget.triedClasses, ['adaptive', 'opus'], 'each class is recorded once, in the order tried');
+        assert.equal(calls[1].opus, true, 'with adaptive and muxed both refused, opus is the last class');
+        assert.equal(calls[1].muxed, false, 'must not re-ask the class that just failed');
+        assert.deepEqual(budget.triedClasses, ['adaptive', 'muxed'], 'each class is recorded once, in the order tried');
 
-        // Attempt #3 (muxed) truncated. Every class has now been tried, so what
+        // Attempt #3 (opus) truncated. Every class has now been tried, so what
         // remains is a client re-ask — a second opinion, not progress, and the one
         // thing the old mid-ladder rotation was doing too early.
-        await feed(muxed, errTrunc);
+        await feed(opus, errTrunc);
         assert.equal(calls.length, 3, 'one rotation is still allowed once the classes are exhausted');
         assert.equal(calls[2].opus, false, 'the rotation must not force a class');
         assert.equal(calls[2].muxed, false, 'the rotation must not re-force the class that just truncated');
-        assert.deepEqual(budget.triedClasses, ['adaptive', 'opus', 'muxed'],
+        assert.deepEqual(budget.triedClasses, ['adaptive', 'muxed', 'opus'],
             'each class recorded once, in the order tried, and no class is re-added');
         // ...and the budget still bounds it: MAX_AUTO_RETRIES is 3, so the fourth
         // failure must stop rather than spin on a class known to truncate.

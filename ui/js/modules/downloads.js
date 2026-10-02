@@ -185,7 +185,24 @@ export const downloadMethods = {
         // holds part of the audio, so this needs a NEW url, not a resume.
         const isTruncated = /Truncated download/i.test(errRaw);
         const isResumable = /Incomplete download|Stream interrupted|timed out|timeout|stalled|ECONNRESET|connection reset|HTTP 5\d\d/i.test(errRaw);
-        if (!is403 && !isTruncated && !isResumable) {
+        // A request that never left the device. `reqwest` reports every connect,
+        // DNS and TLS-handshake failure with this one prefix and no status code, so
+        // it matched nothing above and the gate below bailed out — `map.delete`
+        // then `return`, with the retry budget never even consulted.
+        //
+        // Measured on device 2026-10-02: a download died with
+        //   "request failed [rr3---sn-gwpa-wage.googlevideo.com] start_byte=0:
+        //    error sending request for url (...)"
+        // and stopped after a single attempt with the ladder untouched. That reads
+        // as "the retry budget ran out", which is the natural assumption and the
+        // wrong one: zero retries were attempted, not three.
+        //
+        // This is the one failure class the ladder exists for. Nothing was
+        // downloaded and nothing was refused, and a different class or client means
+        // a different CDN hostname, which may resolve and connect when this one did
+        // not. Leaving it out made the ladder structurally blind.
+        const isTransport = /error sending request|connection refused|connection closed|connect error|failed to lookup address|dns error|client error/i.test(errRaw);
+        if (!is403 && !isTruncated && !isResumable && !isTransport) {
             map.delete(p.id);
             return;
         }
@@ -296,7 +313,12 @@ export const downloadMethods = {
             if (provenUnservable(e)) return null;
             return hasUrlOnAnyClass(e) ? 0 : 1;
         };
-        const rotate = (is403 || isTruncated);
+        // A transport failure rotates too. It is a refusal by nobody — the bytes
+        // never moved — and the next rung of the ladder is a different CDN hostname,
+        // which is precisely what might connect when this one did not. Leaving it
+        // out meant `rotate` was false, so the class walk below was skipped and the
+        // single attempt stood as the final answer.
+        const rotate = (is403 || isTruncated || isTransport);
         // Candidates: the clients after the winner first, then the rest, minus
         // everything already tried for this track.
         const ordered = resolved.orderedClients || [];
@@ -376,18 +398,42 @@ export const downloadMethods = {
             if (klass === 'muxed') return (e.progressiveWithUrl || 0) > 0;
             return (e.audioWithUrl || 0) > 0 || (e.adaptiveWithUrl || 0) > 0;
         };
-        // Order, and the evidence behind it:
-        //   adaptive — best when it works, so it is what the first attempt uses.
-        //   opus     — untried after four failed attempts on the other two, and
-        //              audio-only, so it pays no 360p remux the muxed rung does.
-        //   muxed    — has never succeeded: 403 once and truncated twice, across
-        //              ANDROID_VR and ANDROID. Weakest prior of the three, which
-        //              is why it is last rather than second.
-        // The adaptive-vs-opus ordering is an INFERENCE, not a measurement: both
-        // are adaptive CDN urls and may share whatever the 403 is bound to, in
-        // which case opus is refused identically and this changes nothing. What is
-        // measured is that muxed is no better than either.
-        const CLASS_ORDER = ['adaptive', 'opus', 'muxed'];
+        // Order, and the evidence behind it — which is NOT what the previous
+        // comment claimed. That comment said muxed "has never succeeded: 403 once
+        // and truncated twice". Both halves are dead:
+        //
+        //   - the truncation was our own decoder. rodio read 25.2% of a complete
+        //     216.34s file and the completeness gate believed it. Fixed in v2.6.66.
+        //   - muxed then completed end to end (94WoNQyK_KY, v2.6.67).
+        //
+        // Re-measured on the dev box 2026-10-02 — same phone, same residential line
+        // as the failing device — on BOTH tracks that 403'd there (Ral6kFSx7ZY and
+        // ALclXvd0QCU), muxed itag 18 from ANDROID:
+        //
+        //     A unpinned            -> HTTP 206 Partial Content
+        //     B source-bound        -> HTTP 206             (local_address)
+        //     C destination-bound   -> connect failure       (v2.6.68 as shipped)
+        //
+        // Meanwhile the class this ladder used to try FIRST is the one measured to
+        // be refused at byte 0: §4.7.1 recorded adaptive itag 140 and opus itag 251
+        // both 403 at byte 0 on this line, and the device reports agree. For
+        // ALclXvd0QCU, ANDROID_VR offered 4 audio formats WITH urls (itag 140) and
+        // was chosen, while ANDROID offered only the muxed progressive and was not.
+        //
+        // So the ladder spent attempt #1 on the class that cannot work and left the
+        // class that demonstrably can until last. Muxed goes first.
+        //
+        // What is NOT claimed: that muxed is better. Muxed is video+audio at 360p,
+        // and adaptive itag 140 is audio-only and strictly better quality — it is
+        // the right first choice wherever it is servable. This order reflects what
+        // is servable on THIS network, and should be revisited the day adaptive
+        // stops 403ing, because the ladder is cheap to reorder and adaptive is the
+        // better file.
+        //
+        // adaptive-vs-opus below it is unchanged and still an INFERENCE, not a
+        // measurement: both are adaptive CDN urls and may share whatever the 403 is
+        // bound to.
+        const CLASS_ORDER = ['muxed', 'adaptive', 'opus'];
 
         if (!Array.isArray(budget.triedClasses)) budget.triedClasses = [];
         const failedClass = classOf(sel);

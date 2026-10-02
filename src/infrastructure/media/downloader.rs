@@ -212,6 +212,36 @@ fn extract_url_param_u64(url: &str, param: &str) -> Option<u64> {
 /// Returns `None` for any URL without a parseable `ip=`, in which case the caller must
 /// behave exactly as before — non-googlevideo URLs (SoundCloud, direct `.mp3`) have no
 /// such binding and must not be pinned.
+/// Build the HTTP client used to stream one job.
+///
+/// `egress` is the address from [`bound_ip_from_url`] — the **client's own** address
+/// that the URL's signature is bound to. It constrains the local socket, so it goes to
+/// [`reqwest::ClientBuilder::local_address`] and never to `resolve_to_addrs`.
+///
+/// That distinction is the whole fix. `resolve_to_addrs(host, ip)` reads as "resolve
+/// this host to that address", which for a googlevideo URL means dialling the phone
+/// itself and asking it to serve as the CDN. It cannot connect, ever, and it converts
+/// a diagnosable 403-at-byte-0 into an opaque `error sending request` at byte 0.
+///
+/// `None` builds an ordinary client, which is also the fallback when a pinned egress
+/// turns out not to be bindable on this device.
+fn build_stream_client(
+    ua: &str,
+    egress: Option<std::net::IpAddr>,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .user_agent(ua.to_string())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(300));
+    if let Some(ip) = egress {
+        builder = builder.local_address(ip);
+    }
+    builder.build()
+}
+
+/// `ip=` is the address the URL was minted against, so it decides whether a request is
+/// served at all. See [`bound_ip_from_url`] for what it is and is not.
 fn bound_ip_from_url(url: &str) -> Option<std::net::IpAddr> {
     // The parameter must START the query string or follow a `&`. Searching for the
     // bare substring "ip=" also matches inside other names — `&xip=1.2.3.4` is a
@@ -250,16 +280,10 @@ fn bound_ip_from_url(url: &str) -> Option<std::net::IpAddr> {
     unbracketed.parse::<std::net::IpAddr>().ok()
 }
 
-/// The host a URL points at, for use as the `resolve()` override key.
-fn url_host(url: &str) -> Option<&str> {
-    let after_scheme = url.split_once("://")?.1;
-    let authority = after_scheme.split(['/', '?', '#']).next()?;
-    if authority.is_empty() {
-        None
-    } else {
-        Some(authority)
-    }
-}
+// `url_host` used to live here, as the key for a `resolve_to_addrs` override. That
+// override was removed because it was asking for the wrong thing — see
+// `build_stream_client` — so the helper went with it rather than being left dead
+// behind a `#[allow(dead_code)]`.
 
 /// Slack allowed when comparing received bytes against the advertised object
 /// size. A few tens of KiB absorbs container/manifest rounding differences
@@ -1452,33 +1476,39 @@ impl Downloader {
         // the real file size instead of a capped window.
         let request_url = strip_response_range_params(&job.stream_url);
 
-        // Pin the request to the address the URL was minted for, when it declares one.
+        // Egress from the address the URL was minted for, when it declares one.
         //
-        // `request_url` has already had its `range=` params stripped, but `ip=` is left
-        // intact on purpose: it is not a response-window hint, it is the binding that
-        // decides whether this request is served at all. See `bound_ip_from_url`.
+        // `ip=` on a googlevideo URL is the **client's own** address, not the CDN
+        // server's. That is not an assumption — it is how the 403 was diagnosed in
+        // the first place: the URLs YouTube handed the dev box carried
+        // `ip=2409:40c4:f9ab:20c:88e5:d5d6:54d0:d75b` and the box's own egress was
+        // that exact address. Tampering only that value turned a 206 into a 403
+        // with an empty body, which is a source-address binding check.
         //
-        // `resolve_to_addrs` with port 0 lets reqwest use the conventional port for the
-        // scheme, so this stays correct if the resolver ever hands back an http URL.
-        let pinned_ip = bound_ip_from_url(&request_url);
-        let pinned_host = pinned_ip.and_then(|_| url_host(&request_url));
+        // So it constrains where WE connect FROM, and the correct call is
+        // `local_address`. This used to be `resolve_to_addrs(host, ip)`, which asks
+        // for the opposite thing — it tells reqwest to reach the CDN hostname by
+        // dialling the client's own address. The CDN host genuinely resolves to a
+        // Google address (`2405:200:1630:b63::e` for one measured case) and never
+        // to the Jio address in `ip=`, so that could never connect, and it turned a
+        // 403-at-byte-0 into `error sending request` at byte 0. Same byte, different
+        // and much less diagnosable failure.
+        let bound_ip = bound_ip_from_url(&request_url);
+        // Cleared once the pinned client has failed to connect, so the retry below
+        // goes out unpinned rather than re-pinning to an address this device may
+        // not even own. IPv6 privacy addresses (RFC 4941) rotate, so a URL minted
+        // minutes ago can name an address the interface no longer has — binding to
+        // it then fails outright, and a connect error is strictly worse than the
+        // 403 an unpinned request would have produced.
+        let mut egress_pinned = bound_ip.is_some();
         debug!(
             download_id = %id,
             host = %host,
-            bound_ip = ?pinned_ip,
-            pinned = pinned_host.is_some(),
+            bound_ip = ?bound_ip,
+            egress_pinned,
             "Building HTTP client for stream"
         );
-        let mut client_builder = reqwest::Client::builder()
-            .use_rustls_tls()
-            .user_agent(ua.clone())
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(300));
-        if let (Some(h), Some(ip)) = (pinned_host, pinned_ip) {
-            client_builder =
-                client_builder.resolve_to_addrs(h, &[std::net::SocketAddr::new(ip, 0)]);
-        }
-        let client = client_builder.build().map_err(|e| {
+        let mut client = build_stream_client(&ua, bound_ip).map_err(|e| {
             error!(download_id = %id, error = %e, "Failed to build HTTP client");
             DownloaderError::HttpError(format!("failed to build HTTP client: {e}"))
         })?;
@@ -1575,6 +1605,35 @@ impl Downloader {
             let mut res = match send_res {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
+                    // A pinned egress that this device cannot actually bind is the
+                    // most likely cause, and retrying with it still pinned just burns
+                    // the whole error budget to reach the same wall. Drop the pin
+                    // once and let the request decide on its own merits — worst case
+                    // we are back to the 403 the pin was meant to prevent, which is
+                    // a far better outcome than never connecting at all.
+                    if egress_pinned {
+                        egress_pinned = false;
+                        match build_stream_client(&ua, None) {
+                            Ok(unpinned) => {
+                                warn!(
+                                    download_id = %id,
+                                    host = %host,
+                                    error = %e,
+                                    "Pinned egress unusable; retrying unpinned"
+                                );
+                                client = unpinned;
+                                continue;
+                            }
+                            Err(build_err) => {
+                                warn!(
+                                    download_id = %id,
+                                    host = %host,
+                                    error = %build_err,
+                                    "Could not build unpinned fallback client"
+                                );
+                            }
+                        }
+                    }
                     let msg = format!("request failed [{host}] start_byte={current_downloaded}: {e} (url={url_snip})");
                     warn!(download_id = %id, host = %host, error = %e, consecutive_errors = consecutive_errors, "Request send error");
                     consecutive_errors += 1;
@@ -2901,50 +2960,23 @@ mod tests {
         );
     }
 
-    /// `resolve_to_addrs` keys on the authority, so the host must be extracted
-    /// without the scheme, path, query or port noise. Getting this wrong makes the
-    /// pin a no-op that still looks correct in the logs.
+    /// Two tests that lived here are gone with the `resolve_to_addrs` override:
+    /// `the_pinned_host_is_the_bare_authority` and
+    /// `host_and_bound_ip_come_from_the_same_url` both existed to protect the
+    /// pairing of a host with an `ip=` for use as a resolution override. There is no
+    /// override any more, so they were asserting the shape of a mechanism that was
+    /// itself wrong — they would have kept passing while the pin dialled the phone
+    /// instead of the CDN.
+    ///
+    /// `build_stream_client` is still worth a smoke test, because a bind failure at
+    /// construction time must not take the whole download path down.
     #[test]
-    fn the_pinned_host_is_the_bare_authority() {
-        assert_eq!(
-            url_host("https://rr8---sn-gwpa-civd.googlevideo.com/videoplayback?ip=1.2.3.4"),
-            Some("rr8---sn-gwpa-civd.googlevideo.com")
-        );
-        assert_eq!(
-            url_host("http://example.com:8080/a"),
-            Some("example.com:8080")
-        );
-        assert_eq!(url_host("not-a-url"), None);
-        assert_eq!(url_host("https:///nohost"), None);
-        // The case a path-only split cannot catch: a `/` INSIDE the query string.
-        // Real googlevideo URLs carry `/` in `range=0-1023` and in the `ip=` value
-        // itself once decoded, so splitting on `/` alone returns
-        // `rr8---sn-gwpa-civd.googlevideo.com` here by luck only — the authority
-        // must be terminated by `?` or `#` as well as `/`, or the override key
-        // silently stops matching and the pin becomes a no-op that still logs
-        // as if it were applied.
-        assert_eq!(
-            url_host("https://rr8---sn-gwpa-civd.googlevideo.com/videoplayback?range=0-1023&x=a/b"),
-            Some("rr8---sn-gwpa-civd.googlevideo.com")
-        );
-        assert_eq!(
-            url_host("https://example.com/p#frag/more"),
-            Some("example.com")
-        );
-    }
-
-    /// The pin is only correct if the host and the IP come from the SAME url. This
-    /// guards the pairing, because `bound_ip_from_url` searches the whole string and
-    /// a future caller could easily pair a host from one URL with an ip from another.
-    #[test]
-    fn host_and_bound_ip_come_from_the_same_url() {
-        let url = "https://rr3---sn-gwpa-civee.googlevideo.com/videoplayback?ip=152.59.49.22&id=o";
-        let ip = bound_ip_from_url(url);
-        let host = url_host(url);
-        assert!(ip.is_some() && host.is_some());
-        // The host reqwest will ask for must be the one we override, so a TLS/SNI
-        // mismatch cannot silently downgrade the request.
-        assert!(host.unwrap().contains("googlevideo.com"));
+    fn stream_client_builds_with_and_without_a_pinned_egress() {
+        assert!(build_stream_client("auralis-test/1.0", None).is_ok());
+        // 0.0.0.0 and :: are always bindable as a local source on any host, so this
+        // exercises the pinned branch without needing a real interface address.
+        assert!(build_stream_client("auralis-test/1.0", Some("0.0.0.0".parse().unwrap())).is_ok());
+        assert!(build_stream_client("auralis-test/1.0", Some("::".parse().unwrap())).is_ok());
     }
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
