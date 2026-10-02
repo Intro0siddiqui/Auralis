@@ -777,6 +777,69 @@ worthwhile either way because pinning cannot make a correct request worse. **Not
 that pinning actually turns the phone's 403 into a 206.** Only the owner can confirm that,
 and it is one APK.
 
+### 4.7.17 Why one track downloaded and another 403'd — and the part my fix does NOT yet explain
+
+**Owner asked the right question:** Safari - Serena completed 100% while
+`Ral6kFSx7ZY` 403'd, both through the same resolver, the same client ladder and the same
+`reqwest` transfer. If the cause were the client, the format class or the ladder, they would
+behave alike. So what differed?
+
+**What the two reports actually show.**
+
+| | Safari - Serena (`94WoNQyK_KY`, completed) | deprezz (`Ral6kFSx7ZY`, 403 x4) |
+|---|---|---|
+| chosen client | `*ANDROID` | `*ANDROID_VR`, then `*IOS` |
+| itag picked | **18 (muxed)** | 18 / 251 / 140 |
+| bound `ip=` | not captured | `2409:40c4:…` **IPv6** |
+| host | `rr3---sn-gwpa-civee` | `rr8---sn-gwpa-civd` |
+
+**Note what `aurl0` does and does not mean, because I nearly mis-read it.** The report line is
+`a{adaptive}/p{progressive} aurl{adaptiveWithUrl} audio{audioWithUrl}`
+(`youtube.js:153`) — `aurl` counts **adaptive formats with urls only**. Safari's chosen
+client reads `a25/p1 aurl0 audio0` and that is *not* a contradiction: it had 1 progressive
+format, and `progressiveWithUrl` is collected separately (`youtube.js:725`) and never printed.
+There is even a dedicated `progressive-only` reason for exactly that shape
+(`youtube.js:743-748`) — *"Servable, but only through the muxed path … this is the shape that
+produced the one success we have."* **So `aurl0` is the signature of the success, not of a
+failure.** Do not "fix" that reasoning later.
+
+**So the honest position on the two-track difference:**
+
+- **Confirmed:** the transfer is refused when the request egresses from an address other than
+  the URL's `ip=` (§4.7.16, measured by tampering). That mechanism is real and it produced a
+  403 that is byte-identical to deprezz's.
+- **Inferred, not measured:** that *this* is why deprezz failed. It rests on deprezz's URL
+  being bound to an IPv6 address while the device's recorded egress was a different IPv6.
+- **NOT yet explained by the fix:** **why Safari succeeded at all.** If the pin is the whole
+  story, Safari should have failed too. Two candidate explanations, neither confirmed:
+  1. **Timing.** Safari was fetched hours earlier; the device's IPv6 privacy address rotates
+     (RFC 4941), so at that moment the WebView and `reqwest` may have egressed from the *same*
+     address and the pin would have been a no-op. deprezz hit a window where they differed.
+  2. **Family selection.** The WebView and `reqwest` may independently choose IPv4 vs IPv6.
+     A resolve that lands on IPv6 and a fetch that leaves on IPv4 is a mismatch every time.
+     This box **cannot test it — it has no global IPv6 address at all** (`ip -6 addr` → 0),
+     so the split cannot be reproduced offline. That is a hard limit on offline verification
+     and worth stating rather than working around.
+
+**This is the strongest remaining argument that something is still unaccounted for**, and it
+should be treated as such: a theory that explains the failure but not the success is not
+finished. The v2.6.68 pin is worth shipping because it cannot make a correct request worse and
+it removes a real, measured failure mode — but if Safari's success is candidate (1) or (2),
+the pin may fix deprezz without telling us the whole story.
+
+**The one run that settles it:** install v2.6.68 and retry `Ral6kFSx7ZY`.
+- It downloads → candidate 1 or 2 confirmed, and the ladder stops mattering for this class.
+- It still 403s → the pin was necessary but not sufficient, and the address/family split is
+  the *only* remaining explanation, which points squarely at moving resolution into Rust so
+  one HTTP client is used end to end. That is the larger change, and this is the evidence
+  that would justify doing it.
+
+**One measurement that would help immediately and costs nothing:** the `ip=` value is now
+logged by `run_stream` (`bound_ip = ?pinned_ip` in the debug line). On a **debug** build the
+owner can compare that against the device's egress at that moment. A mismatch confirms the
+mechanism on the device rather than by inference, and it is the difference between "we
+measured this" and "we believe this".
+
 ### 4.7.12 The window is TRACK-SPECIFIC — the highest-value open question now
 
 Same itag, same class, same client ladder, opposite outcomes:
