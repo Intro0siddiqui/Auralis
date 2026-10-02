@@ -303,6 +303,29 @@ class MediaPlaybackService : Service() {
     private var notificationManager: NotificationManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var pausedByFocusLoss: Boolean = false
+
+    /**
+     * True only between a focus request that was actually GRANTED and losing it.
+     *
+     * This exists because `requestAudioFocus` can come back FAILED or DELAYED, and
+     * both of those are followed by a `LOSS_TRANSIENT` callback that is a consequence
+     * of *our own request* rather than an interruption by another app. Treating that
+     * callback as "something took focus away" made the service pause the track the
+     * user had just resumed — the reported "it resumes, then stops a second later".
+     *
+     * Android contract, quoted from the SDK docs for
+     * `AudioManager.requestAudioFocus(AudioFocusRequest)`:
+     *   "AUDIOFOCUS_REQUEST_FAILED — focus request failed. This means the client
+     *    should not expect to receive focus and should not attempt to play audio."
+     *   "AUDIOFOCUS_REQUEST_DELAYED — focus request is delayed. This means the
+     *    request was granted, but the client should wait for
+     *    AUDIOFOCUS_GAIN before playing audio that may result in other clients
+     *    stopping their audio."
+     *
+     * A DELAYED grant is explicitly *not* permission to play, so nothing should be
+     * paused on our behalf later: there is no earlier playback to restore.
+     */
+    private var hasAudioFocus: Boolean = false
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
@@ -397,6 +420,11 @@ class MediaPlaybackService : Service() {
 
     private fun requestAudioFocus() {
         val am = audioManager ?: return
+        // A fresh request only ever happens because the user asked to play (Rust
+        // pushes now-playing on every playback change). So any earlier focus-pause is
+        // over. Leaving the flag set meant a later GAIN fired a redundant `play` for
+        // whatever track happened to be current, long after the user moved on.
+        pausedByFocusLoss = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val playbackAttributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -409,8 +437,21 @@ class MediaPlaybackService : Service() {
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS,
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                            pausedByFocusLoss = true
-                            NativeBridge.command("pause")
+                            if (!hasAudioFocus) {
+                                // Nothing was interrupted: we never held focus. This fires
+                                // as a direct consequence of our own DELAYED or FAILED
+                                // request, and pausing here pauses the track the user just
+                                // started. Ignored deliberately — there is no earlier
+                                // playback to restore.
+                                Log.i(
+                                    "AuralisMedia",
+                                    "focus loss with no prior grant — ignoring (was our own request)"
+                                )
+                            } else {
+                                hasAudioFocus = false
+                                pausedByFocusLoss = true
+                                NativeBridge.command("pause")
+                            }
                         }
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                             // Duck rather than pause — keep playing at lower volume.
@@ -418,6 +459,7 @@ class MediaPlaybackService : Service() {
                             // minimal fix we simply avoid pausing (audio continues).
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
+                            hasAudioFocus = true
                             if (pausedByFocusLoss) {
                                 pausedByFocusLoss = false
                                 NativeBridge.command("play")
@@ -427,21 +469,40 @@ class MediaPlaybackService : Service() {
                 }
                 .build()
             audioFocusRequest = req
-            am.requestAudioFocus(req)
+            // The result used to be discarded, which made GRANTED, FAILED and DELAYED
+            // indistinguishable. Now it decides whether we believe we hold focus, and
+            // it is logged because this is the line that explains a resume which
+            // stops on its own — the logcat tag is "AuralisMedia".
+            val result = am.requestAudioFocus(req)
+            hasAudioFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            Log.i(
+                "AuralisMedia",
+                "requestAudioFocus -> result=$result hasAudioFocus=$hasAudioFocus"
+            )
         } else {
             @Suppress("DEPRECATION")
-            am.requestAudioFocus(
+            val legacyResult = am.requestAudioFocus(
                 { focusChange ->
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS,
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                            pausedByFocusLoss = true
-                            NativeBridge.command("pause")
+                            // Same guard as the O+ branch, for the same reason.
+                            if (hasAudioFocus) {
+                                hasAudioFocus = false
+                                pausedByFocusLoss = true
+                                NativeBridge.command("pause")
+                            } else {
+                                Log.i(
+                                    "AuralisMedia",
+                                    "legacy focus loss with no prior grant — ignoring"
+                                )
+                            }
                         }
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                             // Duck — do not pause.
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
+                            hasAudioFocus = true
                             if (pausedByFocusLoss) {
                                 pausedByFocusLoss = false
                                 NativeBridge.command("play")
@@ -452,11 +513,20 @@ class MediaPlaybackService : Service() {
                 AudioManager.STREAM_MUSIC,
                 AudioManager.AUDIOFOCUS_GAIN
             )
+            hasAudioFocus = legacyResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            Log.i(
+                "AuralisMedia",
+                "legacy requestAudioFocus -> result=$legacyResult hasAudioFocus=$hasAudioFocus"
+            )
         }
     }
 
     private fun abandonAudioFocus() {
         val am = audioManager ?: return
+        // We gave it up, so we no longer hold it. Without this the flag stays true
+        // across a stop and the next focus callback is treated as an interruption of
+        // playback that is not happening.
+        hasAudioFocus = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
             audioFocusRequest = null
