@@ -342,7 +342,11 @@ class MediaPlaybackService : Service() {
         if (action != null) {
             when (action) {
                 ACTION_PLAY -> { pausedByFocusLoss = false; NativeBridge.command("play") }
-                ACTION_PAUSE -> { pausedByFocusLoss = false; NativeBridge.command("pause") }
+                ACTION_PAUSE -> {
+                    pausedByFocusLoss = false
+                    Log.i("AuralisMedia", "pause-dispatch: notification-action")
+                    NativeBridge.command("pause")
+                }
                 ACTION_NEXT -> NativeBridge.command("next")
                 ACTION_PREVIOUS -> NativeBridge.command("previous")
             }
@@ -450,6 +454,7 @@ class MediaPlaybackService : Service() {
                             } else {
                                 hasAudioFocus = false
                                 pausedByFocusLoss = true
+                                Log.i("AuralisMedia", "pause-dispatch: audio-focus-loss")
                                 NativeBridge.command("pause")
                             }
                         }
@@ -490,6 +495,7 @@ class MediaPlaybackService : Service() {
                             if (hasAudioFocus) {
                                 hasAudioFocus = false
                                 pausedByFocusLoss = true
+                                Log.i("AuralisMedia", "pause-dispatch: legacy-audio-focus-loss")
                                 NativeBridge.command("pause")
                             } else {
                                 Log.i(
@@ -569,6 +575,7 @@ class MediaPlaybackService : Service() {
                 NativeBridge.command("play")
             }
             override fun onPause() {
+                Log.i("AuralisMedia", "pause-dispatch: media-session-onPause")
                 NativeBridge.command("pause")
             }
             override fun onSkipToNext() {
