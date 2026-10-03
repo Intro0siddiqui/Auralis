@@ -1399,11 +1399,17 @@ impl Downloader {
         commit_gate: Arc<Mutex<()>>,
     ) -> Result<(), DownloaderError> {
         let host = job.stream_url.split('/').nth(2).unwrap_or("unknown");
-        let url_snip = if job.stream_url.chars().count() > 160 {
-            format!("{}…", job.stream_url.chars().take(160).collect::<String>())
-        } else {
-            job.stream_url.clone()
-        };
+        // The FULL url, not a snippet. A 160-char cap truncated every failure at
+        // `…&ip=2409%3A40c4%3Af9…`, which is the one part that matters and the one
+        // part that made these failures impossible to test: the failing url could not
+        // be pasted into `curl` on the same phone, so "is the url bad, or is reqwest
+        // bad?" could not be answered without guessing.
+        //
+        // A real googlevideo url runs ~1200 chars, which is a long toast. That is the
+        // right trade for a failure message: it is the only artefact that separates the
+        // two remaining hypotheses, and this failure has survived every other test.
+        // `examples/fetch_probe.rs` consumes exactly this string.
+        let url_snip = job.stream_url.clone();
 
         // Ensure staging and output directories exist
         if let Some(parent) = job.staging_path.parent() {
