@@ -8,7 +8,7 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development — v2.6.65 shipped** — Core architecture is in place and most features are implemented. **A download now completes end-to-end with no PO token at all.** The long investigation into "downloads are broken" resolved on 2026-09-29, and its conclusion is the opposite of what this file asserted for twenty releases: **the transfer was always complete and our own completeness gate was rejecting perfect files** because rodio stops decoding these muxed MP4s early. Proven from the container, not the decoder — `yF9nmg_jHNs`, 10 992 443 bytes, audio `stts` 9 540 608 samples = 216.34 s, last audio sample inside the file; the device's decoder read 25.2 % of it and called it a server window. **Read §4.7.13 before touching anything in this area**, and §2's "a working example outranks a theory" before forming any view on it. Still open: `acceptance()` and `reconcile_duration` (agents in flight), the resume re-pause (`polls=7 progress=0 empty=0`), and a 100 %-reproducible MediaStore publish failure (`Invalid column display_name`, API 36) which is why `Download/Auralis/` is always empty. Background playback is **wired end-to-end** (foreground `MediaPlaybackService` + MediaSession on Android, notification/lockscreen controls routed back into Rust via JNI; see `infrastructure/media/background_service.rs` + `scripts/android/MediaPlaybackService.kt`). YouTube resolver is PO-token aware for all clients (2026) and downloads dual-save to visible `Download/Auralis/` via MediaStore + internal `app_data_dir/downloads` (v2.5.11) — though the publish half of that is currently broken, see §4.7.11. Player is queue-aware with `set_queue` + hydration + fallback Next/Prev (v2.5.12) and navigation is free of `viewTransition` races (v2.5.16) / precise `activeView` guard (v2.5.17) / Download form `preventDefault` + `htmx:restored/pageshow` rebind (v2.5.18). Remaining work is polish + partial smart-playlist presets + file modularisation (deferred 2026-09-29 until the bug fixes land); macOS/Windows signing remain CI/cert gaps. For verified 2026 platform-compliance (16 KB alignment ✅ enforced via `zipalign -P 16` + `llvm-readelf p_align 0x4000`, targetSdk 36 ✅, background media service ✅ with activity-dead limitation), see `PROJECT.md` §11.
+**Current State: Active Development — v2.6.68 shipped, v2.6.69 pending** — Core architecture is in place and most features are implemented. **A download completes end-to-end with no PO token at all.** Four long investigations have now closed, each by measurement rather than reasoning, and **three of the four had a correct mechanism sitting on top of an unchecked premise** — read §4.7.18 before forming any view on downloads, and §2's "a working example outranks a theory" first. What is settled: the transfer was always complete and **our own completeness gate** was rejecting perfect files, because rodio reads as little as 25 % and as much as 200 % of these muxed MP4s (§4.7.13); the MediaStore publish failure was **our bug, not the device's** — `MediaColumns.DISPLAY_NAME` is `"_display_name"` with a leading underscore (§4.7.11), now enforced by a `const _` compile-time assert; and **the v2.6.68 IP pin was inverted and made downloads worse**, because `ip=` is the *client's* address, so `resolve_to_addrs` had the phone dialling itself as the CDN (§4.7.18). What is open: why the app 403s where `curl` 206s on the same phone and the same URL — the live suspect is the **format class**, muxed serving and adaptive itag 140 being refused at byte 0, which is why `CLASS_ORDER` is now muxed-first; and the resume re-pause, now with audio focus **exonerated** by measurement and owned by `@audit`. Background playback is **wired end-to-end** (foreground `MediaPlaybackService` + MediaSession on Android, notification/lockscreen controls routed back into Rust via JNI; see `infrastructure/media/background_service.rs` + `scripts/android/MediaPlaybackService.kt`). YouTube resolver is PO-token aware for all clients (2026) and downloads dual-save to visible `Download/Auralis/` via MediaStore + internal `app_data_dir/downloads` — **confirmed working on device in v2.6.67**. Player is queue-aware with `set_queue` + hydration + fallback Next/Prev. Remaining work is the 403's remaining cause, then modularisation (`downloader.rs` is 4.8 k lines, `mod tests` alone is 2 k of it) and a SABR downloader, which is a quality upgrade and **not** a capability gate.
 
 ---
 
@@ -92,6 +92,14 @@ The information was available the whole time and simply was not in this file.
 > theorising, because the difference between them _is_ the answer.** When you have
 > one of each, diff them before you form a hypothesis — do not reason first and
 > look later.
+
+**And its near-twin, which has now bitten four times** — `_display_name` (§4.7.11), the
+decoder (§4.7.13), the PO token (§4.7.10), and the `ip=` pin (§4.7.18):
+
+> **A correct mechanism trace plus an unchecked premise is indistinguishable from a
+> correct diagnosis.** The trace makes the story *feel* verified, so the premise
+> stops being examined. Name the premise out loud and go and check it, in the same
+> breath as the trace — because the trace will not check it for you.
 
 Concretely, this means:
 
@@ -233,7 +241,7 @@ Notes from the audit/upgrade pass:
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 ```
-(Note: this dev machine is **Void Linux (aarch64) under proot in Termux**. The toolchain is `rustc`/`cargo` **1.98.1**, installed via rustup and pinned into `/usr/local/bin` so a plain shell gets it: `rustfmt` 1.9.0-stable and `clippy` 0.1.98 come with it. The GTK/WebKit/ALSA dev headers Tauri and rodio need at build-script time are installed too (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libasound2-dev`, `librsvg2-dev`, `libayatana-appindicator3-dev`). `cargo check --all-targets`, `clippy -D warnings`, `cargo fmt --check` and `cargo test --lib` all work — see §5.
+(Note: this dev machine is a **Debian 12 (bookworm) slim container, aarch64, running under proot** — `cat /etc/os-release` reports `PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"`. The toolchain is `rustc`/`cargo` **1.98.1**, installed via rustup and pinned into `/usr/local/bin` so a plain shell gets it: `rustfmt` 1.9.0-stable and `clippy` 0.1.98 come with it. **`gh` CLI is installed and authenticated** (`/usr/bin/gh`, logged in as `Intro0siddiqui`, token scopes include `repo` + `workflow`), so agents can trigger workflows remotely with `gh workflow run <name> -R <owner>/<repo>` after a push. The GTK/WebKit/ALSA dev headers Tauri and rodio need at build-script time are installed too (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libasound2-dev`, `librsvg2-dev`, `libayatana-appindicator3-dev`). `cargo check --all-targets`, `clippy -D warnings`, `cargo fmt --check` and `cargo test --lib` all work — see §5.
 
 Two residual gaps. **Android code**: the NDK's Linux host toolchain is x86_64 and this box is aarch64 with no `binfmt_misc`, so `cargo check --target aarch64-linux-android` cannot run here; only the `check-android` CI job compiles `cfg(target_os = "android")`. **E2E**: needs a display or a device.
 
@@ -459,7 +467,7 @@ paste a token" is **not** the shortcut it appeared to be.
 
 > **SUPERSEDED — this whole subsection is falsified.** We implemented the fix, measured
 > it, and it does not work: a different program from a different, fresher challenge
-> source also pushes nothing (`DOWNLOADS.md` §6.3). The fix is real for the symptom it
+> source also pushes nothing (recorded in `issue.md` §@audit research). The fix is real for the symptom it
 > was written for; it is not our symptom. Retained because the belief existed and
 > looked well-cited, which is exactly why it needs to stay visible.
 
@@ -516,7 +524,7 @@ every day.
 *partial*.** We hand-assemble a synthetic environment for a runtime blob Google ships
 for a real page, and the blob is not obliged to cooperate. Supporting evidence: a
 different program from a different, fresher challenge source also pushes nothing
-(§4.7.5 / `DOWNLOADS.md` §6.3); the VM ignores `contentBinding` entirely (`respLen`
+(§4.7.5 / the @audit research in `issue.md`); the VM ignores `contentBinding` entirely (`respLen`
 byte-identical across six argument shapes); and a minimal-DOM Node harness and the
 real WebView produce the *same* empty array.
 
@@ -715,12 +723,12 @@ The lesson generalises past this bug: **the diagnosis was built on a premise nob
 checked, and the mechanism research was excellent.** Good mechanism work actively hides a
 bad premise, because a correct throw-site trace makes the whole story feel verified.
 
-### 4.7.16 THE 403 IS AN IP-BINDING MISMATCH — proven by tampering, not inferred
+### 4.7.16 ⚠️⚠️ **THE MECHANISM IS PROVEN. THE CONCLUSION IS FALSIFIED — see §4.7.18. Retracted, not deleted.**
 
-**This is the root cause of the `HTTP 403 … start_byte=0, ct=text/plain, body: (empty)`
-that has been logged as "googlevideo rejected UA/Referer/Origin/PO-token".** Every one of
-those hypotheses was wrong. The URL is refused because **the request left from a different
-IP than the one the URL was bound to.**
+**Do not act on the second half of this section.** The tampering experiment below is sound
+and still stands: the CDN checks the source address against `ip=`. What is falsified is the
+inference drawn from it — that **our** requests were failing that check. They were not, and
+§4.7.18 measures it.
 
 **The proof (dev box, 2026-09-30).** Take a working muxed itag-18 URL and change nothing
 except the `ip=` query parameter:
@@ -777,7 +785,16 @@ worthwhile either way because pinning cannot make a correct request worse. **Not
 that pinning actually turns the phone's 403 into a 206.** Only the owner can confirm that,
 and it is one APK.
 
-### 4.7.17 Why one track downloaded and another 403'd — and the part my fix does NOT yet explain
+### 4.7.17 Why one track downloaded and another 403'd — ⚠️ **SUPERSEDED by §4.7.18. Kept for the record, do not act on it.**
+
+**Both candidates below are now moot**, and not because either was confirmed. §4.7.18 shows
+the premise they were built on — that our egress address differed from `ip=` — is false on
+this network: unpinned `curl` returns 206 on the very tracks that 403'd on the device. The
+question this section was trying to answer ("what made Safari succeed where deprezz failed?")
+is better answered by the **format class**: muxed itag 18 serves, adaptive itag 140 is
+refused at byte 0. Read §4.7.18 instead.
+
+The reasoning below is retained because the belief existed and looked well-evidenced.
 
 **Owner asked the right question:** Safari - Serena completed 100% while
 `Ral6kFSx7ZY` 403'd, both through the same resolver, the same client ladder and the same
@@ -839,6 +856,106 @@ logged by `run_stream` (`bound_ip = ?pinned_ip` in the debug line). On a **debug
 owner can compare that against the device's egress at that moment. A mismatch confirms the
 mechanism on the device rather than by inference, and it is the difference between "we
 measured this" and "we believe this".
+
+### 4.7.18 THE PIN WAS INVERTED, AND THE 403 WAS NEVER A BINDING MISMATCH (2026-10-02)
+
+**This section falsifies §4.7.16 and §4.7.17. Read it before touching `ip=`, the client
+order, or the retry ladder.** It is the fourth time the mechanism was right and the premise
+underneath it was not.
+
+#### The device owns the address the URL was bound to
+
+The owner ran one command on the phone:
+
+```
+$ ip -6 addr show | grep -i "2409:40c4"
+inet6 2409:40c4:2145:d44a:ad74:5a0d:1155:402b/64 scope global temporary dynamic
+inet6 2409:40c4:2145:d44a:dc6e:9ff:fe42:44ac/64 scope global dynamic mngtmpaddr
+```
+
+**Two** IPv6 addresses. The `ip=` in every failing URL is the **temporary** one (RFC 4941
+privacy address); the stable one sits beside it. §4.7.17's candidate 1 — privacy-address
+rotation — is real and present, but it is not what broke these downloads, because the
+device demonstrably holds the address the URL names.
+
+#### The pin asked for the opposite of what `ip=` means
+
+`ip=` is the **client's** address. §4.7.16 established that from the URLs YouTube handed the
+dev box, which carried the box's own egress verbatim. v2.6.68 then read it and called:
+
+```rust
+client_builder.resolve_to_addrs(host, &[SocketAddr::new(ip, 0)]);
+```
+
+`resolve_to_addrs` means *"to reach this host, dial this address"* — so it asked the phone to
+**be** the CDN. It cannot connect, ever. Measured on the dev box (same phone, same
+residential line as the failing device), muxed itag 18 from `ANDROID`, on all three tracks
+involved including both that 403'd on the phone:
+
+```
+A  unpinned                              ->  HTTP 206 Partial Content
+B  source-bound  (local_address(ip=))    ->  HTTP 206
+C  destination-bound (v2.6.68 shipped)   ->  connect failure          3/3 tracks
+```
+
+C is what shipped. **This is why the device moved from `403 Forbidden, ct=text/plain, body ""`
+to `error sending request` at byte 0** — not a new fault, the same fault by a worse route.
+The correct call is `local_address`, which binds the *source* socket, plus a one-shot
+unpinned retry for when a pinned egress is not bindable (privacy addresses rotate).
+
+#### The 403 was never a binding mismatch — measured
+
+**Row A is the load-bearing row, and it is the retraction.** Unpinned returns 206 on the
+exact tracks that 403'd on the device. The binding is not being violated on this network,
+so the pin buys nothing here and §4.7.16's conclusion is withdrawn.
+
+What survives from §4.7.16: the CDN genuinely checks the binding. What does not: any claim
+that our requests were failing it. **A proven mechanism is not a proven cause.** The
+tampering experiment showed the check exists; it never showed we were tripping it, and
+`curl` on the same phone on the same URL says we were not.
+
+**Still unexplained, honestly:** why the app 403s where `curl` 206s on the same phone, same
+line, same URL shape. Unmeasured differences: the app picks **itag 140** (adaptive
+audio-only) where the harness picks **itag 18** (muxed), and `reqwest` is not `curl`. The
+format-class difference is the live suspect and the ladder order below follows from it.
+
+#### Two bugs this exposed, both fixed
+
+1. **The retry ladder was blind to transport failures.** `is403` matched the literal `403`;
+   `isResumable` matched `ECONNRESET`/`timeout`/`stalled`. `reqwest` reports every connect,
+   DNS and TLS failure as **`error sending request`** with no status code, so the gate did
+   `map.delete` + `return` — **zero retries**, with `MAX_AUTO_RETRIES` never consulted. The
+   owner reported "it stopped after one retry"; it had never entered the ladder. Transport
+   failures are now retry-worthy and set `rotate`, since the next rung is a different CDN
+   hostname that may connect when this one did not.
+
+2. **`CLASS_ORDER` was backwards.** It tried `adaptive` first on the stated grounds that muxed
+   *"has never succeeded"* — falsified twice (§4.7.13 killed the truncation reading; v2.6.67
+   completed through muxed). Measured: **muxed 206, adaptive 403 at byte 0** (§4.7.1). The
+   ladder spent attempt #1 on the class that cannot work. Now `['muxed','adaptive','opus']`.
+   Adaptive is the *better* file (audio-only vs 360p muxed) and should go back first the day
+   it stops 403ing; the comment in `downloads.js` says so. This is `@refactor`'s delegated
+   reorder, whose stated precondition ("only post-pin evidence counts") can never be met now
+   that the pin is proven harmful — so the order rests on direct curl measurement instead.
+
+**The two ladder tests were inverted, not deleted**, keeping every structural check: each
+class reached exactly once, each rung gated on the per-client report, no rotation until the
+classes are spent, budget still terminating.
+
+#### The lesson, which is now the fourth instance of one rule
+
+§4.7.11 (`_display_name`), §4.7.13 (the decoder), §4.7.16 (this), and §4.6 (the PO token)
+are the same mistake: **a correct mechanism trace plus an unchecked premise is
+indistinguishable from a correct diagnosis.** §4.7.16's premise — "our egress address differs
+from `ip=`" — was never tested. It was available to test the whole time, in the same command
+that produced the tamper data. Had it been run first, the pin would never have been written,
+so the device would never have regressed from a diagnosable 403 to an opaque connect error.
+
+**And a specific trap worth naming: the fix inverted its own premise.** The intent recorded
+in §4.7.16 was "egress from the address the URL was bound to", which is `local_address`. The
+code written was `resolve_to_addrs`, which is its opposite. Writing the intent down in prose
+and the mechanism in code, in the same commit, with no test that could tell them apart, is
+how that survived review.
 
 ### 4.7.12 The window is TRACK-SPECIFIC — the highest-value open question now
 
@@ -1105,7 +1222,8 @@ never took the next step: **it is the same device.** Verified:
 
 ```
 getprop ro.product.model   -> 2410CRP4CI          (Xiaomi/Redmi)
-uname -a                   -> aarch64 GNU/Linux, Proot-Distro, Termux
+uname -a                   -> aarch64 GNU/Linux, Debian 12 (bookworm) slim under proot
+gh --version               -> gh 2.23.0 (Debian), authed as Intro0siddiqui (repo+workflow scopes)
 /sdcard                    -> EXISTS, fully readable
 /storage/emulated/0        -> EXISTS
 /sdcard/DCIM/Screenshots   -> EXISTS
@@ -1157,10 +1275,35 @@ bash scripts/android/run_emulator_test.sh            # drives scripts/android/e2
 > cargo check --all-targets
 > cargo clippy --all-targets --all-features -- -D warnings
 > cargo fmt --all -- --check          # SAME rustfmt as CI
-> cargo test --lib                    # 192 tests, ~5s — the proot __stack_chk_guard
+> cargo test --lib                    # 232 tests, ~4s — the proot __stack_chk_guard
 >                                     # link failure is gone with the new toolchain
-> node --test scripts/tests/*.test.js # 179 tests
+> PATH=/usr/local/node20/bin:$PATH \
+> node --test scripts/tests/*.test.js # 205 tests
 > ```
+>
+> ### ⚠️ The JS gate needs Node >= 20.19, and this box shipped Node 18
+>
+> `scripts/tests/*.test.js` are ES modules and the repo `package.json` has **no** `"type"`
+> field — deliberately, it is a Tauri package manifest. They load only because **Node's
+> module-syntax auto-detection** rescues them, and that was unflagged in **20.19** (and
+> 22.7). On the box's Node **18.20.4** every file dies with
+> `SyntaxError: Cannot use import statement outside a module` — **6 files, 0 tests, all
+> red**, before a single assertion runs.
+>
+> **This reads exactly like six real failures and is not one.** It has been misread as a
+> broken gate more than once. CI uses `node-version: 20` and is unaffected.
+>
+> ```bash
+> # one-time, already done on this box:
+> #   curl -fsSL https://nodejs.org/dist/index.json   # pick latest v20
+> #   tar xJf node-v20.20.2-linux-arm64.tar.xz -C /usr/local/node20 --strip-components=1
+> export PATH=/usr/local/node20/bin:$PATH
+> ```
+>
+> **Do not "fix" this by adding `"type": "module"` to the repo `package.json`.** That is the
+> tempting move and it is wrong: it changes how every `.js` file in the repo is parsed,
+> including `ui/vendor/` shims, and it is a repo-wide semantic change made to satisfy a local
+> toolchain gap. Fix the toolchain.
 >
 > Two things remain CI-only. **`cfg(target_os = "android")` code**: the NDK's Linux host toolchain is x86_64 (quotable from our own workflow, which hardcodes `prebuilt/linux-x86_64/bin`) and this box is aarch64 with no `binfmt_misc`, so it cannot execute it. **E2E**: needs a display or a device.
 >

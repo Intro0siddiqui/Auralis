@@ -196,94 +196,49 @@ fn extract_url_param_u64(url: &str, param: &str) -> Option<u64> {
     val_str[..end].parse::<u64>().ok()
 }
 
-/// The address a googlevideo URL is **bound to**, from its `ip=` parameter.
-///
-/// A googlevideo URL is minted for one specific client address and is refused with
-/// `403 / text=text-plain / empty body / start_byte=0` when the request leaves from a
-/// different one. Measured, not inferred — tampering with `ip=` alone on an otherwise
-/// working URL reproduces that exact response (see `AGENTS.md` §4.7.16).
-///
-/// This matters here specifically because **resolution and transfer use different HTTP
-/// stacks**: the URL is resolved by JavaScript inside the WebView and fetched by `reqwest`
-/// in this process. Those two can egress through different address families, which is why
-/// a URL minted over IPv6 and fetched over IPv4 is refused. Pinning the request to the
-/// bound address removes that dependency.
-///
-/// Returns `None` for any URL without a parseable `ip=`, in which case the caller must
-/// behave exactly as before — non-googlevideo URLs (SoundCloud, direct `.mp3`) have no
-/// such binding and must not be pinned.
 /// Build the HTTP client used to stream one job.
 ///
-/// `egress` is the address from [`bound_ip_from_url`] — the **client's own** address
-/// that the URL's signature is bound to. It constrains the local socket, so it goes to
-/// [`reqwest::ClientBuilder::local_address`] and never to `resolve_to_addrs`.
+/// **There is deliberately no address pinning here**, and there was for two releases.
 ///
-/// That distinction is the whole fix. `resolve_to_addrs(host, ip)` reads as "resolve
-/// this host to that address", which for a googlevideo URL means dialling the phone
-/// itself and asking it to serve as the CDN. It cannot connect, ever, and it converts
-/// a diagnosable 403-at-byte-0 into an opaque `error sending request` at byte 0.
+/// A googlevideo URL carries `ip=`, and §4.7.16 of `AGENTS.md` concluded the CDN checks
+/// that the request egresses from it. It does not. Measured 2026-10-02 with
+/// `examples/fetch_probe.rs`, on the device itself, against a freshly resolved URL:
 ///
-/// `None` builds an ordinary client, which is also the fallback when a pinned egress
-/// turns out not to be bindable on this device.
-fn build_stream_client(
-    ua: &str,
-    egress: Option<std::net::IpAddr>,
-) -> Result<reqwest::Client, reqwest::Error> {
-    let mut builder = reqwest::Client::builder()
+/// ```text
+/// bind (OS-chosen)                                -> HTTP 206
+/// bind <the ip= address>                          -> HTTP 206
+/// bind <a DIFFERENT local address on the device>  -> HTTP 206   <- the load-bearing row
+/// bind <an address that has since rotated away>   -> CONNECT FAILED
+/// ```
+///
+/// Row three settles it: same URL, egressing from a different IPv6 address than `ip=`,
+/// still served. There is no source-address binding to satisfy.
+///
+/// The 403 that §4.7.16 attributed to binding was **signature validation**. `ip` is
+/// listed in `sparams`, so it is covered by `sig`/`lsig`, and editing the parameter
+/// invalidates the signature. @audit's research said exactly this and the pin was built
+/// over it anyway.
+///
+/// v2.6.68 used `resolve_to_addrs(host, ip)`, which asks for the opposite thing: dial that
+/// address to reach the CDN. Since `ip=` is the *client's* address, that asks the phone to
+/// be the CDN. It could never connect, and it converted a diagnosable 403-at-byte-0 into
+/// an opaque `error sending request` at byte 0.
+///
+/// Correcting it to `local_address` did not help either — rows one and two above are
+/// identical — and it made things worse in row four. `ip=` names the RFC 4941 privacy
+/// address, which rotates; this session watched it rotate between two resolves. Pinning
+/// to a rotated-away address breaks a download that would otherwise have succeeded.
+///
+/// So the mechanism is gone rather than corrected. Keeping a corrected version of a
+/// mechanism that turns out not to exist only leaves a failure mode behind.
+fn build_stream_client(ua: &str) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
         .use_rustls_tls()
         .user_agent(ua.to_string())
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(300));
-    if let Some(ip) = egress {
-        builder = builder.local_address(ip);
-    }
-    builder.build()
+        .timeout(Duration::from_secs(300))
+        .build()
 }
-
-/// `ip=` is the address the URL was minted against, so it decides whether a request is
-/// served at all. See [`bound_ip_from_url`] for what it is and is not.
-fn bound_ip_from_url(url: &str) -> Option<std::net::IpAddr> {
-    // The parameter must START the query string or follow a `&`. Searching for the
-    // bare substring "ip=" also matches inside other names — `&xip=1.2.3.4` is a
-    // different parameter that happens to contain those letters, and reading it as a
-    // binding would pin the request to an address the CDN never agreed to.
-    let key = "ip=";
-    let mut from = 0usize;
-    let start = loop {
-        let off = url[from..].find(key)?;
-        let abs = from + off;
-        // `&` separates parameters after the first; `?` starts the query string, so a
-        // first parameter can also be preceded by it. Both are valid boundaries and
-        // `?` is the one that is easy to forget — `?ip=` is the shape every
-        // hand-written test URL has, so a check that only allows `&` looks correct
-        // until it meets one.
-        let prev = url.as_bytes().get(abs.wrapping_sub(1)).copied();
-        if abs == 0 || prev == Some(b'&') || prev == Some(b'?') {
-            break abs + key.len();
-        }
-        from = abs + key.len();
-    };
-    let val = &url[start..];
-    let end = val.find('&').unwrap_or(val.len());
-    let raw = &val[..end];
-    // The value is percent-encoded in real URLs: an IPv6 literal arrives as
-    // `2409%3A40c4%3A…`, so decoding only `%3A`/`%3a` is enough and avoids pulling in a
-    // percent-decoding dependency for a single parameter.
-    let decoded = raw.replace("%3A", ":").replace("%3a", ":");
-    // Some responses wrap the literal in brackets, as URL syntax requires for a
-    // v6 host: `[2409:40c4::1]`. `"1.2.3.4".parse::<IpAddr>()` works but
-    // `"2409:…".parse::<IpAddr>()` does not, and a bracketed v6 fails outright.
-    let unbracketed = decoded
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(&decoded);
-    unbracketed.parse::<std::net::IpAddr>().ok()
-}
-
-// `url_host` used to live here, as the key for a `resolve_to_addrs` override. That
-// override was removed because it was asking for the wrong thing — see
-// `build_stream_client` — so the helper went with it rather than being left dead
-// behind a `#[allow(dead_code)]`.
 
 /// Slack allowed when comparing received bytes against the advertised object
 /// size. A few tens of KiB absorbs container/manifest rounding differences
@@ -1476,39 +1431,12 @@ impl Downloader {
         // the real file size instead of a capped window.
         let request_url = strip_response_range_params(&job.stream_url);
 
-        // Egress from the address the URL was minted for, when it declares one.
-        //
-        // `ip=` on a googlevideo URL is the **client's own** address, not the CDN
-        // server's. That is not an assumption — it is how the 403 was diagnosed in
-        // the first place: the URLs YouTube handed the dev box carried
-        // `ip=2409:40c4:f9ab:20c:88e5:d5d6:54d0:d75b` and the box's own egress was
-        // that exact address. Tampering only that value turned a 206 into a 403
-        // with an empty body, which is a source-address binding check.
-        //
-        // So it constrains where WE connect FROM, and the correct call is
-        // `local_address`. This used to be `resolve_to_addrs(host, ip)`, which asks
-        // for the opposite thing — it tells reqwest to reach the CDN hostname by
-        // dialling the client's own address. The CDN host genuinely resolves to a
-        // Google address (`2405:200:1630:b63::e` for one measured case) and never
-        // to the Jio address in `ip=`, so that could never connect, and it turned a
-        // 403-at-byte-0 into `error sending request` at byte 0. Same byte, different
-        // and much less diagnosable failure.
-        let bound_ip = bound_ip_from_url(&request_url);
-        // Cleared once the pinned client has failed to connect, so the retry below
-        // goes out unpinned rather than re-pinning to an address this device may
-        // not even own. IPv6 privacy addresses (RFC 4941) rotate, so a URL minted
-        // minutes ago can name an address the interface no longer has — binding to
-        // it then fails outright, and a connect error is strictly worse than the
-        // 403 an unpinned request would have produced.
-        let mut egress_pinned = bound_ip.is_some();
-        debug!(
-            download_id = %id,
-            host = %host,
-            bound_ip = ?bound_ip,
-            egress_pinned,
-            "Building HTTP client for stream"
-        );
-        let mut client = build_stream_client(&ua, bound_ip).map_err(|e| {
+        // One client, no address pinning. See `build_stream_client` for the
+        // measurement that removed it: egressing from an address other than the
+        // one in `ip=` still returns 206, so there was never a binding to satisfy,
+        // and `ip=` names an RFC 4941 privacy address that rotates — pinning to it
+        // breaks downloads it would otherwise have completed.
+        let client = build_stream_client(&ua).map_err(|e| {
             error!(download_id = %id, error = %e, "Failed to build HTTP client");
             DownloaderError::HttpError(format!("failed to build HTTP client: {e}"))
         })?;
@@ -1611,29 +1539,6 @@ impl Downloader {
                     // once and let the request decide on its own merits — worst case
                     // we are back to the 403 the pin was meant to prevent, which is
                     // a far better outcome than never connecting at all.
-                    if egress_pinned {
-                        egress_pinned = false;
-                        match build_stream_client(&ua, None) {
-                            Ok(unpinned) => {
-                                warn!(
-                                    download_id = %id,
-                                    host = %host,
-                                    error = %e,
-                                    "Pinned egress unusable; retrying unpinned"
-                                );
-                                client = unpinned;
-                                continue;
-                            }
-                            Err(build_err) => {
-                                warn!(
-                                    download_id = %id,
-                                    host = %host,
-                                    error = %build_err,
-                                    "Could not build unpinned fallback client"
-                                );
-                            }
-                        }
-                    }
                     let msg = format!("request failed [{host}] start_byte={current_downloaded}: {e} (url={url_snip})");
                     warn!(download_id = %id, host = %host, error = %e, consecutive_errors = consecutive_errors, "Request send error");
                     consecutive_errors += 1;
@@ -2849,135 +2754,31 @@ impl Downloader {
 mod tests {
     use super::*;
 
-    /// The bug this fixes, pinned as a test so it cannot silently return.
+    /// The `ip=` binding tests are gone, and so is the belief they encoded.
     ///
-    /// Measured 2026-09-30 on the dev box (`AGENTS.md` §4.7.16): taking a working
-    /// muxed itag-18 URL and changing ONLY `ip=` to an unroutable RFC 5737
-    /// TEST-NET-3 address turned `206 Partial Content` into
-    /// `403 Forbidden / ct=text/plain / empty body` — byte-for-byte the failure
-    /// the device reported on every ladder attempt. So `ip=` is not decoration; it
-    /// is the binding the CDN checks.
-    #[test]
-    fn the_ip_param_is_the_binding_we_pin_to() {
-        let real = "https://rr3---sn-gwpa-civee.googlevideo.com/videoplayback?expire=1790817150&ei=Hl-9arK3E4uz9fwPxMOk6AY&ip=152.59.49.22&id=o";
-        assert_eq!(
-            bound_ip_from_url(real).map(|ip| ip.to_string()),
-            Some("152.59.49.22".to_string()),
-            "the IPv4 binding must be read back so the request can be pinned to it"
-        );
-
-        let tampered = real.replace("ip=152.59.49.22", "ip=203.0.113.7");
-        assert_eq!(
-            bound_ip_from_url(&tampered).map(|ip| ip.to_string()),
-            Some("203.0.113.7".to_string()),
-            "a tampered binding is still read — pinning is what stops it being used"
-        );
-    }
-
-    /// Real googlevideo IPv6 bindings arrive percent-encoded (`%3A`), which is what
-    /// the phone's failing URL looked like: `ip=2409%3A40c4%3Af9%3A…`. A parser
-    /// that forgets the decoding returns None here, silently un-pins, and the
-    /// device is back to 403 with no error to explain why.
-    #[test]
-    fn a_percent_encoded_ipv6_binding_is_decoded_and_pinned() {
-        // Taken verbatim from the device's own failing URL (`issue.md`, 2026-09-30).
-        // `%3A` is the group separator, so `f9%3Ab20c` really is the group `f9:b20c`
-        // — an IPv6 address is 8 groups and this is one, which is the check that
-        // matters: a mis-transcribed group count is the easy mistake here.
-        let url = "https://rr8---sn-gwpa-civd.googlevideo.com/videoplayback?expire=1790817146&ei=Gl-9ap3rMIDq1_oPx6qkoQc&ip=2409%3A40c4%3Af9%3Ab20c%3A88e5%3Ad5d6%3A54d0%3Ad75b&id=o";
-        assert_eq!(
-            bound_ip_from_url(url).map(|ip| ip.to_string()),
-            Some("2409:40c4:f9:b20c:88e5:d5d6:54d0:d75b".to_string()),
-            "a device on IPv6 is exactly the case that needs pinning, so it must parse"
-        );
-        // A truncated binding is NOT a valid address.
-        // Asserting that it is rejected is the point: silently "fixing" a malformed
-        // binding into a plausible one would pin to an address nobody agreed to.
-        assert_eq!(
-            bound_ip_from_url(&url.replace("%3A88e5%3Ad5d6%3A54d0%3Ad75b", "%3A88e5")),
-            None
-        );
-        // Bracketed literals are handled even though we have NOT observed one in a real
-        // `ip=` parameter — that is the honest reason the code is here: defensive,
-        // not measured. Asserted anyway, because untested defensive code is the
-        // kind that quietly stops working and a mutation removing it is otherwise
-        // invisible. Scope is deliberately narrow: the UNENCODED `[...]` form only.
-        // The percent-encoded `%5B…%5D` form is NOT handled and is not claimed to
-        // be — widening the decoder for a case nobody has observed would be
-        // speculative, and the assertion below records that as the current limit.
-        assert_eq!(
-            bound_ip_from_url("https://h.googlevideo.com/v?ip=[2409:40c4:f9:1:2:3:4:5]&id=o")
-                .map(|ip| ip.to_string()),
-            Some("2409:40c4:f9:1:2:3:4:5".to_string()),
-            "an unencoded bracketed literal must parse"
-        );
-        assert_eq!(
-            bound_ip_from_url(
-                "https://h.googlevideo.com/v?ip=%5B2409%3A40c4%3Af9%3A1%3A2%3A3%3A4%3A5%5D"
-            )
-            .map(|ip| ip.to_string()),
-            None,
-            "documented limit: only %3A is decoded, so an encoded bracket yields None \
-             (behaviour is unchanged from before this fix — no regression)"
-        );
-        // Lowercase hex must work too; YouTube is not consistent about it.
-        // Eight groups, exactly as the real binding has. A seven-group string is not
-        // an IPv6 address and must be rejected rather than padded into one.
-        let lower =
-            "https://h.googlevideo.com/videoplayback?ip=2409%3a40c4%3af9%3a1%3a2%3a3%3a4%3a5&id=o";
-        assert_eq!(
-            bound_ip_from_url(lower).map(|ip| ip.to_string()),
-            Some("2409:40c4:f9:1:2:3:4:5".to_string())
-        );
-        assert_eq!(
-            bound_ip_from_url("https://h.googlevideo.com/v?ip=2409%3a40c4%3af9%3a1%3a2%3a3%3a4"),
-            None,
-            "a 7-group value is not an address; padding it would pin somewhere the CDN never agreed to"
-        );
-    }
-
-    /// `ip=` must not be matched inside another parameter's value or name, and a
-    /// missing parameter must yield `None` so the caller behaves exactly as before
-    /// on URLs that have no binding at all (SoundCloud, a direct `.mp3`).
-    #[test]
-    fn urls_without_a_binding_are_left_alone() {
-        assert_eq!(bound_ip_from_url("https://example.com/song.mp3"), None);
-        assert_eq!(bound_ip_from_url("https://example.com/v?clip=1"), None);
-        // A parameter whose *value* merely contains "ip=" must not be read as one.
-        assert_eq!(
-            bound_ip_from_url("https://h.googlevideo.com/v?xip=1.2.3.4"),
-            None
-        );
-        // Trailing param with no value.
-        assert_eq!(
-            bound_ip_from_url("https://h.googlevideo.com/v?id=o&ip="),
-            None
-        );
-        // Non-IP values are not bindings.
-        assert_eq!(
-            bound_ip_from_url("https://h.googlevideo.com/v?ip=notanip"),
-            None
-        );
-    }
-
-    /// Two tests that lived here are gone with the `resolve_to_addrs` override:
-    /// `the_pinned_host_is_the_bare_authority` and
-    /// `host_and_bound_ip_come_from_the_same_url` both existed to protect the
-    /// pairing of a host with an `ip=` for use as a resolution override. There is no
-    /// override any more, so they were asserting the shape of a mechanism that was
-    /// itself wrong — they would have kept passing while the pin dialled the phone
-    /// instead of the CDN.
+    /// They existed to protect §4.7.16's conclusion — that a googlevideo URL is
+    /// refused unless the request egresses from the address in `ip=`. That
+    /// conclusion is falsified. `examples/fetch_probe.rs`, run on the device
+    /// against a freshly resolved URL, gets HTTP 206 from the OS-chosen address,
+    /// from the `ip=` address, and from **a different local address on the same
+    /// device**. Row three is the one that matters and there is no row that
+    /// contradicts it.
     ///
-    /// `build_stream_client` is still worth a smoke test, because a bind failure at
-    /// construction time must not take the whole download path down.
+    /// The 403 that produced the belief was **signature validation**: `ip` is listed
+    /// in `sparams`, so editing it invalidates `sig`/`lsig`. @audit's research in
+    /// `issue.md` said so before the pin was written.
+    ///
+    /// Kept as a note rather than deleted silently, because the inverse test is the
+    /// one worth having: if a future change reintroduces address pinning, this
+    /// comment is the reason not to, and `fetch_probe --bind` is how to re-check it.
+    ///
+    /// The client must build, since every download depends on it and a builder
+    /// failure takes the whole path down rather than one transfer.
     #[test]
-    fn stream_client_builds_with_and_without_a_pinned_egress() {
-        assert!(build_stream_client("auralis-test/1.0", None).is_ok());
-        // 0.0.0.0 and :: are always bindable as a local source on any host, so this
-        // exercises the pinned branch without needing a real interface address.
-        assert!(build_stream_client("auralis-test/1.0", Some("0.0.0.0".parse().unwrap())).is_ok());
-        assert!(build_stream_client("auralis-test/1.0", Some("::".parse().unwrap())).is_ok());
+    fn stream_client_builds() {
+        assert!(build_stream_client("auralis-test/1.0").is_ok());
     }
+
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
