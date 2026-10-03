@@ -342,7 +342,11 @@ class MediaPlaybackService : Service() {
         if (action != null) {
             when (action) {
                 ACTION_PLAY -> { pausedByFocusLoss = false; NativeBridge.command("play") }
-                ACTION_PAUSE -> { pausedByFocusLoss = false; NativeBridge.command("pause") }
+                ACTION_PAUSE -> {
+                    pausedByFocusLoss = false
+                    Log.i("AuralisMedia", "pause-dispatch: notification-action")
+                    NativeBridge.command("pause")
+                }
                 ACTION_NEXT -> NativeBridge.command("next")
                 ACTION_PREVIOUS -> NativeBridge.command("previous")
             }
@@ -368,6 +372,27 @@ class MediaPlaybackService : Service() {
             acquireWakeLock()
         } else {
             releaseWakeLock()
+            // Release focus on pause, per the ordinary Android contract.
+            //
+            // Previously focus was abandoned ONLY in onDestroy(), so every pause
+            // left the previous AudioFocusRequest registered and every resume
+            // layered a new request on top of it. The framework invalidated the
+            // stale entry and delivered AUDIOFOCUS_LOSS on the SAME listener
+            // lambda that had just been re-registered — whose loss branch read it
+            // as an external steal and fired command("pause"), ~25 ms after every
+            // grant. Each resume recreated the collision.
+            //
+            // Measured (owner, 2026-10-03 23:24 UTC, @audit diag/focus-abandon):
+            // with this line, every cycle that previously produced
+            // `pause-dispatch: audio-focus-loss` produces none, and pause/resume
+            // work. The stale-request mechanism is INFERRED from that delta, one
+            // step removed from the log — the measurement is the absence of the
+            // storm, not a direct observation of the invalidation.
+            //
+            // The `pause-dispatch:` markers below are kept on purpose. They are the
+            // regression tripwire for exactly this: if the re-pause ever returns,
+            // one grep names the actor that dispatched the pause.
+            abandonAudioFocus()
         }
 
         val art = loadArtBitmap(artPath)
@@ -424,6 +449,11 @@ class MediaPlaybackService : Service() {
         // pushes now-playing on every playback change). So any earlier focus-pause is
         // over. Leaving the flag set meant a later GAIN fired a redundant `play` for
         // whatever track happened to be current, long after the user moved on.
+        // Logged before the request: this is the pre-request focus state, which is
+        // the only way to tell a first request from a re-request while already
+        // holding focus. The existing `result=` log below prints the POST-request
+        // value and so cannot answer that.
+        Log.i("AuralisMedia", "requestAudioFocus: enter hadFocus=$hasAudioFocus")
         pausedByFocusLoss = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val playbackAttributes = AudioAttributes.Builder()
@@ -450,6 +480,7 @@ class MediaPlaybackService : Service() {
                             } else {
                                 hasAudioFocus = false
                                 pausedByFocusLoss = true
+                                Log.i("AuralisMedia", "pause-dispatch: audio-focus-loss")
                                 NativeBridge.command("pause")
                             }
                         }
@@ -460,6 +491,10 @@ class MediaPlaybackService : Service() {
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
                             hasAudioFocus = true
+                            Log.i(
+                                "AuralisMedia",
+                                "focus-gain: pausedByFocusLoss=$pausedByFocusLoss -> ${if (pausedByFocusLoss) "dispatch play" else "no-op"}"
+                            )
                             if (pausedByFocusLoss) {
                                 pausedByFocusLoss = false
                                 NativeBridge.command("play")
@@ -490,6 +525,7 @@ class MediaPlaybackService : Service() {
                             if (hasAudioFocus) {
                                 hasAudioFocus = false
                                 pausedByFocusLoss = true
+                                Log.i("AuralisMedia", "pause-dispatch: legacy-audio-focus-loss")
                                 NativeBridge.command("pause")
                             } else {
                                 Log.i(
@@ -569,6 +605,7 @@ class MediaPlaybackService : Service() {
                 NativeBridge.command("play")
             }
             override fun onPause() {
+                Log.i("AuralisMedia", "pause-dispatch: media-session-onPause")
                 NativeBridge.command("pause")
             }
             override fun onSkipToNext() {
