@@ -454,6 +454,18 @@ class MediaPlaybackService : Service() {
         // holding focus. The existing `result=` log below prints the POST-request
         // value and so cannot answer that.
         Log.i("AuralisMedia", "requestAudioFocus: enter hadFocus=$hasAudioFocus")
+        // Stop any prior live request before asking fresh, and reset the flags
+        // the O+ LOSS handler reads. Without this, the framework sees the new
+        // request as a supersede of the still-registered prior one and delivers
+        // AUDIOFOCUS_LOSS to the prior request's lambda. That lambda reads a
+        // `hasAudioFocus` field that the new request's grant has just set back
+        // to true, so the `if (!hasAudioFocus) ignore` guard does not catch it —
+        // it fires `NativeBridge.command("pause")`. Same self-inflicted loss as
+        // the resume-loop bug, surfacing on track end (auto-advance →
+        // onStartCommand(isPlaying=true)) instead of on a post-pause re-request.
+        // The `abandonAudioFocus()` shipped on pause covers only the
+        // isPlaying=false branch; an auto-advance never reaches it.
+        abandonAudioFocus()
         pausedByFocusLoss = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val playbackAttributes = AudioAttributes.Builder()
