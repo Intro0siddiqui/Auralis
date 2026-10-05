@@ -167,10 +167,40 @@ describe('play() resume path: a successful resume reply is not proof of sound', 
         await ctrl.play();
         await delay(40);
 
+        // The invariant this suite exists to protect is that a failed resume
+        // never leaves the user with *nothing happening*. That is carried by
+        // the replay, which must still fire.
+        assert.deepEqual(env.record.playTrackCalls, ['t1'], 'the error path must replay the track');
+
+        // ...and NOT by a red toast for this specific error. "nothing to resume"
+        // is the case Rust deliberately reports so we replay — pressing play
+        // after a song has finished is normal intent, and announcing the
+        // recovery as a failure is what the owner reported as a bug
+        // ("Resume failed: ... the track already finished"). The visible-guard
+        // half of the original fix moves to the unexpected-error test below.
+        assert.equal(
+            env.record.toasts.filter((t) => /Resume failed/i.test(t.msg)).length,
+            0,
+            'a self-recovering end-of-track resume must not raise an error toast'
+        );
+    });
+
+    it('still surfaces a resume failure that is NOT the expected drained-sink case', async () => {
+        const env = makeEnv();
+        const ctrl = env.create();
+        ctrl.currentTrack = { id: 't1', title: 'A', duration_secs: 100 };
+        env.bridge.invoke = async (command) => {
+            env.record.invokes.push(command);
+            throw 'Resume error: something we have never seen before';
+        };
+
+        await ctrl.play();
+        await delay(40);
+
         assert.deepEqual(env.record.playTrackCalls, ['t1'], 'the error path must replay the track');
         assert.ok(
             env.record.toasts.some((t) => /Resume failed/i.test(t.msg)),
-            'the error toast must be kept'
+            'an unrecognised resume failure must still be surfaced'
         );
     });
 
@@ -387,6 +417,32 @@ describe('source guards: the fix must not be silently reverted', () => {
         assert.ok(
             playerRsSrc.includes('if s.empty() {'),
             'resume() must check that the sink still has audio queued'
+        );
+    });
+
+    it('the resume toast is suppressed ONLY for the drained-sink case', () => {
+        // Suppressing the toast is scoped deliberately. Widen it and a real
+        // resume failure becomes invisible again — the exact defect this suite
+        // was written to prevent. This pins the shape so it cannot drift.
+        const idx = playerJsSrc.indexOf("msg.includes('nothing to resume')");
+        assert.ok(idx > -1, 'the suppression must be keyed on the drained-sink message');
+        const tail = playerJsSrc.slice(idx, idx + 300);
+        assert.ok(tail.includes('} else {'), 'the toast must live in an else branch');
+        assert.ok(
+            tail.includes('showToast(`Resume failed:'),
+            'every other resume failure must still be toasted'
+        );
+    });
+
+    it('both seek controls release isSeeking on touchcancel', () => {
+        // Android delivers touchcancel (edge swipe, gesture nav, incoming call)
+        // instead of touchend. `isSeeking` gates every playback:progress event,
+        // so a missed release froze the progress bar for 17s in a device
+        // recording while audio kept playing in the background.
+        assert.equal(
+            (playerJsSrc.match(/addEventListener\('touchcancel'/g) || []).length,
+            2,
+            'progressTrack and fullProgress must both register touchcancel'
         );
     });
 });

@@ -95,6 +95,14 @@ pub struct AudioPlayer {
     /// rather than seek the live one. Read-and-cleared by the caller via
     /// [`AudioPlayer::take_seek_rebuilt_sink`].
     last_seek_rebuilt_sink: Arc<AtomicBool>,
+    /// Bumped every time a seek rewrites `played`.
+    ///
+    /// `current_position()` is `played + live`, so after a seek the position is
+    /// a *coordinate the user dragged to*, not a place playback reached. The
+    /// truncation watchdog must never treat the former as evidence that a file
+    /// stopped early — it did exactly that once, and quoted a scrub target
+    /// (`128s`) back to the owner as "Playback stopped at 128s of 198s".
+    seek_epoch: Arc<AtomicU64>,
     /// Test-only observer, called with the queue index in effect at the moment a
     /// start is attempted. `next` / `previous` have to move the index *before*
     /// starting so the commit's duration repair lands on the incoming track (see
@@ -218,6 +226,7 @@ impl AudioPlayer {
             pause_epoch: Arc::new(AtomicU64::new(0)),
             last_pause_at: Arc::new(std::sync::Mutex::new(None)),
             last_seek_rebuilt_sink: Arc::new(AtomicBool::new(false)),
+            seek_epoch: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             start_observer: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -689,6 +698,10 @@ impl AudioPlayer {
             }
         }
 
+        // Bump before publishing the new coordinate: a reader that sees the
+        // rewritten `played` must already see a changed epoch, otherwise the
+        // watchdog can read a fresh position under a stale epoch and judge it.
+        self.seek_epoch.fetch_add(1, Ordering::SeqCst);
         *self.played.write().await = position;
         if was_paused {
             *self.play_anchor.write().await = None;
@@ -753,6 +766,9 @@ impl AudioPlayer {
             old_sink.stop();
         }
 
+        // Same ordering contract as `seek()`: the epoch moves before the
+        // coordinate does.
+        self.seek_epoch.fetch_add(1, Ordering::SeqCst);
         *self.played.write().await = position;
         if was_paused {
             *self.play_anchor.write().await = None;
@@ -770,6 +786,15 @@ impl AudioPlayer {
     /// so a caller that never asks pays nothing.
     pub fn take_seek_rebuilt_sink(&self) -> bool {
         self.last_seek_rebuilt_sink.swap(false, Ordering::SeqCst)
+    }
+
+    /// Monotonic count of seeks that rewrote `played`.
+    ///
+    /// See the field documentation: after a seek, `current_position()` reports
+    /// where the user *dragged to*, so the truncation watchdog must not judge
+    /// that number as evidence a file stopped early.
+    pub fn seek_epoch(&self) -> u64 {
+        self.seek_epoch.load(Ordering::SeqCst)
     }
 
     pub async fn set_volume(&self, volume: f32) -> Result<(), PlayerError> {

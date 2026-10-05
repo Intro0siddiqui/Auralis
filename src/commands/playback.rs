@@ -60,6 +60,39 @@ const TRACK_END_EPSILON: Duration = Duration::from_millis(350);
 /// just-appended empty transient.
 const TRACK_END_MIN_GUARD: Duration = Duration::from_millis(300);
 
+/// Whether a stop is eligible to be *judged* as a truncation at all.
+///
+/// This gate exists because of a real false positive: rapid scrubbing produced
+/// `Playback stopped at 128s of 198s — file may be truncated. Try
+/// re-downloading.` on a file that was never truncated, where `128s` was
+/// simply the `2:08` scrub in the owner's own drag sequence.
+///
+/// The cause is that `current_position()` is `played + live`, and a seek
+/// rewrites `played` — so after a drag the position is a *coordinate the user
+/// chose*, not a place playback reached. The `seek_epoch` arm refuses to judge
+/// any position that has been rewritten since playback was last observed. It
+/// is deliberately strict: staying silent about a genuinely truncated file is
+/// the right failure mode, because the heuristic has no way to tell the two
+/// apart once a seek has moved the coordinate underneath it, and a wrong
+/// "re-download your file" costs the owner time and mobile data.
+///
+/// The remaining checks (duration known, position and elapsed far from the
+/// end) are made by the caller, since they need async access to the player.
+fn stop_is_judgeable(
+    was_playing: bool,
+    is_playing: bool,
+    is_empty: bool,
+    track_just_ended: bool,
+    seek_epoch: u64,
+    seek_epoch_at_last_playing: u64,
+) -> bool {
+    was_playing
+        && !is_playing
+        && is_empty
+        && !track_just_ended
+        && seek_epoch == seek_epoch_at_last_playing
+}
+
 /// Spawn a background task that:
 ///
 /// - emits `playback:progress` every [`WATCHER_INTERVAL`] **while playing**
@@ -74,6 +107,11 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
         let mut interval = tokio::time::interval(WATCHER_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut was_playing = false;
+        // Epoch of `played` as of the last tick that observed real playback.
+        // A seek between then and now rewrites `played`, so the position no
+        // longer describes where playback got to and must not be judged as if
+        // it did.
+        let mut seek_epoch_at_last_playing = player.seek_epoch();
         loop {
             interval.tick().await;
 
@@ -81,6 +119,7 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
             // `is_sink_empty` (two separate `RwLock` reads could interleave
             // with a `play()` that swaps the sink).
             let (is_playing, is_empty) = player.sink_snapshot().await;
+            let seek_epoch = player.seek_epoch();
 
             if is_playing {
                 let progress = PlaybackProgress {
@@ -152,8 +191,17 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                 }
             };
 
-            // Truncated / buffer-underrun detection: sink went empty mid-track far from duration
-            let truncated_stop = was_playing && !is_playing && is_empty && !track_just_ended && {
+            // Truncated / buffer-underrun detection: sink went empty mid-track
+            // far from duration. The gate lives in `stop_is_judgeable`; only the
+            // position/duration comparison stays here because it needs `.await`.
+            let truncated_stop = stop_is_judgeable(
+                was_playing,
+                is_playing,
+                is_empty,
+                track_just_ended,
+                seek_epoch,
+                seek_epoch_at_last_playing,
+            ) && {
                 let dur = player.duration().await;
                 let pos = player.current_position().await;
                 let elapsed = player
@@ -199,6 +247,11 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                 }
             }
 
+            if is_playing {
+                // Playback observed this tick, so `played` is playback-derived
+                // again and the watchdog may judge it from here on.
+                seek_epoch_at_last_playing = seek_epoch;
+            }
             was_playing = is_playing;
 
             // Adaptive cadence: poll fast only while audio is actually
@@ -1763,6 +1816,46 @@ mod tests {
     use crate::domain::models::AudioFormat;
     use crate::domain::repositories::TrackRepository;
     use crate::infrastructure::database::repositories::SqliteTrackRepository;
+
+    // --- stop_is_judgeable: the truncation watchdog's gate ------------------
+    //
+    // The full condition also needs an async player and an output device, but
+    // the part that produced a false "file may be truncated" toast is pure
+    // boolean, so it is pinned here.
+
+    #[test]
+    fn a_stop_with_no_seek_in_between_is_judged() {
+        assert!(stop_is_judgeable(true, false, true, false, 7, 7));
+    }
+
+    #[test]
+    fn a_seek_after_the_last_playing_sample_suppresses_the_judgement() {
+        // The reported defect: the position then being judged was a scrub
+        // target (128s == the owner's 2:08 drag), not where playback stopped.
+        assert!(!stop_is_judgeable(true, false, true, false, 8, 7));
+    }
+
+    #[test]
+    fn a_sink_that_is_still_playing_is_never_judged() {
+        assert!(!stop_is_judgeable(true, true, true, false, 7, 7));
+    }
+
+    #[test]
+    fn a_sink_that_is_not_empty_is_never_judged() {
+        // rodio's `empty()` is `sound_count == 0`, so a focus-loss pause —
+        // which leaves the source queued — must never read as truncation.
+        assert!(!stop_is_judgeable(true, false, false, false, 7, 7));
+    }
+
+    #[test]
+    fn a_natural_end_is_not_a_truncation() {
+        assert!(!stop_is_judgeable(true, false, true, true, 7, 7));
+    }
+
+    #[test]
+    fn there_is_nothing_to_judge_before_playback_has_started() {
+        assert!(!stop_is_judgeable(false, false, true, false, 7, 7));
+    }
 
     /// A report as `resume` builds it, for tests that only care about the
     /// fields they set.

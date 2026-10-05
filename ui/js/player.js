@@ -190,6 +190,20 @@ class PlayerController {
             }
         };
 
+        // `touchcancel` replaces `touchend` when the system takes the gesture
+        // (edge swipe, gesture navigation, incoming call). With no handler,
+        // `isSeeking` stayed true forever and the `if (this.isSeeking || !data)
+        // return` in the `playback:progress` listener swallowed every event —
+        // a device recording showed the progress bar frozen for 17s while audio
+        // kept playing. Abandon rather than commit: the system took the gesture,
+        // so the user never chose a position. The next progress tick repaints.
+        const cancelSeek = () => {
+            if (isSeeking) {
+                isSeeking = false;
+                this.isSeeking = false;
+            }
+        };
+
         this.progressTrack.addEventListener('mousedown', startSeek);
         document.addEventListener('mousemove', moveSeek);
         document.addEventListener('mouseup', endSeek);
@@ -197,6 +211,7 @@ class PlayerController {
         this.progressTrack.addEventListener('touchstart', startSeek, { passive: true });
         this.progressTrack.addEventListener('touchmove', moveSeek, { passive: true });
         this.progressTrack.addEventListener('touchend', endSeek);
+        this.progressTrack.addEventListener('touchcancel', cancelSeek);
     }
 
     bindVolume() {
@@ -421,6 +436,16 @@ class PlayerController {
             }
         };
 
+        // Same `touchcancel` gap as `bindProgress` above — see the comment
+        // there. Both controls set the shared `this.isSeeking` flag that gates
+        // every `playback:progress` event, so both need the release.
+        const cancelSeek = () => {
+            if (isSeeking) {
+                isSeeking = false;
+                this.isSeeking = false;
+            }
+        };
+
         fullProgress.addEventListener('mousedown', startSeek);
         document.addEventListener('mousemove', moveSeek);
         document.addEventListener('mouseup', endSeek);
@@ -428,6 +453,7 @@ class PlayerController {
         fullProgress.addEventListener('touchstart', startSeek, { passive: true });
         fullProgress.addEventListener('touchmove', moveSeek, { passive: true });
         fullProgress.addEventListener('touchend', endSeek);
+        fullProgress.addEventListener('touchcancel', cancelSeek);
     }
 
     wireFullScreenVolumeSlider() {
@@ -608,8 +634,19 @@ class PlayerController {
                 } catch (err) {
                     this.settleResumeWatch(false);
                     const msg = String(err || 'resume failed');
-                    console.warn('Resume failed:', msg);
-                    window.Auralis.bridge.showToast(`Resume failed: ${msg} — retrying track`, 'error', 6000);
+                    // A drained or absent sink is exactly what `resume` reports
+                    // when the track ran to its end — Rust returns that error
+                    // *so that* we replay, which is the normal outcome of
+                    // pressing play after a song finishes. Announcing it as a
+                    // red failure is wrong: the replay below is not a failure
+                    // path, and crying wolf here trains people to ignore the
+                    // errors that are real.
+                    if (msg.includes('nothing to resume')) {
+                        console.info('Resume: sink not resumable, replaying track:', msg);
+                    } else {
+                        console.warn('Resume failed:', msg);
+                        window.Auralis.bridge.showToast(`Resume failed: ${msg} — retrying track`, 'error', 6000);
+                    }
                     // fallback: replay the current track from start
                     window.Auralis.bridge.playTrack(resumeTrackId);
                     return;
