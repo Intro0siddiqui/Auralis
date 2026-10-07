@@ -150,6 +150,52 @@ jobs:
           cp "$APK" auralis-debug-arm64.apk
           ls -lh auralis-debug-arm64.apk
 
+      # Re-sign with a keystore committed to the repo. Left to Gradle, each run
+      # signs with the runner's fresh `~/.android/debug.keystore`, so every build
+      # produced a *different* certificate — and Android refuses to install a
+      # differently-signed APK over the existing one. Each device test therefore
+      # forced an uninstall that wiped the owner's library and downloads.
+      # Measured: installed cert == run 37193906620's cert (parser control),
+      # != run 37363969233's cert. Same zipalign+apksigner pattern build.yml
+      # already uses for releases.
+      - name: Re-sign with the pinned debug keystore
+        run: |
+          ZALIGN=$(find "$ANDROID_HOME/build-tools" -name zipalign | sort -V | tail -1)
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ] || [ -z "$ZALIGN" ]; then
+            echo "apksigner or zipalign not found under $ANDROID_HOME/build-tools"
+            find "$ANDROID_HOME/build-tools" -maxdepth 2 -type d || true
+            exit 1
+          fi
+
+          "$ZALIGN" -f -P 16 4 auralis-debug-arm64.apk "$RUNNER_TEMP/aligned.apk"
+          "$APKSIGNER" sign \
+            --ks ci/debug-android.p12 \
+            --ks-key-alias auralis \
+            --ks-pass pass:password \
+            --key-pass pass:password \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out auralis-debug-arm64.apk \
+            "$RUNNER_TEMP/aligned.apk"
+          "$APKSIGNER" verify --verbose auralis-debug-arm64.apk
+
+          # Fail loudly if the pinned key did not land. A wrong certificate is
+          # invisible until the owner's phone refuses the install, at which
+          # point the "fix" is another wipe — so assert it here instead.
+          # EXPECT is the sha256 of ci/debug-android.p12's certificate; if that
+          # keystore is ever rotated, recompute and update it in the same PR.
+          EXPECT="AE113990B48928086406656D2E23BB2048E947BBCFB185E3EE460B8D4A2B860E"
+          ACTUAL=$("$APKSIGNER" verify --print-certs auralis-debug-arm64.apk \
+            | sed -n 's/.*certificate SHA-256 digest: //p' | head -1 | tr 'a-f' 'A-F')
+          echo "expected=$EXPECT actual=$ACTUAL"
+          if [ "$ACTUAL" != "$EXPECT" ]; then
+            echo "::error::debug APK is not signed with the pinned keystore (ci/debug-android.p12)"
+            exit 1
+          fi
+          echo "Pinned key confirmed"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
