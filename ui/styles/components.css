@@ -668,6 +668,15 @@
     opacity: 1;
 }
 
+/* Touch screens do not hold `:hover` after the finger lifts, so the handle
+   vanished on every release — exactly when you need it, to see where you just
+   scrubbed to. Wait for no hover only where no hover is coming. */
+@media (hover: none), (pointer: coarse) {
+    .progress-handle {
+        opacity: 1;
+    }
+}
+
 /* Player Extra */
 .player-extra {
     display: flex;
@@ -1307,12 +1316,20 @@
     box-shadow: 0 0 16px rgba(110, 231, 255, 0.4), inset var(--neu-shadow-light) var(--neu-color-light);
 }
 
+/* Idle state: falls through to `.play-btn` (dark icon, no bloom).
+   The accent fill and cyan glow are *playback state*, not decoration — with
+   them hardcoded here, a paused button still glowed at full brightness and
+   read as playing. `!important` is kept on the state rule because it is
+   overriding the `.neu` / `.play-btn` backgrounds below it in the cascade. */
 .player-full-play {
     width: 68px;
     height: 68px;
+    border-radius: var(--radius-full);
+}
+
+.player-full-play.is-playing {
     background: var(--accent) !important;
     color: var(--bg-0) !important;
-    border-radius: var(--radius-full);
     box-shadow: 0 0 24px rgba(110, 231, 255, 0.45) !important;
 }
 

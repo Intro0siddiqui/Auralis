@@ -199,7 +199,10 @@ export const playerMethods = {
 
         if (title) title.textContent = actualTrack.title || 'No track playing';
         if (artist) {
-            artist.textContent = actualTrack.artist || 'Select a song';
+            // Not the empty state — updatePlayerBar returns above when there is
+            // no track, so reaching here means a track is playing. 'Select a
+            // song' under a playing title was reading as a stuck placeholder.
+            artist.textContent = actualTrack.artist || 'Unknown Artist';
             artist.style.color = '';
         }
         if (artwork) {

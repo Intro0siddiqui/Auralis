@@ -11,6 +11,14 @@ class PlayerController {
         this.shuffle = false;
         this.progressInterval = null;
         this.isSeeking = false;
+        // A seek that has been dispatched but not yet acknowledged by Rust.
+        // Distinct from `isSeeking`, which only means "a finger is down": the
+        // finger lifts *before* the round trip completes, and every tick that
+        // arrives in between still describes the pre-seek coordinate — which is
+        // how a scrub to 0:18 rubber-banded back to 2:17 on device.
+        this.seekInFlight = false;
+        this.seekGeneration = 0;
+        this._seekGateTimer = null;
         // How long a `resume` gets to be proven by a real playback event before
         // we assume it did nothing and replay the track instead.
         this.RESUME_VERIFY_MS = 700;
@@ -76,7 +84,13 @@ class PlayerController {
             // The Rust watcher only emits progress while the sink is running, so
             // a tick is proof of life for a pending resume check as well.
             this.settleResumeWatch(true);
-            if (this.isSeeking || !data) return;
+            // Two independent reasons to ignore a tick:
+            //   isSeeking   — a finger is down and owns the coordinate.
+            //   seekInFlight— a seek is committed but Rust has not confirmed it
+            //                 yet, so this tick still reports where playback
+            //                 *was*, not where it is going. Dropping this one
+            //                 lets in-flight ticks overwrite the scrub target.
+            if (this.isSeeking || this.seekInFlight || !data) return;
             this.progress = data.position_secs !== undefined ? data.position_secs : (data.position || 0);
             this.duration = data.duration_secs !== undefined ? data.duration_secs : (data.duration || 0);
             this.updateProgressUI();
@@ -349,6 +363,10 @@ class PlayerController {
     wireFullScreenPlayButton() {
         const fullPlay = document.getElementById('player-full-play');
         if (fullPlay) {
+            // Re-sync on rewire: the button can be built after the last
+            // updatePlayButton() call, and a stale class would leave the glow
+            // describing a state that is no longer true.
+            fullPlay.classList.toggle('is-playing', !!this.isPlaying);
             fullPlay.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.togglePlay();
@@ -884,11 +902,44 @@ class PlayerController {
             return;
         }
         if (window.Auralis && window.Auralis.bridge) {
-            window.Auralis.bridge.invoke('seek', { request: { position_secs: pos } }).catch((err)=>{
-                const msg = String(err || 'seek failed');
-                console.warn('Seek (commit) failed:', msg);
-                window.Auralis.bridge.showToast(`Seek failed: ${msg}`, 'error', 5000);
-            });
+            // Arm before dispatching: nothing between here and the next
+            // statement can deliver a progress tick, so no tick can slip past.
+            const generation = this.armSeekGate();
+            window.Auralis.bridge.invoke('seek', { request: { position_secs: pos } })
+                .then(() => this.releaseSeekGate(generation))
+                .catch((err) => {
+                    this.releaseSeekGate(generation);
+                    const msg = String(err || 'seek failed');
+                    console.warn('Seek (commit) failed:', msg);
+                    window.Auralis.bridge.showToast(`Seek failed: ${msg}`, 'error', 5000);
+                });
+        }
+    }
+
+    /// Gate progress ticks until the most recently dispatched seek is settled.
+    ///
+    /// Returns the generation this seek belongs to. `releaseSeekGate` refuses to
+    /// open the gate for a stale generation, so of two rapid scrubs only the
+    /// second one's completion opens it — the first to finish must not let
+    /// pre-seek ticks through while the other is still in flight.
+    armSeekGate() {
+        const generation = (this.seekGeneration || 0) + 1;
+        this.seekGeneration = generation;
+        this.seekInFlight = true;
+        // Safety net only: a seek that never settles must not freeze the bar
+        // for the rest of the session. Deliberately far longer than any real
+        // decoder rebuild, so it cannot fire during a legitimate slow seek.
+        if (this._seekGateTimer) clearTimeout(this._seekGateTimer);
+        this._seekGateTimer = setTimeout(() => this.releaseSeekGate(generation), 30000);
+        return generation;
+    }
+
+    releaseSeekGate(generation) {
+        if (generation !== undefined && generation !== this.seekGeneration) return;
+        this.seekInFlight = false;
+        if (this._seekGateTimer) {
+            clearTimeout(this._seekGateTimer);
+            this._seekGateTimer = null;
         }
     }
 
@@ -1041,6 +1092,10 @@ class PlayerController {
         const fullPlay = document.getElementById('player-full-play');
         if (fullPlay) {
             fullPlay.innerHTML = `<i data-lucide="${iconName}"></i>`;
+            // The cyan glow is playback state, not decoration — a paused
+            // button that kept glowing told the owner music was running when
+            // it was not. See `.player-full-play.is-playing`.
+            fullPlay.classList.toggle('is-playing', !!this.isPlaying);
         }
         if (window.lucide) window.lucide.createIcons();
         this.updateMediaSessionState();

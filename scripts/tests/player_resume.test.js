@@ -367,6 +367,101 @@ describe('togglePlay(): a second tap must not cancel an in-flight resume', () =>
     });
 });
 
+describe('seek gate: a committed seek outranks in-flight progress ticks', () => {
+    // The recorded defect: scrub to 0:18, lift, and the handle rubber-banded
+    // back to 2:17 and sat there for 3.75s with no fingers on the glass.
+    // `endSeek` clears `isSeeking` synchronously, but `commitSeek` is a
+    // fire-and-forget round trip — so every tick arriving in between still
+    // reports the *pre-seek* coordinate and was being painted straight over
+    // the scrub target.
+    it('blocks ticks until Rust acknowledges the seek, then lets them through', async () => {
+        const env = makeEnv();
+        const ctrl = env.create();
+        ctrl.duration = 198;
+        ctrl.progress = 18;
+
+        ctrl.commitSeek();
+        assert.equal(ctrl.seekInFlight, true, 'the gate must be armed before dispatch');
+
+        // Still at 2:17 on the Rust side: the rebuild has not finished.
+        env.bridge.emit('playback:progress', { position_secs: 137, duration_secs: 198 });
+        assert.equal(ctrl.progress, 18, 'an in-flight tick must not rubber-band the scrub target');
+
+        await delay(10);
+        assert.equal(ctrl.seekInFlight, false, 'the gate must open once the seek settles');
+
+        env.bridge.emit('playback:progress', { position_secs: 20, duration_secs: 198 });
+        assert.equal(ctrl.progress, 20, 'ticks must flow again once the seek has landed');
+    });
+
+    it('only the newest of two rapid seeks may open the gate', async () => {
+        const env = makeEnv();
+        const ctrl = env.create();
+        ctrl.duration = 198;
+        const pending = [];
+        env.bridge.invoke = (command) => {
+            env.record.invokes.push(command);
+            return new Promise((resolve) => pending.push(resolve));
+        };
+
+        ctrl.progress = 137;
+        ctrl.commitSeek();          // generation 1
+        ctrl.progress = 18;
+        ctrl.commitSeek();          // generation 2
+        assert.equal(ctrl.seekInFlight, true);
+
+        pending[0]();               // the first seek lands while the second is still out
+        await delay(5);
+        assert.equal(
+            ctrl.seekInFlight,
+            true,
+            'the first seek settling must not open the gate while the second is in flight'
+        );
+
+        pending[1]();
+        await delay(5);
+        assert.equal(ctrl.seekInFlight, false, 'the newest seek settling must open the gate');
+    });
+
+    it('opens the gate when the seek fails, so a rejected invoke cannot freeze the bar', async () => {
+        const env = makeEnv();
+        const ctrl = env.create();
+        ctrl.duration = 198;
+        env.bridge.invoke = async () => {
+            env.record.invokes.push('seek');
+            throw 'seek unavailable';
+        };
+
+        ctrl.progress = 18;
+        ctrl.commitSeek();
+        assert.equal(ctrl.seekInFlight, true);
+
+        await delay(20);
+        assert.equal(ctrl.seekInFlight, false, 'a failed seek must not leave progress gated forever');
+        assert.ok(
+            env.record.toasts.some((t) => /Seek failed/i.test(t.msg)),
+            'the failure must still be reported'
+        );
+    });
+
+    it('does not arm the gate when commitSeek bails out before dispatching', () => {
+        const env = makeEnv();
+        const ctrl = env.create();
+        // Invalid duration -> the guard returns before any invoke. A gate armed
+        // here could never be released, which would freeze progress permanently.
+        ctrl.duration = 0;
+        ctrl.progress = 18;
+        ctrl.commitSeek();
+        assert.equal(ctrl.seekInFlight, false, 'an early return must not arm the gate');
+        // `init()` already dispatched `get_now_playing`, so count seeks only.
+        assert.equal(
+            env.record.invokes.filter((c) => c === 'seek').length,
+            0,
+            'nothing should have been dispatched'
+        );
+    });
+});
+
 describe('source guards: the fix must not be silently reverted', () => {
     it('player.js no longer treats a bare resume as success', () => {
         // The old shape was: invoke('resume') … return;  with no verification.
@@ -443,6 +538,36 @@ describe('source guards: the fix must not be silently reverted', () => {
             (playerJsSrc.match(/addEventListener\('touchcancel'/g) || []).length,
             2,
             'progressTrack and fullProgress must both register touchcancel'
+        );
+    });
+
+    it('the three cosmetic player fixes stay in place', () => {
+        // Neither styling nor an HTML fallback string has a behavioural
+        // harness, so pin the shapes rather than trust them to survive.
+        const css = fs.readFileSync(path.resolve(here, '../../ui/styles/components.css'), 'utf8');
+        const mod = fs.readFileSync(path.resolve(here, '../../ui/js/modules/player.js'), 'utf8');
+
+        assert.match(
+            css,
+            /\.player-full-play\.is-playing \{[^}]*box-shadow: 0 0 24px/,
+            'the cyan glow must be scoped to the playing state'
+        );
+        assert.ok(
+            !/\.player-full-play \{[^}]*box-shadow: 0 0 24px/.test(css),
+            'a paused button must not glow'
+        );
+        assert.match(
+            css,
+            /@media \(hover: none\), \(pointer: coarse\) \{\s*\.progress-handle \{\s*opacity: 1;/,
+            'touch devices must keep the scrub handle visible after release'
+        );
+        assert.ok(
+            mod.includes("actualTrack.artist || 'Unknown Artist'"),
+            'a playing track with no artist tag must not read "Select a song"'
+        );
+        assert.ok(
+            !mod.includes("|| 'Select a song'"),
+            'the placeholder must not be reachable while a track is playing'
         );
     });
 });
