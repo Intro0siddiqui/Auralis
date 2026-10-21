@@ -34,6 +34,7 @@ async-trait = "0.1"
 
 # HTTP streaming client (pure-Rust; uses embedded WebPKI root certificates and compression codecs for 100% Android/cross-platform compatibility)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream", "gzip", "brotli", "deflate"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Tauri runtime (v2)
 # `protocol-asset` is required because `tauri.conf.json` enables

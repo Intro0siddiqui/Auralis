@@ -55,6 +55,9 @@ pub struct AuralisApp;
 impl AuralisApp {
     /// Run the Tauri application
     pub fn run() {
+        // Install process-wide default crypto provider for rustls (required by reqwest on Android)
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         info!("Running Auralis application");
 
         match Self::build() {
@@ -69,6 +72,8 @@ impl AuralisApp {
 
     /// Build the Tauri application with all configurations
     fn build() -> tauri::Result<tauri::App> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         info!("Building Auralis application");
 
         tauri::Builder::default()
