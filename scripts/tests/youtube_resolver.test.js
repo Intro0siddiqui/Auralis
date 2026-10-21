@@ -17,6 +17,13 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+
+function readRustSource(filepath) {
+    if (fs.existsSync(filepath)) return fs.readFileSync(filepath, 'utf8');
+    const modPath = filepath.replace(/\.rs$/, '/mod.rs');
+    if (fs.existsSync(modPath)) return fs.readFileSync(modPath, 'utf8');
+    return fs.readFileSync(filepath, 'utf8');
+}
 import { coreMethods } from '../../ui/js/modules/core.js';
 import { downloadMethods } from '../../ui/js/modules/downloads.js';
 import { applyPoTokenToUrl } from '../../ui/js/modules/pot_scope.js';
@@ -1447,7 +1454,7 @@ describe('YouTube Search & Streaming Integration', () => {
         // play opus, which never followed.
         const root = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../..');
         const opusRs = fs.readFileSync(path.join(root, 'src/infrastructure/media/opus.rs'), 'utf8');
-        const playerRs = fs.readFileSync(path.join(root, 'src/infrastructure/media/player.rs'), 'utf8');
+        const playerRs = readRustSource(path.join(root, 'src/infrastructure/media/player.rs'));
         assert.ok(/rusty_opus::|opus_decoder::/.test(opusRs), 'a real opus decoder must be wired, not just declared');
         assert.ok(/DecodedAudioSource::Opus/.test(playerRs),
             'the player must route opus through our own decoder rather than rodio');
@@ -1540,7 +1547,7 @@ describe('YouTube Search & Streaming Integration', () => {
         // line. Four unrelated causes, one indistinguishable symptom.
         assert.ok(/progress\.publish_error/.test(dsrc),
             'the publish failure reason must reach the row, or the next run cannot diagnose itself');
-        const dlsrc = fs.readFileSync(path.join(repoRoot, 'src/infrastructure/media/downloader.rs'), 'utf8');
+        const dlsrc = readRustSource(path.join(repoRoot, 'src/infrastructure/media/downloader.rs'));
         assert.ok(/note_publish_error\(/.test(dlsrc),
             'the downloader must record the reason instead of logging and dropping it');
         const dlmodel = fs.readFileSync(path.join(repoRoot, 'src/domain/models/download.rs'), 'utf8');
@@ -1794,7 +1801,7 @@ describe('YouTube Search & Streaming Integration', () => {
 
     it('downloader tops a windowed (SABR) partial download up with explicit ranges', () => {
         const base = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../src/infrastructure/media');
-        const dsrc = fs.readFileSync(path.join(base, 'downloader.rs'), 'utf8');
+        const dsrc = readRustSource(path.join(base, 'downloader.rs'));
         const rsrc = fs.readFileSync(path.join(base, 'range_topup.rs'), 'utf8');
         // The decoded-length gate is the only place that can see this failure
         // (all advertised bytes arrive, the media is still short), so the top-up

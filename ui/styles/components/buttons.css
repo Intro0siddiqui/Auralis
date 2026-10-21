@@ -1,0 +1,125 @@
+/* ==========================================================================
+   BUTTONS
+   ========================================================================== */
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    border-radius: var(--radius-md);
+    transition: all var(--transition-fast);
+    cursor: pointer;
+    min-height: var(--touch-target);
+}
+
+.btn-primary {
+    background: var(--accent);
+    color: var(--bg-0);
+    border: none;
+}
+
+.btn-primary:hover {
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+}
+
+.btn-primary:active {
+    transform: translateY(0);
+}
+
+.btn-secondary {
+    background: var(--glass-base);
+    backdrop-filter: blur(var(--blur-medium));
+    -webkit-backdrop-filter: blur(var(--blur-medium));
+    border: 1px solid var(--glass-border);
+    color: var(--text-1);
+}
+
+.btn-secondary:hover {
+    background: var(--glass-strong);
+    border-color: var(--glass-border-strong);
+}
+
+.btn-ghost {
+    background: transparent;
+    border: none;
+    color: var(--text-2);
+}
+
+.btn-ghost:hover {
+    background: var(--glass-weak);
+    color: var(--text-1);
+}
+
+.btn-icon {
+    padding: var(--space-2);
+    min-width: var(--touch-target);
+    min-height: var(--touch-target);
+}
+
+.btn-icon svg {
+    width: 20px;
+    height: 20px;
+}
+
+/* Control Buttons (Player) */
+.control-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-full);
+    color: var(--text-2);
+    transition: all var(--transition-fast);
+}
+
+.control-btn:hover {
+    color: var(--text-1);
+    background: var(--glass-weak);
+}
+
+.control-btn:active {
+    transform: scale(0.95);
+}
+
+.control-btn.active {
+    color: var(--accent);
+    background: rgba(110, 231, 255, 0.15);
+    box-shadow: 0 0 12px rgba(110, 231, 255, 0.35);
+}
+
+.control-btn svg {
+    width: 18px;
+    height: 18px;
+}
+
+.play-btn {
+    width: 44px;
+    height: 44px;
+    background: var(--text-1);
+    color: var(--bg-0);
+    box-shadow: 
+        var(--neu-shadow-light) var(--neu-color-light),
+        var(--neu-shadow-dark) var(--neu-color-dark);
+}
+
+.play-btn:hover {
+    background: var(--text-1);
+    color: var(--bg-0);
+    transform: scale(1.05);
+}
+
+.play-btn:active {
+    transform: scale(0.98);
+}
+
+.play-btn svg {
+    width: 20px;
+    height: 20px;
+}
+

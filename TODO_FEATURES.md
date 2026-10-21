@@ -1,103 +1,105 @@
-# 📋 Auralis v2 Feature Roadmap & Capability TODO
+# 📋 Auralis Feature Roadmap & Capability Backlog
 
-This document tracks all missing, stubbed, or partially wired features across the Auralis codebase (Desktop and Android targets), prioritized into actionable implementation milestones.
-
-## 🚨 Milestone 0: Download & Stream Integrity Engine Overhaul (Independent High-Priority Focus)
-> **Goal:** Eliminate partial/truncated audio downloads, enforce strict stream integrity validation, auto-resume broken HTTP streams, and prevent truncated audio playback.
-
-- [x] **1. Strict Stream Completion & Content-Length Verification**
-  - **Location:** `src/infrastructure/media/downloader.rs`
-  - **Status:** ✅ Implemented with RFC 7233 header parsing and Content-Length verification.
-- [x] **2. Automatic Stream Reconnection & HTTP Range Retry Loop**
-  - **Location:** `src/infrastructure/media/downloader.rs`
-  - **Status:** ✅ Implemented with 5-attempt exponential backoff, Range resumption, and 206/200/416 handling.
-- [x] **3. Post-Download Audio Container & Duration Integrity Validation**
-  - **Location:** `src/infrastructure/media/downloader.rs`, `src/infrastructure/filesystem/metadata.rs`
-  - **Status:** ✅ Implemented via `lofty` probe, property inspection, and ±5s tolerance check.
-- [x] **4. Atomic File Publication & Corrupt Partial Cleanup**
-  - **Location:** `src/infrastructure/media/downloader.rs`
-  - **Status:** ✅ Implemented via `.tmp/<id>.part` staging, atomic rename, and automatic cleanup on error/cancel.
-- [x] **5. Duration Mismatch Diagnostic & Auto-Repair in Player**
-  - **Location:** `src/infrastructure/media/player.rs`, `src/commands/playback.rs`
-  - **Status:** ✅ Implemented mismatch detection (>5s vs decoder properties) and auto-reconciliation to database and in-memory queue.
+> [!NOTE]
+> **Developer & Agent Notice**: This backlog tracks active and upcoming features. For architectural patterns, CI pipelines, and developer guidelines, see [**`AGENTS.md`**](file:///home/intro/spectre-enviroment/Auralis/AGENTS.md).
 
 ---
 
-## 🎯 Milestone 1: High-Impact Core Completeness & Missing UI Wiring
-> **Goal:** Connect existing backend Tauri commands to the frontend UI and resolve major visual/metadata gaps.
+## 🎯 Active Milestones & Priorities
 
-- [x] **1. Embedded Album Artwork Extraction & Caching**
-  - **Location:** `src/infrastructure/filesystem/metadata.rs`
-  - **Status:** ✅ Implemented with `lofty` `CoverFront`/`Other` extraction, 128-bit hash deduplication, and cache directory storage.
-- [x] **2. Track Context Menu ("3-Dots" Menu)**
-  - **Location:** `ui/js/modules/views.js` (`renderTrackRows`), `ui/styles/components.css`
-  - **Status:** ✅ Implemented glassmorphic context menu with Play Next, Add to Queue, Add to Playlist picker, Go to Artist/Album catalog filtering, Edit Metadata, and Delete Track with confirmation.
-- [x] **3. Now Playing Queue Manager Panel**
-  - **Location:** `ui/partials/player-full.html`, `ui/js/player.js`
-  - **Status:** ✅ Implemented animated slide-out Queue Drawer in fullscreen player and sidebar panel with Remove track, Clear queue, active track indicator, and reactive `playback:queue`/`playback:track` updates.
-- [x] **4. In-App Track Metadata / Tag Editor**
-  - **Location:** `src/infrastructure/filesystem/metadata.rs` (`write_metadata`), `src/commands/library.rs` (`update_track_metadata`), `ui/partials/modal-tag-editor.html`, `ui/js/modules/library.js`
-  - **Status:** ✅ Implemented `write_metadata` lofty tag writer (ID3v2, MP4, FLAC, Vorbis), synchronized SQLite persistence, and glassmorphic tag editor modal dialog.
-- [x] **5. Batch / Playlist Downloader UI**
-  - **Location:** `ui/partials/download.html`, `ui/js/modules/downloads.js`, `ui/js/youtube.js`
-  - **Status:** ✅ Implemented YouTube playlist URL detection, interactive playlist preview table with select/deselect-all checkboxes, and sequential batch download pipeline with PO-token 403 auto-retry.
+### 📦 Milestone 1: Codebase Modularization (Active)
+> **Goal:** Decompose the 9 monolithic source files exceeding 1,500 LOC into clean, single-responsibility modules with zero functional regressions.
 
----
-
-## 🚀 Milestone 2: Search, Scalability & Dynamic Playlists
-> **Goal:** Optimize library discovery and automate smart catalog organization.
-
-- [ ] **1. Dynamic Smart Playlist Engine & UI Builder**
-  - **Location:** `src/domain/models/playlist.rs`, `src/commands/playlists.rs:390`
-  - **Action:**
-    - Refactor `get_playlist` to dynamically evaluate `SmartPlaylistCriteria` on the fly against SQLite instead of saving static track ID arrays.
-    - Build a "Create Smart Playlist" modal with filter criteria: Genre, Year Range, Minimum Play Count, Rating, Date Added, and Sort Order.
-- [ ] **2. SQLite FTS5 Full-Text Search Optimization**
-  - **Location:** `src/infrastructure/database/repositories.rs:84`
-  - **Problem:** Search currently uses `LIKE '%query%'` wildcards causing full table scans.
-  - **Action:**
-    - Create an SQLite `fts_tracks` virtual table using FTS5 (or trigram tokenizer) indexing `title`, `artist`, `album`.
-    - Add SQLite triggers on `tracks` INSERT/UPDATE/DELETE to keep FTS index synchronized.
-    - Update `TrackRepository::find_all` to execute BM25 ranked queries.
-- [ ] **3. Virtualized Scrolling for Large Libraries (1,000+ tracks)**
-  - **Location:** `ui/js/modules/views.js`, `ui/styles/components.css`
-  - **Action:** Implement a virtual windowing list in `#library-track-list` that only renders visible rows + buffer to maintain 60fps scrolling on mobile devices.
-- [ ] **4. SQLite Reader/Writer Concurrency Optimization**
-  - **Location:** `src/infrastructure/database/mod.rs`
-  - **Action:** Separate reader connections from writer connections with connection pooling or run heavy metadata batch insertions in dedicated `tokio::task::spawn_blocking` pools to prevent UI lock during storage scans.
+- [x] **1. Extract P2P Sync from Frontend Downloads**
+  - **Location:** `ui/js/modules/downloads.js` $\to$ `ui/js/modules/sync.js`, `ui/js/bridge.js`
+  - **Status:** ✅ Completed (`syncMethods` composed onto Bridge; 205/205 JS tests pass).
+- [x] **2. Modularize Master Stylesheet**
+  - **Location:** `ui/styles/components.css` $\to$ `ui/styles/components/*.css`
+  - **Status:** ✅ Completed (9 domain stylesheets imported via `@import`; 100% selector parity).
+- [ ] **3. Decouple Unit Tests from Core Rust Files**
+  - **Location:** `src/infrastructure/media/downloader.rs`, `src/commands/playback.rs`, `src/infrastructure/media/player.rs`
+  - **Action:** Move 3,419 lines of `mod tests` into dedicated `tests.rs` modules, slashing production file sizes by 30%–45%.
+- [ ] **4. Split Database Repositories**
+  - **Location:** `src/infrastructure/database/repositories.rs`
+  - **Action:** Split into `repositories/track.rs`, `repositories/playlist.rs`, `repositories/settings.rs`, and `repositories/sync.rs`.
+- [ ] **5. Extract Resume Diagnostics from Playback Commands**
+  - **Location:** `src/commands/playback.rs` $\to$ `commands/playback/diagnostics.rs`
+  - **Action:** Decouple the 730-line `ResumeLog` and `ResumeProbe` state machine from command handlers.
 
 ---
 
-## 🌐 Milestone 3: Ecosystem, Audio DSP & Platform Compliance
-> **Goal:** Interoperability, advanced audio processing, and production app store compliance.
+### 🌐 Milestone 2: P2P Sync Modernization (`Iroh` + `Iroh-Blobs`)
+> **Goal:** Replace `libp2p` with `Iroh` to enable seamless, battery-friendly, End-to-End Encrypted (E2EE) library synchronization and audio file transfers.
 
-- [ ] **1. Real libp2p P2P Pairing Handshake Protocol**
-  - **Location:** `src/domain/services/sync_service.rs:248`, `src/infrastructure/network.rs`
-  - **Problem:** Pairing PIN validation is currently a local stub.
-  - **Action:**
-    - Implement a libp2p Request-Response protocol exchange (`PairingRequest`, `PairingResponse`).
-    - Device B transmits entered PIN to Device A; Device A validates against its `active_pairing` and responds with authorization token.
-- [ ] **2. Playlist Import & Export (M3U / M3U8 / PLS)**
+- [ ] **1. Dependency Migration (`Cargo.toml`)**
+  - **Action:** Remove `libp2p` (stripping 150+ transitive dependencies); add `iroh` and `iroh-blobs`.
+- [ ] **2. Persistent Node Identity**
+  - **Location:** `src/infrastructure/network/endpoint.rs`, `src/infrastructure/database/repositories/sync.rs`
+  - **Action:** Generate and persist an Ed25519 `SecretKey` in SQLite so every device maintains a permanent `NodeId` across restarts.
+- [ ] **3. QR Code & Ticket-Based Device Pairing**
+  - **Location:** `src/domain/services/sync_service.rs`, `ui/partials/sync.html`, `ui/js/modules/sync.js`
+  - **Action:** Generate and scan compact `EndpointTicket` strings (containing NodeId, LAN addresses, and DERP relay fallback) via QR code or text paste.
+- [ ] **4. Two-Phase Library & Audio File Transfer**
+  - **Phase 1 (Catalog Sync):** Exchange track metadata, playlists, and favorites over QUIC stream `/auralis/sync/1`. Each track includes its content-verified `blake3_hash`.
+  - **Phase 2 (Verified File Streaming):** Download missing audio files via `iroh-blobs` directly into `app_data_dir/downloads` and public storage with built-in resumable streaming.
+
+---
+
+### 🎶 Milestone 3: Dynamic Smart Playlists & Library Management
+> **Goal:** Automate library organization and support playlist interoperability.
+
+- [ ] **1. Dynamic Smart Playlist Engine**
+  - **Location:** `src/domain/models/playlist.rs`, `src/commands/playlists.rs`
+  - **Action:** Refactor `get_playlist` to dynamically evaluate `SmartPlaylistCriteria` against SQLite on the fly (Genre, Year, Min Play Count, Date Added).
+- [ ] **2. Built-in Smart Presets**
+  - **Action:** Add pre-configured smart playlists: *"Recently Added"*, *"Most Played"*, *"Favorites"*.
+- [ ] **3. Playlist Import & Export (M3U / M3U8)**
   - **Location:** `src/commands/playlists.rs`
-  - **Action:**
-    - Export any playlist to standard `.m3u8` with relative or absolute file paths.
-    - Import `.m3u` / `.m3u8` playlists by resolving referenced audio file paths in library.
-- [ ] **3. Multi-Band Equalizer & Audio DSP Effects**
+  - **Action:** Export playlists to standard `.m3u8` files and import external `.m3u8` files matching local audio tracks.
+- [ ] **4. Virtualized Track List Scrolling**
+  - **Location:** `ui/js/modules/views.js`
+  - **Action:** Implement a virtual DOM windowing list for large libraries (1,000+ tracks) to maintain 60fps scrolling on mobile.
+
+---
+
+### 🎛️ Milestone 4: Audio DSP, Equalizer & Synchronized Lyrics
+> **Goal:** Advanced audio shaping and synchronized playback enhancements.
+
+- [ ] **1. Multi-Band Equalizer & DSP Presets**
   - **Location:** `src/infrastructure/media/player.rs`
-  - **Action:**
-    - Implement a 5-band or 10-band biquad equalizer filter chain in the audio pipeline using `rodio` / `dasp`.
-    - Provide presets: Flat, Bass Boost, Vocal, Acoustic, Rock, Electronic.
-    - Save EQ settings in SQLite and persist across sessions.
-- [ ] **4. Synchronized Lyrics Support (.LRC / USLT)**
+  - **Action:** Implement a 5-band or 10-band biquad equalizer filter chain in `rodio` with presets (Flat, Bass Boost, Vocal, Rock) and SQLite persistence.
+- [ ] **2. Synchronized Lyrics Support (.LRC & USLT)**
   - **Location:** `src/infrastructure/filesystem/metadata.rs`, `ui/partials/player-full.html`
-  - **Action:**
-    - Parse embedded USLT ID3 frames or `.lrc` sidecar files matching the audio track filename.
-    - Add a toggleable Lyrics view in the full-screen player that scrolls in sync with `playback:progress`.
-- [ ] **5. macOS Gatekeeper & Windows Authenticode Signing**
+  - **Action:** Parse embedded USLT ID3 tags or `.lrc` sidecar files; render synchronized scrolling lyrics in the fullscreen player.
+
+---
+
+### 🔐 Milestone 5: Production Distribution & Code Signing
+> **Goal:** Production desktop store compliance and warning-free installation.
+
+- [ ] **1. macOS Gatekeeper Notarization**
+  - **Location:** `.github/workflows/build.yml`
+  - **Action:** Configure Apple Developer ID certificate and notarization credentials in CI.
+- [ ] **2. Windows Authenticode Signing**
   - **Location:** `.github/workflows/build.yml`, `tauri.conf.json`
-  - **Action:**
-    - macOS: Configure `APPLE_CERTIFICATE`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` in GitHub Secrets and enable notarization.
-    - Windows: Configure Azure Trusted Signing or code signing certificate in `bundle.windows.signCommand`.
-- [ ] **6. Android Low-Memory Background Resilience**
-  - **Location:** `src/infrastructure/media/background_service.rs`
-  - **Action:** Ensure notification media controls (`play`, `pause`, `next`, `previous`, `seek`) act directly on the native `AudioPlayer` instance without dropping events when the Webview activity is killed by Android low-memory management.
+  - **Action:** Integrate Azure Trusted Signing or code signing certificate in `bundle.windows.signCommand`.
+
+---
+
+## ✅ Completed Core Milestones (Verified in Production)
+
+<details>
+<summary><b>Click to expand completed foundational capabilities</b></summary>
+
+- [x] **Direct YouTube Streaming Proxy (`StreamProxy`)**: Loopback proxy on `127.0.0.1:<port>/stream/<id>` streaming YouTube audio with custom headers (`UA`, `Referer`, `Origin`) to HTML5 `<audio>` with zero disk writes.
+- [x] **1 MB 403 CDN Barrier Discovery & Fix**: Solved adaptive stream token caps by routing downloads and streaming through the `ANDROID` progressive muxed client (itag 18).
+- [x] **Dynamic Night Mode Synchronization**: Real-time app theme tracking matching Android/OS system dark/light mode toggles.
+- [x] **Background Playback on Android**: JNI-driven foreground `MediaPlaybackService` with lockscreen & notification media controls.
+- [x] **Dual-Save Media Storage**: Downloads saved to internal sandboxed storage and published publicly to `Download/Auralis/` via Android `MediaStore`.
+- [x] **Strict Stream Verification & Resume**: HTTP Range resumption, atomic `.part` rename, and lofty container duration integrity validation.
+- [x] **Queue Management & Auto-Advance**: Sample-accurate seeking, queue drawer, and 250ms progress watcher events.
+- [x] **Album Artwork Extraction & Caching**: Lofty extraction of embedded cover art with deduplicated thumbnail cache.
+- [x] **Tag Editor & Metadata Writing**: In-app ID3v2/MP4/FLAC tag writing with lofty.
+- [x] **16 KB Android Page Alignment**: CI-enforced ELF LOAD segment alignment for Android 15/16.
+
+</details>

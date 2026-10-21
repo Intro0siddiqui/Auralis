@@ -26,7 +26,9 @@ import vm from 'node:vm';
 
 const here = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
 const playerJsPath = path.resolve(here, '../../ui/js/player.js');
-const playerRsPath = path.resolve(here, '../../src/infrastructure/media/player.rs');
+const playerRsPath = fs.existsSync(path.resolve(here, '../../src/infrastructure/media/player.rs'))
+    ? path.resolve(here, '../../src/infrastructure/media/player.rs')
+    : path.resolve(here, '../../src/infrastructure/media/player/mod.rs');
 const playerJsSrc = fs.readFileSync(playerJsPath, 'utf8');
 const playerRsSrc = fs.readFileSync(playerRsPath, 'utf8');
 

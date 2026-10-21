@@ -9,6 +9,7 @@ import { scanUiMethods } from './modules/scan-ui.js';
 import { viewMethods } from './modules/views.js';
 import { playerMethods } from './modules/player.js';
 import { downloadMethods } from './modules/downloads.js';
+import { syncMethods } from './modules/sync.js';
 import { uiMethods } from './modules/ui.js';
 
 // Compose all module methods onto Bridge prototype
@@ -20,6 +21,7 @@ Object.assign(
     viewMethods,
     playerMethods,
     downloadMethods,
+    syncMethods,
     uiMethods
 );
 

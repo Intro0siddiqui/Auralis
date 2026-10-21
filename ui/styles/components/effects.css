@@ -1,0 +1,72 @@
+/* ==========================================================================
+   EFFECTS / SURFACES - Glass & Neumorphic System
+   ========================================================================== */
+
+/* ==========================================================================
+   GLASS EFFECTS
+   ========================================================================== */
+
+.glass {
+    background: var(--glass-base);
+    backdrop-filter: blur(var(--blur-heavy));
+    -webkit-backdrop-filter: blur(var(--blur-heavy));
+    border: 1px solid var(--glass-border);
+}
+
+.glass-weak {
+    background: var(--glass-weak);
+    backdrop-filter: blur(var(--blur-light));
+    -webkit-backdrop-filter: blur(var(--blur-light));
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-strong {
+    background: var(--glass-strong);
+    backdrop-filter: blur(var(--blur-heavy));
+    -webkit-backdrop-filter: blur(var(--blur-heavy));
+    border: 1px solid var(--glass-border-strong);
+}
+
+/* ==========================================================================
+   NEUMORPHISM EFFECTS
+   ========================================================================== */
+
+.neu {
+    background: var(--neu-bg);
+    box-shadow: 
+        var(--neu-shadow-light) var(--neu-color-light),
+        var(--neu-shadow-dark) var(--neu-color-dark);
+    border-radius: var(--radius-md);
+}
+
+.neu:hover {
+    box-shadow: 
+        var(--neu-shadow-light-hover) var(--neu-color-light),
+        var(--neu-shadow-dark-hover) var(--neu-color-dark);
+}
+
+.neu:active,
+.neu.active {
+    box-shadow: 
+        inset var(--neu-shadow-light) var(--neu-color-light),
+        inset var(--neu-shadow-dark) var(--neu-color-dark);
+}
+
+.neu-inset {
+    background: var(--neu-inset-bg);
+    box-shadow: 
+        inset var(--neu-shadow-light) var(--neu-color-light),
+        inset var(--neu-shadow-dark) var(--neu-color-dark);
+    border-radius: var(--radius-full);
+}
+
+.neu-glass {
+    background: var(--glass-base);
+    backdrop-filter: blur(var(--blur-heavy));
+    -webkit-backdrop-filter: blur(var(--blur-heavy));
+    border: 1px solid var(--glass-border);
+    box-shadow: 
+        var(--neu-shadow-light) var(--neu-color-light),
+        var(--neu-shadow-dark) var(--neu-color-dark);
+}
+

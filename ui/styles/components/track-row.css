@@ -1,0 +1,105 @@
+/* ==========================================================================
+   TRACK ROWS
+   ========================================================================== */
+
+.track-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    transition: background var(--transition-fast);
+    cursor: pointer;
+}
+
+.track-row:hover {
+    background: var(--glass-weak);
+}
+
+.track-row.active {
+    background: var(--glass-base);
+}
+
+.track-row-artwork {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-sm);
+    background: var(--glass-weak);
+    overflow: hidden;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.track-row-artwork img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.track-row-artwork svg {
+    width: 20px;
+    height: 20px;
+    color: var(--text-4);
+}
+
+.track-row-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.track-row-title {
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    color: var(--text-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.track-row:hover .track-row-title,
+.track-row.active .track-row-title {
+    color: var(--accent);
+}
+
+.track-row-subtitle {
+    font-size: var(--text-xs);
+    color: var(--text-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.track-row-duration {
+    font-size: var(--text-xs);
+    color: var(--text-4);
+    flex-shrink: 0;
+}
+
+.track-row-actions {
+    display: flex;
+    gap: var(--space-1);
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+}
+
+.track-row:hover .track-row-actions {
+    opacity: 1;
+}
+
+
+/* Track Row Actions & Search Stream Button */
+.track-row.neu-glass .track-row-actions {
+    opacity: 1;
+}
+
+.play-yt-btn {
+    color: var(--accent);
+}
+
+.play-yt-btn:hover {
+    color: var(--accent-hover);
+    background: var(--glass-base);
+}
+
