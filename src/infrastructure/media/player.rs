@@ -665,7 +665,10 @@ impl AudioPlayer {
         };
 
         let (res, was_paused) = seek_res;
-        eprintln!("AURALIS SEEK: pos={:?}, res={:?}, was_paused={}", position, res, was_paused);
+        eprintln!(
+            "AURALIS SEEK: pos={:?}, res={:?}, was_paused={}",
+            position, res, was_paused
+        );
 
         if let Err(e) = res {
             warn!(
@@ -701,7 +704,11 @@ impl AudioPlayer {
         } else {
             *self.play_anchor.write().await = Some(Instant::now());
         }
-        *self.play_started_at.write().await = Some(Instant::now().checked_sub(position).unwrap_or_else(Instant::now));
+        *self.play_started_at.write().await = Some(
+            Instant::now()
+                .checked_sub(position)
+                .unwrap_or_else(Instant::now),
+        );
         *self.last_seek_at.lock().unwrap() = Some(Instant::now());
 
         info!(?position, "Seek completed");
@@ -769,7 +776,11 @@ impl AudioPlayer {
         } else {
             *self.play_anchor.write().await = Some(Instant::now());
         }
-        *self.play_started_at.write().await = Some(Instant::now().checked_sub(position).unwrap_or_else(Instant::now));
+        *self.play_started_at.write().await = Some(
+            Instant::now()
+                .checked_sub(position)
+                .unwrap_or_else(Instant::now),
+        );
         *self.last_seek_at.lock().unwrap() = Some(Instant::now());
 
         Ok(())

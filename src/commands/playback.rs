@@ -134,8 +134,9 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                     // Require elapsed_opt.is_some() to avoid false trigger after stop()
                     // zeroes position (0 >= 0 for dur <= 350ms would otherwise be true).
                     (elapsed_opt.is_some() && pos >= dur.saturating_sub(TRACK_END_EPSILON))
-                        || (dur <= Duration::from_millis(1500) && elapsed_opt.is_some_and(|e| {
-                            e + TRACK_END_EPSILON >= dur
+                        || (dur <= Duration::from_millis(1500)
+                            && elapsed_opt.is_some_and(|e| {
+                                e + TRACK_END_EPSILON >= dur
                                     // For short tracks, also accept any
                                     // elapsed beyond max(dur - epsilon, MIN_GUARD)
                                     // so a 800 ms clip can still advance.
@@ -143,7 +144,7 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                                         >= dur
                                             .saturating_sub(TRACK_END_EPSILON)
                                             .max(TRACK_END_MIN_GUARD)
-                        }))
+                            }))
                 } else {
                     // Unknown duration: require at least MIN_GUARD to filter
                     // the empty-transient after append, but allow sub-1500 ms
@@ -153,17 +154,22 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
             };
 
             // Truncated / buffer-underrun detection: sink went empty mid-track far from duration
-            let truncated_stop = was_playing && !is_playing && is_empty && !track_just_ended && !player.is_recently_seeking() && {
-                let dur = player.duration().await;
-                let pos = player.current_position().await;
-                let elapsed = player
-                    .play_started_elapsed()
-                    .await
-                    .unwrap_or(Duration::ZERO);
-                !dur.is_zero()
-                    && pos + Duration::from_secs(5) < dur
-                    && elapsed + Duration::from_secs(5) < dur
-            };
+            let truncated_stop = was_playing
+                && !is_playing
+                && is_empty
+                && !track_just_ended
+                && !player.is_recently_seeking()
+                && {
+                    let dur = player.duration().await;
+                    let pos = player.current_position().await;
+                    let elapsed = player
+                        .play_started_elapsed()
+                        .await
+                        .unwrap_or(Duration::ZERO);
+                    !dur.is_zero()
+                        && pos + Duration::from_secs(5) < dur
+                        && elapsed + Duration::from_secs(5) < dur
+                };
             if truncated_stop {
                 let dur = player.duration().await.as_secs();
                 let pos = player.current_position().await.as_secs();

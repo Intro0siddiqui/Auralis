@@ -72,7 +72,8 @@ impl StreamProxy {
                         let sessions = sessions_loop.clone();
                         let client = client_loop.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = Self::handle_connection(socket, sessions, client).await {
+                            if let Err(e) = Self::handle_connection(socket, sessions, client).await
+                            {
                                 debug!("StreamProxy connection handler closed: {e}");
                             }
                         });
@@ -147,7 +148,8 @@ impl StreamProxy {
         let header_str = match std::str::from_utf8(&buf[..header_end]) {
             Ok(s) => s,
             Err(_) => {
-                let resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let resp =
+                    "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = socket.write_all(resp.as_bytes()).await;
                 return Ok(());
             }
@@ -179,7 +181,8 @@ Connection: close\r\n\r\n";
         let is_head = method.eq_ignore_ascii_case("HEAD");
         let is_get = method.eq_ignore_ascii_case("GET");
         if !is_get && !is_head {
-            let resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let resp =
+                "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = socket.write_all(resp.as_bytes()).await;
             let _ = socket.flush().await;
             return Ok(());
@@ -247,7 +250,8 @@ Connection: close\r\n\r\n";
         };
 
         let initial_range = format!("bytes={client_start}-{initial_chunk_end}");
-        let initial_req = Self::build_upstream_request(&client, &session, &session.url, &initial_range, is_head);
+        let initial_req =
+            Self::build_upstream_request(&client, &session, &session.url, &initial_range, is_head);
 
         let mut initial_res = match initial_req.send().await {
             Ok(r) => r,
@@ -305,7 +309,8 @@ Connection: close\r\n\r\n";
         let mut resp_header_bytes = Vec::with_capacity(512);
         resp_header_bytes.extend_from_slice(b"HTTP/1.1 206 Partial Content\r\n");
         resp_header_bytes.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
-        resp_header_bytes.extend_from_slice(format!("Content-Length: {content_length}\r\n").as_bytes());
+        resp_header_bytes
+            .extend_from_slice(format!("Content-Length: {content_length}\r\n").as_bytes());
 
         if let Some(total) = total_size {
             resp_header_bytes.extend_from_slice(
@@ -347,7 +352,13 @@ Connection: close\r\n\r\n";
             while current_offset <= target_end {
                 let chunk_end = (current_offset + STREAM_CHUNK_SIZE - 1).min(target_end);
                 let range_str = format!("bytes={current_offset}-{chunk_end}");
-                let next_req = Self::build_upstream_request(&client, &session, &effective_url, &range_str, false);
+                let next_req = Self::build_upstream_request(
+                    &client,
+                    &session,
+                    &effective_url,
+                    &range_str,
+                    false,
+                );
 
                 let mut next_res = match next_req.send().await {
                     Ok(r) if r.status().is_success() => r,
