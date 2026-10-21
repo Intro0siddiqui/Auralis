@@ -445,10 +445,9 @@ export const downloadMethods = {
         // Prefer the client that just resolved — it is the one we know returns
         // formats at all — and fall back to any client the report says offers
         // this class.
-        const otherCandidates = classCandidates.filter((c) => c !== winner);
-        const classClient = otherCandidates.length > 0
-            ? otherCandidates[0]
-            : (classCandidates.length ? classCandidates[0] : null);
+        const classClient = classCandidates.length
+            ? (classCandidates.includes(winner) ? winner : classCandidates[0])
+            : null;
 
         // Every class has been tried. Rotation is still allowed, but only now:
         // it is a second opinion, not progress, and putting it earlier is what

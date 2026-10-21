@@ -53,7 +53,7 @@ impl StreamProxy {
             .use_rustls_tls()
             .connect_timeout(std::time::Duration::from_secs(15))
             .build()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let proxy = Self {
             port,
