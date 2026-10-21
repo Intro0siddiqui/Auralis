@@ -126,7 +126,7 @@
                 <button class="extra-btn" id="queue-btn" aria-label="Queue">
                     <i data-lucide="list"></i>
                 </button>
-                <button class="extra-btn" id="devices-btn" aria-label="Devices">
+                <button class="extra-btn" id="devices-btn" aria-label="Devices" hx-get="/partials/sync.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace">
                     <i data-lucide="speakers"></i>
                 </button>
                 <button class="extra-btn" id="volume-btn" aria-label="Volume">
@@ -163,6 +163,14 @@
                hx-sync="#content:replace">
                 <i data-lucide="search"></i>
                 <span>Search</span>
+            </a>
+            <a href="#" class="mobile-nav-item" 
+               hx-get="/partials/sync.html" 
+               hx-target="#content" 
+               hx-swap="innerHTML"
+               hx-sync="#content:replace">
+                <i data-lucide="radio"></i>
+                <span>Sync</span>
             </a>
             <a href="#" class="mobile-nav-item" 
                hx-get="/partials/settings.html" 
