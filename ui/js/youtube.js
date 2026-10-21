@@ -661,8 +661,7 @@ class YouTubeResolver {
         }
         if (opts.forceClient) {
             const fc = String(opts.forceClient).toUpperCase();
-            if (effectiveOrderedClients.includes(fc)) effectiveOrderedClients = [fc, ...effectiveOrderedClients.filter((c) => c !== fc)];
-            else effectiveOrderedClients = [fc];
+            effectiveOrderedClients = [fc];
         }
         // A client that can only offer the legacy muxed progressive (itag 18) is a
         // last resort: the muxed 360p rendition is what the SABR window truncates,

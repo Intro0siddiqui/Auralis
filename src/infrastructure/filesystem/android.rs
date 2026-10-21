@@ -784,9 +784,31 @@ fn service_context() -> Option<jni::objects::JObject<'static>> {
 pub fn query_system_mediastore_audio() -> Vec<MediaStoreRawTrack> {
     let res = with_attached_env(|env| -> Result<String, String> {
         let ctx = service_context().ok_or_else(|| "no android context".to_string())?;
-        let scanner_class = env
-            .find_class("com/auralis/v2/MediaStoreScanner")
-            .map_err(|e| format!("find MediaStoreScanner class: {e}"))?;
+        let scanner_class = match env.find_class("com/auralis/v2/MediaStoreScanner") {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = env.exception_clear();
+                let loader = env
+                    .call_method(&ctx, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+                    .map_err(|e| format!("getClassLoader: {e}"))?
+                    .l()
+                    .map_err(|e| format!("getClassLoader l: {e}"))?;
+                let dotted = env
+                    .new_string("com.auralis.v2.MediaStoreScanner")
+                    .map_err(|e| format!("new_string: {e}"))?;
+                let class_obj = env
+                    .call_method(
+                        loader,
+                        "loadClass",
+                        "(Ljava/lang/String;)Ljava/lang/Class;",
+                        &[jni::objects::JValue::Object(&dotted)],
+                    )
+                    .map_err(|e| format!("loadClass: {e}"))?
+                    .l()
+                    .map_err(|e| format!("loadClass l: {e}"))?;
+                jni::objects::JClass::from(class_obj)
+            }
+        };
         let result = env
             .call_static_method(
                 scanner_class,

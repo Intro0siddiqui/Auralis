@@ -7,6 +7,7 @@
 
 use crate::domain::models::{AudioFormat, DownloadProgress, DownloadStatus};
 use crate::infrastructure::media::downloader::{Downloader, StreamDownload};
+use crate::infrastructure::media::StreamProxy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
@@ -486,4 +487,16 @@ pub async fn http_fetch(request: HttpFetchRequest) -> Result<HttpFetchResponse, 
         headers: resp_headers,
         body,
     })
+}
+
+/// Register a stream URL and headers with the local streaming proxy.
+/// Returns the local proxy URL (e.g. `http://127.0.0.1:<port>/stream/<id>`).
+#[tauri::command]
+pub async fn register_stream_url(
+    stream_url: String,
+    headers: Option<HashMap<String, String>>,
+    proxy: State<'_, StreamProxy>,
+) -> Result<String, String> {
+    let headers = headers.unwrap_or_default();
+    Ok(proxy.register(stream_url, headers).await)
 }

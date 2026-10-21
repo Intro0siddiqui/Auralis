@@ -650,7 +650,7 @@ pub(crate) fn render_art_tag(art_path: Option<&str>, alt_text: &str, icon_name: 
                 serde_json::to_string(path).unwrap_or_else(|_| format!("\"{}\"", safe_path));
             let safe_json_path = html_escape(&json_path);
             format!(
-                r#"<img src="{safe_path}" alt="{safe_alt}" onerror="if(!this.dataset.fb){{this.dataset.fb='1';window.Auralis&amp;&amp;window.Auralis.bridge&amp;&amp;window.Auralis.bridge.embedArt(this,{safe_json_path})}}">"#
+                r#"<img src="{safe_path}" alt="{safe_alt}" data-art-path="{safe_path}" onerror="if(!this.dataset.fb){{this.dataset.fb='1';window.Auralis&amp;&amp;window.Auralis.bridge&amp;&amp;window.Auralis.bridge.embedArt(this,{safe_json_path})}}">"#
             )
         }
         _ => format!(r#"<i data-lucide="{icon_name}"></i>"#),

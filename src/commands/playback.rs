@@ -126,7 +126,7 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
             // guard), fall back to a short MIN_GUARD for unknown-duration
             // streams. This also covers the case where `duration` is zero
             // because metadata was missing.
-            let track_just_ended = was_playing && !is_playing && is_empty && {
+            let track_just_ended = was_playing && is_empty && !player.is_recently_seeking() && {
                 let dur = player.duration().await;
                 let elapsed_opt = player.play_started_elapsed().await;
                 if !dur.is_zero() {
@@ -134,7 +134,7 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                     // Require elapsed_opt.is_some() to avoid false trigger after stop()
                     // zeroes position (0 >= 0 for dur <= 350ms would otherwise be true).
                     (elapsed_opt.is_some() && pos >= dur.saturating_sub(TRACK_END_EPSILON))
-                        || elapsed_opt.is_some_and(|e| {
+                        || (dur <= Duration::from_millis(1500) && elapsed_opt.is_some_and(|e| {
                             e + TRACK_END_EPSILON >= dur
                                     // For short tracks, also accept any
                                     // elapsed beyond max(dur - epsilon, MIN_GUARD)
@@ -143,7 +143,7 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                                         >= dur
                                             .saturating_sub(TRACK_END_EPSILON)
                                             .max(TRACK_END_MIN_GUARD)
-                        })
+                        }))
                 } else {
                     // Unknown duration: require at least MIN_GUARD to filter
                     // the empty-transient after append, but allow sub-1500 ms
@@ -153,7 +153,7 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
             };
 
             // Truncated / buffer-underrun detection: sink went empty mid-track far from duration
-            let truncated_stop = was_playing && !is_playing && is_empty && !track_just_ended && {
+            let truncated_stop = was_playing && !is_playing && is_empty && !track_just_ended && !player.is_recently_seeking() && {
                 let dur = player.duration().await;
                 let pos = player.current_position().await;
                 let elapsed = player

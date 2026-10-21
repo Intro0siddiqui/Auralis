@@ -445,9 +445,10 @@ export const downloadMethods = {
         // Prefer the client that just resolved — it is the one we know returns
         // formats at all — and fall back to any client the report says offers
         // this class.
-        const classClient = classCandidates.length
-            ? (classCandidates.includes(winner) ? winner : classCandidates[0])
-            : null;
+        const otherCandidates = classCandidates.filter((c) => c !== winner);
+        const classClient = otherCandidates.length > 0
+            ? otherCandidates[0]
+            : (classCandidates.length ? classCandidates[0] : null);
 
         // Every class has been tried. Rotation is still allowed, but only now:
         // it is a second opinion, not progress, and putting it earlier is what
@@ -701,7 +702,11 @@ export const downloadMethods = {
         this.showToast('Resolving source…', 'info');
         try {
             this._ensureDownloadRetryListener();
-            const resolved = await window.AuralisYouTube.resolve(url, opts);
+            const downloadOpts = {
+                ...opts,
+                orderedClients: ['ANDROID', 'IOS', 'ANDROID_VR'],
+            };
+            const resolved = await window.AuralisYouTube.resolve(url, downloadOpts);
             if (resolved.kind === 'playlist') {
                 await this.startPlaylistDownloads(resolved.items, 'm4a', opts, urlInput);
                 return;
@@ -940,10 +945,20 @@ export const downloadMethods = {
 
             const form = document.getElementById('download-form');
             const opts = this.getDownloadOptions(form);
-            const resolved = await window.AuralisYouTube.resolve(item.url, opts);
+            const streamOpts = {
+                ...opts,
+                forceLegacyProgressive: true,
+                orderedClients: ['ANDROID'],
+            };
+            const resolved = await window.AuralisYouTube.resolve(item.url, streamOpts);
             if (!resolved || resolved.kind !== 'track' || !resolved.stream_url) {
                 throw new Error('Could not resolve playable stream URL');
             }
+
+            const proxyUrl = await this.invoke('register_stream_url', {
+                streamUrl: resolved.stream_url,
+                headers: resolved.headers || {},
+            });
 
             const trackObj = {
                 title: item.title || resolved.title || 'YouTube Audio',
@@ -975,8 +990,7 @@ export const downloadMethods = {
             }
 
             const audio = new Audio();
-            audio.crossOrigin = 'anonymous';
-            audio.src = resolved.stream_url;
+            audio.src = proxyUrl;
             if (window.Auralis?.player && typeof window.Auralis.player.volume === 'number') {
                 audio.volume = window.Auralis.player.volume;
             }
@@ -1108,8 +1122,12 @@ export const downloadMethods = {
             if (!window.AuralisYouTube) throw new Error('YouTube resolver unavailable');
             await this.ensureSettings();
             const opts = this.getDownloadOptions(form);
+            const downloadOpts = {
+                ...opts,
+                orderedClients: ['ANDROID', 'IOS', 'ANDROID_VR'],
+            };
             this._ensureDownloadRetryListener();
-            const resolved = await window.AuralisYouTube.resolve(urlToResolve, opts);
+            const resolved = await window.AuralisYouTube.resolve(urlToResolve, downloadOpts);
             if (!resolved || resolved.kind !== 'track') throw new Error('Not a playable track');
             const format = (opts && opts.container && opts.container !== 'auto') ? opts.container : (resolved.ext || 'm4a');
             const result = await this.downloadResolvedTrack(resolved, format, opts, urlToResolve);

@@ -8,12 +8,25 @@ export const uiMethods = {
         if (window.matchMedia) {
             try {
                 const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+                const onMediaChange = () => {
+                    const currentSetting = (this.currentSettings && this.currentSettings.appearance && this.currentSettings.appearance.theme)
+                        || localStorage.getItem('auralis-theme')
+                        || 'system';
+                    if (String(currentSetting).toLowerCase() === 'system') {
+                        this.applyTheme('system');
+                    }
+                };
                 if (mediaQuery && typeof mediaQuery.addEventListener === 'function') {
-                    mediaQuery.addEventListener('change', () => {
-                        const currentSetting = (this.currentSettings && this.currentSettings.appearance && this.currentSettings.appearance.theme) || 'system';
-                        if (String(currentSetting).toLowerCase() === 'system') {
-                            this.applyTheme('system');
-                        }
+                    mediaQuery.addEventListener('change', onMediaChange);
+                } else if (mediaQuery && typeof mediaQuery.addListener === 'function') {
+                    mediaQuery.addListener(onMediaChange);
+                }
+                if (typeof window !== 'undefined') {
+                    window.addEventListener('focus', onMediaChange);
+                }
+                if (typeof document !== 'undefined') {
+                    document.addEventListener('visibilitychange', () => {
+                        if (!document.hidden) onMediaChange();
                     });
                 }
             } catch (_) {}
@@ -158,9 +171,9 @@ export const uiMethods = {
     artImgTag(path, altText) {
         if (!path) return '';
         const safeAlt = this.escapeHtml(altText || '');
+        const safePath = this.escapeHtml(path);
         const src = this.assetUrl(path);
-        const jsonPath = JSON.stringify(path).replace(/</g, '\\u003c').replace(/"/g, '&quot;');
-        return `<img src="${src}" alt="${safeAlt}" onerror="if(!this.dataset.fb){this.dataset.fb='1';window.Auralis.bridge.embedArt(this, ${jsonPath})}">`;
+        return `<img src="${src}" alt="${safeAlt}" data-art-path="${safePath}">`;
     },
 
     showToast(message, type = 'info', duration = 3500) {
@@ -186,3 +199,15 @@ export const uiMethods = {
         return toast;
     }
 };
+
+if (typeof window !== 'undefined') {
+    window.addEventListener('error', (e) => {
+        const el = e.target;
+        if (el && el.tagName === 'IMG' && el.dataset && el.dataset.artPath && !el.dataset.fb) {
+            el.dataset.fb = '1';
+            if (window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.embedArt === 'function') {
+                window.Auralis.bridge.embedArt(el, el.dataset.artPath);
+            }
+        }
+    }, true);
+}

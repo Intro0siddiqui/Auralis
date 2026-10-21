@@ -91,6 +91,10 @@ pub struct AudioPlayer {
     /// an audio-focus pause nobody asked for. Kept out of the `AtomicU64`
     /// because `Instant` is 16 bytes and cannot be packed into one.
     last_pause_at: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// When the most recent seek occurred. Used to protect against false
+    /// buffer underruns, false track-end triggers, and premature focus abandonment
+    /// while rodio flushes its decode pipeline.
+    last_seek_at: Arc<std::sync::Mutex<Option<Instant>>>,
     /// Whether the most recent [`AudioPlayer::seek`] had to replace the sink
     /// rather than seek the live one. Read-and-cleared by the caller via
     /// [`AudioPlayer::take_seek_rebuilt_sink`].
@@ -217,6 +221,7 @@ impl AudioPlayer {
             track_duration: Arc::new(RwLock::new(Duration::ZERO)),
             pause_epoch: Arc::new(AtomicU64::new(0)),
             last_pause_at: Arc::new(std::sync::Mutex::new(None)),
+            last_seek_at: Arc::new(std::sync::Mutex::new(None)),
             last_seek_rebuilt_sink: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             start_observer: Arc::new(std::sync::Mutex::new(None)),
@@ -660,6 +665,7 @@ impl AudioPlayer {
         };
 
         let (res, was_paused) = seek_res;
+        eprintln!("AURALIS SEEK: pos={:?}, res={:?}, was_paused={}", position, res, was_paused);
 
         if let Err(e) = res {
             warn!(
@@ -695,6 +701,8 @@ impl AudioPlayer {
         } else {
             *self.play_anchor.write().await = Some(Instant::now());
         }
+        *self.play_started_at.write().await = Some(Instant::now().checked_sub(position).unwrap_or_else(Instant::now));
+        *self.last_seek_at.lock().unwrap() = Some(Instant::now());
 
         info!(?position, "Seek completed");
         Ok(())
@@ -747,6 +755,8 @@ impl AudioPlayer {
 
         if was_paused {
             player.pause();
+        } else {
+            player.play();
         }
 
         if let Some(old_sink) = self.sink.write().await.replace(player) {
@@ -759,6 +769,8 @@ impl AudioPlayer {
         } else {
             *self.play_anchor.write().await = Some(Instant::now());
         }
+        *self.play_started_at.write().await = Some(Instant::now().checked_sub(position).unwrap_or_else(Instant::now));
+        *self.last_seek_at.lock().unwrap() = Some(Instant::now());
 
         Ok(())
     }
@@ -976,13 +988,24 @@ impl AudioPlayer {
         }
     }
 
-    pub async fn is_playing(&self) -> bool {
-        self.sink
-            .read()
-            .await
-            .as_ref()
-            .map(|s| !s.is_paused() && !s.empty())
+    /// Whether a seek occurred within the last 1500ms.
+    pub fn is_recently_seeking(&self) -> bool {
+        self.last_seek_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .map(|t| t.elapsed() < Duration::from_millis(1500))
             .unwrap_or(false)
+    }
+
+    pub async fn is_playing(&self) -> bool {
+        self.play_anchor.read().await.is_some()
+            && self
+                .sink
+                .read()
+                .await
+                .as_ref()
+                .map(|s| !s.is_paused())
+                .unwrap_or(false)
     }
 
     pub async fn current_position(&self) -> Duration {
@@ -1016,9 +1039,10 @@ impl AudioPlayer {
     /// `is_playing()` + `is_sink_empty()` calls (the sink could transition
     /// between the two awaits).
     pub async fn sink_snapshot(&self) -> (bool, bool) {
+        let has_anchor = self.play_anchor.read().await.is_some();
         let guard = self.sink.read().await;
         match guard.as_ref() {
-            Some(s) => (!s.is_paused() && !s.empty(), s.empty()),
+            Some(s) => (has_anchor && !s.is_paused(), s.empty()),
             None => (false, true),
         }
     }

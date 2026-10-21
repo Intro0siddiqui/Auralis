@@ -454,16 +454,25 @@ class MediaPlaybackService : Service() {
         // holding focus. The existing `result=` log below prints the POST-request
         // value and so cannot answer that.
         Log.i("AuralisMedia", "requestAudioFocus: enter hadFocus=$hasAudioFocus")
+        if (hasAudioFocus) {
+            Log.i("AuralisMedia", "requestAudioFocus: already holding focus — keeping existing request")
+            return
+        }
         pausedByFocusLoss = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val playbackAttributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                 .build()
-            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            var req: AudioFocusRequest? = null
+            val builder = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(playbackAttributes)
                 .setAcceptsDelayedFocusGain(true)
                 .setOnAudioFocusChangeListener { focusChange ->
+                    if (audioFocusRequest != null && audioFocusRequest != req) {
+                        Log.i("AuralisMedia", "focusChange: ignoring callback from superseded request")
+                        return@setOnAudioFocusChangeListener
+                    }
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS,
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
@@ -502,7 +511,7 @@ class MediaPlaybackService : Service() {
                         }
                     }
                 }
-                .build()
+            req = builder.build()
             audioFocusRequest = req
             // The result used to be discarded, which made GRANTED, FAILED and DELAYED
             // indistinguishable. Now it decides whether we believe we hold focus, and

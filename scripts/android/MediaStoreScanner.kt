@@ -79,10 +79,13 @@ object MediaStoreScanner {
 
                     val artUri = if (albumId > 0) {
                         try {
-                            ContentUris.withAppendedId(
+                            val candidateUri = ContentUris.withAppendedId(
                                 MediaStore.Audio.Albums.EXTERNAL_CONTENT_URI,
                                 albumId
-                            ).toString()
+                            )
+                            resolver.openFileDescriptor(candidateUri, "r")?.use {
+                                candidateUri.toString()
+                            } ?: ""
                         } catch (_: Exception) {
                             ""
                         }

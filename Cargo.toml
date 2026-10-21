@@ -28,7 +28,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # Core async runtime
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "io-util", "fs", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "io-util", "fs", "time", "net"] }
 futures = "0.3"
 async-trait = "0.1"
 

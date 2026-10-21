@@ -51,3 +51,12 @@ test_screenshots/
 *.exe
 *.tar.gz
 *.zip
+
+# Local isolated Android/Rust toolchain (JDK, SDK, NDK, AVDs, Gradle cache)
+.toolchain/
+node_modules/
+package-lock.json
+env.sh
+run-emulator.sh
+*.png
+

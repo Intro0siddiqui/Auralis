@@ -26,7 +26,7 @@ pub mod infrastructure;
 
 // Re-export infrastructure types
 pub use infrastructure::database::Database;
-pub use infrastructure::media::{AudioPlayer, Downloader};
+pub use infrastructure::media::{AudioPlayer, Downloader, StreamProxy};
 
 // ============================================================================
 // Application Layer - Tauri Commands
@@ -115,6 +115,11 @@ impl AuralisApp {
                     tracing::error!(error = %e, "Failed to initialize downloader");
                 }
 
+                // Initialize stream proxy
+                if let Err(e) = Self::init_stream_proxy(&app_handle) {
+                    tracing::error!(error = %e, "Failed to initialize stream proxy");
+                }
+
                 info!("Setup phase completed successfully");
                 Ok(())
             })
@@ -164,6 +169,7 @@ impl AuralisApp {
                 commands::downloads::get_download_progress,
                 commands::downloads::list_downloads,
                 commands::downloads::http_fetch,
+                commands::downloads::register_stream_url,
                 // Playlist commands
                 commands::playlists::get_playlists,
                 commands::playlists::get_playlist,
@@ -333,6 +339,16 @@ impl AuralisApp {
 
         let downloader = Downloader::new(download_dir);
         app_handle.manage(downloader);
+
+        Ok(())
+    }
+
+    /// Initialize the local HTTP streaming proxy
+    fn init_stream_proxy(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Initializing stream proxy");
+
+        let proxy = tauri::async_runtime::block_on(StreamProxy::start())?;
+        app_handle.manage(proxy);
 
         Ok(())
     }
