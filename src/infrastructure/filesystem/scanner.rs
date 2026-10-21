@@ -9,10 +9,6 @@ pub use crate::infrastructure::filesystem::desktop::DesktopScanner;
 use crate::domain::models::{AudioFormat, Track};
 use std::path::Path;
 
-/// Supported audio extensions (case-insensitive)
-pub const SUPPORTED_AUDIO_EXTENSIONS: &[&str] =
-    &["mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "webm"];
-
 /// Check if an extension is a supported audio format (case-insensitive)
 pub fn is_supported_audio_extension(ext: &str) -> bool {
     let ext_lower = ext.trim_start_matches('.').to_lowercase();

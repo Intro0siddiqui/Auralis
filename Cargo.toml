@@ -41,7 +41,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 # `convertFileSrc()`). Without the matching cargo feature the build script
 # fails with "the `tauri` dependency features ... does not match the allowlist".
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 
 # Database

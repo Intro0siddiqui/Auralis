@@ -521,8 +521,6 @@ class YouTubeResolver {
             return sorted[0] || valid[0];
         };
 
-        const pickAudioFormat = selectBestAudioFormat;
-
         // Prefer audio-only progressive (e.g., itag 140 m4a) over muxed video+audio (itag 18) — avoids 360p remux waste
         const pickLegacyProgressive = (fmts) => {
             if (!fmts || !fmts.length) return null;

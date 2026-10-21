@@ -1036,15 +1036,6 @@ impl AudioPlayer {
         }
     }
 
-    pub async fn is_sink_empty(&self) -> bool {
-        self.sink
-            .read()
-            .await
-            .as_ref()
-            .map(|s| s.empty())
-            .unwrap_or(true)
-    }
-
     /// Atomically snapshot `(is_playing, is_empty)` under a single `RwLock`
     /// read guard to avoid the TOCTOU race between separate
     /// `is_playing()` + `is_sink_empty()` calls (the sink could transition

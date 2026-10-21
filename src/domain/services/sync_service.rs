@@ -3,8 +3,7 @@
 //! Handles P2P synchronization between devices.
 
 use crate::domain::models::{
-    ChangeType, DeviceStatus, DeviceType, EntityType, PairedDevice, PairingInfo, SyncChange,
-    SyncStatus,
+    DeviceStatus, DeviceType, PairedDevice, PairingInfo, SyncChange, SyncStatus,
 };
 use crate::domain::repositories::{SettingsRepository, SyncRepository};
 use crate::infrastructure::network::SyncEngine;
@@ -486,38 +485,6 @@ impl SyncService {
 
         info!(multiaddr = %multiaddr_str, "Connected direct P2P address");
         Ok(format!("Direct connection established to {multiaddr_str}"))
-    }
-
-    /// Record a change for sync
-    pub async fn record_change(
-        &self,
-        change_type: ChangeType,
-        entity_type: EntityType,
-        entity_id: Uuid,
-        payload: serde_json::Value,
-    ) -> Result<(), SyncError> {
-        let change = SyncChange::new(change_type, entity_type, entity_id, payload);
-
-        // Save to repository
-        self.sync_repository
-            .save_change(&change)
-            .await
-            .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
-
-        // Update cache
-        {
-            let mut pending = self.pending_changes.write().await;
-            pending.push(change);
-        }
-
-        // Update status
-        {
-            let mut status = self.sync_status.write().await;
-            status.pending_changes = self.pending_changes.read().await.len() as u32;
-        }
-
-        debug!(entity_type = ?entity_type, entity_id = %entity_id, "Change recorded for sync");
-        Ok(())
     }
 
     /// Clear all pending changes

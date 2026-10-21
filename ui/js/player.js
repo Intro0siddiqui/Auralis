@@ -588,7 +588,6 @@ class PlayerController {
     async play() {
         this.isPlaying = true;
         this.updatePlayButton();
-        this.startTimeTracking();
         if (window._auralisStreamAudio) {
             try {
                 await window._auralisStreamAudio.play();
@@ -754,7 +753,6 @@ class PlayerController {
         this.settleResumeWatch(false);
         this.isPlaying = false;
         this.updatePlayButton();
-        this.stopTimeTracking();
         if (window._auralisStreamAudio) {
             try {
                 window._auralisStreamAudio.pause();
@@ -828,13 +826,6 @@ class PlayerController {
         this.progress = Math.max(0, Math.min(this.duration, secs));
         this.updateProgressUI();
         this.commitSeek();
-    }
-
-    seekToPercent(pct) {
-        if (!isFinite(pct) || !this.duration || this.duration <= 0 || !isFinite(this.duration)) return;
-        this.progress = pct * (this.duration || 0);
-        this.updateProgressUI();
-        this.updatePositionState();
     }
 
     commitSeek() {
@@ -1252,15 +1243,6 @@ class PlayerController {
             fullVolIcon.setAttribute('data-lucide', iconName);
         }
         if (window.lucide) window.lucide.createIcons();
-    }
-
-    startTimeTracking() {
-        // No-op: the real playback position is driven by `playback:progress`
-        // events emitted from the Rust playback watcher.
-    }
-
-    stopTimeTracking() {
-        // No-op: retained for call-site compatibility.
     }
 
     formatTime(secs) {

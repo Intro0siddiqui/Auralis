@@ -1329,7 +1329,6 @@ export const downloadMethods = {
             ? this.extractErrorMessage(progress, '')
             : (progress.error || progress.error_message || '');
         const isFailed = progress.status === 'failed';
-        const isCompleted = progress.status === 'completed';
         if (isFailed) {
             row.classList.add('download-failed');
             row.style.borderLeft = '3px solid #ff4d4f';

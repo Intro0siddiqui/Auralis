@@ -10,7 +10,6 @@
     "core:window:allow-maximize",
     "core:window:allow-set-title",
     "core:webview:allow-internal-toggle-devtools",
-    "shell:allow-open",
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-message"

@@ -310,54 +310,6 @@ impl DownloadProgress {
         self.completed_at = Some(Utc::now());
         self.updated_at = Utc::now();
     }
-
-    /// Get formatted speed
-    pub fn formatted_speed(&self) -> String {
-        format_speed(self.speed_bps)
-    }
-
-    /// Get formatted size
-    pub fn formatted_size(&self) -> String {
-        let downloaded = format_size(self.downloaded_bytes);
-        match self.total_bytes {
-            Some(total) => format!("{} / {}", downloaded, format_size(total)),
-            None => downloaded,
-        }
-    }
-
-    /// Get formatted ETA
-    pub fn formatted_eta(&self) -> String {
-        match self.eta_secs {
-            Some(secs) => {
-                let minutes = secs / 60;
-                let seconds = secs % 60;
-                format!("{}:{:02}", minutes, seconds)
-            }
-            None => "--:--".to_string(),
-        }
-    }
-}
-
-/// Format bytes as human-readable size
-pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-/// Format bytes per second as human-readable speed
-pub fn format_speed(bytes_per_sec: u64) -> String {
-    format!("{}/s", format_size(bytes_per_sec))
 }
 
 #[cfg(test)]
@@ -572,58 +524,5 @@ mod tests {
         assert_eq!(download.progress, 0.5);
         assert_eq!(download.status, DownloadStatus::Downloading);
         assert_eq!(download.eta_secs, Some(5));
-    }
-
-    #[test]
-    fn test_format_size() {
-        assert_eq!(format_size(500), "500 B");
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(1_500_000), "1.4 MB");
-        assert_eq!(format_size(1_500_000_000), "1.4 GB");
-    }
-
-    #[test]
-    fn test_format_size_boundaries() {
-        // Zero bytes
-        assert_eq!(format_size(0), "0 B");
-
-        // Just below 1 KB
-        assert_eq!(format_size(1023), "1023 B");
-
-        // Exactly 1 KB
-        assert_eq!(format_size(1024), "1.0 KB");
-
-        // Just above 1 KB
-        assert_eq!(format_size(1025), "1.0 KB");
-
-        // Fractional KB rounding: 1.5 KB = 1536 bytes
-        assert_eq!(format_size(1536), "1.5 KB");
-
-        // Just below 1 MB
-        assert_eq!(format_size(1_048_575), "1024.0 KB");
-
-        // Exactly 1 MB
-        assert_eq!(format_size(1_048_576), "1.0 MB");
-
-        // Fractional MB rounding: 1.5 MB
-        assert_eq!(format_size(1_572_864), "1.5 MB");
-
-        // Just below 1 GB
-        assert_eq!(format_size(1_073_741_823), "1024.0 MB");
-
-        // Exactly 1 GB
-        assert_eq!(format_size(1_073_741_824), "1.0 GB");
-
-        // Large value: 2.5 GB
-        assert_eq!(format_size(2_684_354_560), "2.5 GB");
-    }
-
-    #[test]
-    fn test_format_speed() {
-        assert_eq!(format_speed(0), "0 B/s");
-        assert_eq!(format_speed(500), "500 B/s");
-        assert_eq!(format_speed(1024), "1.0 KB/s");
-        assert_eq!(format_speed(1_500_000), "1.4 MB/s");
-        assert_eq!(format_speed(1_500_000_000), "1.4 GB/s");
     }
 }
