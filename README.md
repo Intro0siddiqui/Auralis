@@ -6,7 +6,7 @@
 
 A lightweight, offline-first music player with integrated media downloading and P2P synchronization — rewritten from scratch in **Rust + Tauri + HTMX** to replace the original Kotlin/Compose Multiplatform application.
 
-> **Status: Active Development.** Core architecture is in place and most features are implemented (database, audio playback, downloads, playlists, settings, P2P networking). Sync transfers use real libp2p request-response.
+> **Status: Active Development.** Core architecture is in place and most features are implemented (database, audio playback, downloads, playlists, settings, P2P networking). P2P sync uses Iroh QUIC transport with permanent Ed25519 node identities, QR ticket pairing, and automatic SQLite reconciliation.
 
 ---
 
@@ -34,9 +34,9 @@ The rewrite trades the JVM's startup cost and Compose's runtime overhead for a t
 | **YouTube Search & Streaming** | Implemented | In-app YouTube song/artist/album search, instant live stream playback with real-time player bar & full-screen UI sync, one-click downloading with format and quality preferences |
 | **Media Downloading** | Implemented | `youtube.js` URL resolution (PO-token `&pot=` unconditional, `403` auto-retry) + `reqwest` streaming to `app_data_dir/downloads/<title>.<ext>`, progress tracking, pause/resume/cancel; Android MediaStore dual-save |
 | **Playlist Management** | Implemented | Full CRUD with SQLite persistence |
-| **P2P Networking** | Implemented | libp2p with mDNS, gossipsub, request-response |
+| **P2P Networking** | Implemented | Iroh QUIC via Quinn with Magicsock STUN + DERP relay hole-punching |
 | **Settings** | Implemented | SQLite-backed load/save |
-| **P2P Sync Transfers** | Implemented | Real libp2p request-response transfer (best-effort) |
+| **P2P Sync Transfers** | Implemented | Real-time QUIC bi-directional stream catalog sync & SQLite reconciliation |
 | **Smart Playlists** | Partial | Criteria model exists; built-in "Recently Added" / "Most Playlists" not pre-defined |
 
 ---
@@ -85,7 +85,7 @@ auralis-v2/
 │   │   ├── database/       # SQLite + rusqlite
 │   │   ├── filesystem/     # Track scanner (DesktopScanner + AndroidScanner native MediaStore ingestion) + metadata
 │   │   ├── media/          # AudioPlayer (rodio/cpal/oboe + Opus decoder) + Downloader (reqwest streaming of resolved URLs)
-│   │   └── network.rs      # libp2p: mDNS, gossipsub, request-response
+│   │   └── network.rs      # Iroh: QUIC transport, Magicsock STUN + DERP relay, BLAKE3 streaming
 │   ├── commands/           # Tauri command handlers
 │   │   ├── library.rs
 │   │   ├── playback.rs

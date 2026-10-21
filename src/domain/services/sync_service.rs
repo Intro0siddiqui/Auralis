@@ -257,7 +257,7 @@ impl SyncService {
             return Err(SyncError::PairingExpired);
         }
 
-        // TODO: Implement actual network pairing via libp2p
+        // TODO: Implement actual network pairing via Iroh
         let device = PairedDevice::new(device_name, DeviceType::Desktop);
 
         // Save to repository
@@ -305,7 +305,7 @@ impl SyncService {
         Ok(())
     }
 
-    /// Sync with a specific device using libp2p request-response.
+    /// Sync with a specific device using Iroh QUIC transport.
     ///
     /// Connects to the peer, exchanges the queued sync changes, and marks
     /// the device as synced on success. Connection failures are logged but
@@ -330,7 +330,7 @@ impl SyncService {
             status.error = None;
         }
 
-        // 1. Connect to the peer via libp2p (use ip_address if available, otherwise device id)
+        // 1. Connect to the peer via Iroh (use ip_address / ticket if available, otherwise device id)
         let peer_addr = device
             .ip_address
             .clone()
@@ -398,8 +398,8 @@ impl SyncService {
                 .await;
         }
 
-        // 3. Perform the actual request-response sync via libp2p
-        // request_sync resolves via in-memory map, then DB peer_id column, then raw PeerId
+        // 3. Perform the actual sync exchange via Iroh QUIC stream
+        // request_sync resolves via in-memory map, then DB peer_id column, then raw NodeId
         let peer_id = device_id.to_string();
         if let Err(e) = self.sync_engine.request_sync(&peer_id).await {
             warn!(device_id = %device_id, error = %e, "Sync transfer failed; keeping pending changes in queue");

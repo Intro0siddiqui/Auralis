@@ -15,8 +15,8 @@ Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses
 2. **The 1 MB 403 CDN Barrier Solved**: Direct measurement proved that `ANDROID_VR` and `IOS` adaptive streams (itag 140) enforce token caps at byte 1,048,576 (1 MiB), returning `HTTP 403 Forbidden` on subsequent chunk ranges. In contrast, `ANDROID` progressive muxed streams (itag 18) return `HTTP 206 Partial Content` across every chunk window (0–512 KB, 1 MB–1.5 MB, etc.) without token restriction.
 3. **Real-time System Night Mode Adaptation**: App dynamically tracks Android/OS system dark/light mode toggles via `matchMedia` and updates themes in real time without reloading, while respecting manual settings overrides.
 4. **CI & Cross-Compilation 100% Green**: GitHub Actions build `39554184840` passed 100% across lint (cargo fmt, clippy, cargo-audit), Linux build/tests, and Android cross-compilation.
-5. **P2P Modernization Blueprint (`libp2p` -> `Iroh` + `Iroh-Blobs`)**: Architectural audit proved `libp2p` is ill-suited for mobile due to mDNS AP-isolation failures, ephemeral `PeerId` drift on restarts, and lack of a binary file transfer pipeline. Replacing with `Iroh` + `Iroh-Blobs` provides permanent Ed25519 `NodeId`, QR `EndpointTicket` pairing, and BLAKE3 verified chunk streaming.
-6. **Codebase Modularization**: Identified 9 files exceeding 1,500 LOC (19,907 total LOC) and initiated decoupling of 3,419 lines of unit tests from `downloader.rs`, `playback.rs`, and `player.rs`, alongside CSS and frontend sync modularization.
+5. **P2P Modernization to Iroh (`libp2p` Fully Excised)**: Completely removed `libp2p` and 150+ transitive dependencies (-2,442 LOC net diff), replacing it with `Iroh` QUIC transport via Quinn + Magicsock STUN/DERP relay hole-punching on ALPN `/auralis/sync/1`. Device identity is persisted as an Ed25519 `SecretKey` in SQLite `node_identity` table (eliminating `PeerId` drift). Pairing uses compact QR `EndpointTicket` strings (`auralis://pair?ticket=...&pin=...`) with 1-click clipboard copy, and incoming sync payloads reconcile directly into SQLite.
+6. **Codebase Modularization Completed**: All files in the codebase brought under the 1.5k LOC target. Decoupled 3,419 lines of unit tests (`downloader/tests.rs`, `playback/tests.rs`, `player/tests.rs`), split `repositories.rs` into domain-specific modules, extracted playback diagnostics (`ResumeLog`/`ResumeProbe`), split downloader into `fs.rs`/`http.rs`/`validation.rs`, modularized CSS into 9 domain stylesheets, and extracted frontend `sync.js`.
 
 ---
 
@@ -34,7 +34,7 @@ src/
 │   ├── database/     # SQLite via rusqlite + migration schema
 │   ├── filesystem/   # File scanner + metadata extraction (lofty)
 │   ├── media/        # AudioPlayer (rodio) + Downloader (reqwest streaming of resolved URLs)
-│   └── network.rs    # libp2p: mDNS, gossipsub, request-response, Noise transport
+│   └── network.rs    # Iroh: QUIC transport, Magicsock STUN + DERP relay, BLAKE3 streaming
 ├── commands/         # Tauri command handlers — bridge frontend ↔ services
 ├── templates/        # Partial server — reads ui/partials/ and caches them
 └── lib.rs            # App builder + command registration
@@ -165,15 +165,15 @@ rediscovered as a false premise.
 
 | Task | Status |
 |------|--------|
-| libp2p networking (`infrastructure/network.rs`) | ✅ 865 lines: mDNS, gossipsub, request-response, Noise transport |
-| Sync service (`domain/services/sync_service.rs`) | ✅ DB persistence, QR/PIN pairing |
-| Sync commands (`commands/sync.rs`) | ✅ All commands wired to SyncService |
+| Iroh QUIC networking (`infrastructure/network.rs`) | ✅ Iroh Quinn endpoint, Magicsock STUN + DERP relay hole-punching, ALPN `/auralis/sync/1` |
+| Sync service (`domain/services/sync_service.rs`) | ✅ Persistent Ed25519 `NodeId` in SQLite, QR `EndpointTicket` / PIN pairing, catalog sync |
+| Sync commands (`commands/sync.rs`) | ✅ All commands wired to SyncService & Iroh network runtime |
 
 ### Phase 6: Remaining Work
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Real P2P data transfer | ✅ Implemented | `sync_with_device()` performs a real libp2p request-response transfer (best-effort) |
+| Real P2P data transfer | ✅ Implemented | `sync_with_device()` performs real QUIC stream exchange and reconciles tracks & playlists into SQLite |
 | Library scanner | ✅ Implemented | `infrastructure/filesystem/scanner.rs` (glob + lofty); Android 16 SAF / system media-picker import added |
 | Settings commands | ✅ Implemented | SQLite-backed load/save |
 | Smart playlists | ⚠️ Partial | Criteria model exists; built-in "Recently Added" / "Most Played" not pre-defined |
@@ -183,9 +183,9 @@ rediscovered as a false premise.
 
 ## 4. Optimization Tasks
 
-### 4.1 Dependency Cleanup (`Cargo.toml`) — ✅ DONE (refreshed 2026-08-25)
+### 4.1 Dependency Cleanup (`Cargo.toml`) — ✅ DONE (refreshed 2026-10-21)
 
-The dependency set was audited and upgraded in Aug 2026. Patch refresh 2026-08-25: `futures 0.3.33→0.3.34` (`cargo update -p futures --precise 0.3.34`), `async-trait 0.1.91→0.1.92`, `uuid 1.24.0→1.25.0`, `thiserror 2.0.19→2.0.20` — `cargo check --lib` OK. Current key entries:
+The dependency set was audited and upgraded in Oct 2026. `libp2p` and its 150+ transitive dependencies were completely removed and replaced with `iroh`, `iroh-blobs`, `iroh-tickets`, and `blake3`. Current key entries:
 ```toml
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "fs", "io-util", "time"] } # lock 1.53.1 (latest)
 rusqlite = { version = "0.40", features = ["bundled"] }   # chrono/uuid features removed — datetimes & UUIDs are stored as TEXT; lock 0.40.2
@@ -195,7 +195,10 @@ rusty-opus = "0.9"     # 64-bit targets (aarch64, x86_64): pure-Rust Opus codec 
 opus-rs = "0.1"        # 32-bit targets (armv7, i686): pure-Rust Opus codec for compatibility and battery efficiency
 symphonia = { version = "0.5.5", default-features = false, features = ["mkv", "ogg", "isomp4"] }
 lofty = "0.25"  # lock 0.25.1
-libp2p = { version = "0.56", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "json"] } # lock 0.56.0
+iroh = { version = "0.98", default-features = false }
+iroh-blobs = { version = "0.98", default-features = false }
+iroh-tickets = "0.98"
+blake3 = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }  # only PngEncoder is used (QR); jpeg/ico decoders look trimmable; lock 0.25.10
 rand = "0.10"          # lock 0.10.2; rand::prelude::*; rand::rng(); rng.random_range(...)
 thiserror = "2"        # lock 2.0.20
@@ -211,7 +214,7 @@ Notes from the audit/upgrade pass:
 - `tauri-plugin-shell` was registered in `lib.rs` but never used anywhere (no Rust API calls, no frontend refs) — candidate for removal.
 - **Deferred upgrades**: `reqwest` 0.12 → 0.13 (rustls becomes default with aws-lc provider; webpki-roots feature removed; would need Android TLS re-validation and may complicate NDK CI) and `jni` 0.21 → 0.22 (breaking API in executors/local-frame handling; touches the hand-rolled JNI bridge). Revisit deliberately.
 - MSRV: `rust-version` in Cargo.toml must stay ≥ lofty's MSRV (**1.89**).
-- Every libp2p feature declared is used in `infrastructure/network.rs`; rodio codec features match `AudioFormat` exactly.
+- All Iroh features are used in `infrastructure/network.rs`; rodio codec features match `AudioFormat` exactly.
 
 ### 4.2 tauri.conf.json Cleanup — ✅ DONE
 

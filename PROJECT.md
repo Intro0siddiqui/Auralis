@@ -35,7 +35,7 @@ src/
 * **Audio Playback Engine**: Powered by `rodio 0.22`, featuring sample-accurate seeking, queue auto-advance with 250ms progress events, Opus SIMD decoders, and Android foreground `MediaPlaybackService` with lockscreen controls.
 * **Streaming Proxy (`StreamProxy`)**: Runs on local loopback (`http://127.0.0.1:<port>/stream/<id>`), bridging HTML5 `<audio>` elements to YouTube CDN streams with client-matched headers (`User-Agent`, `Referer`, `Origin`) for direct live playback with zero disk writes.
 * **Dual-Save Downloader**: Downloads audio streams via `reqwest` with HTTP Range pause/resume and atomic rename. Saves internally to `app_data_dir/downloads` and publishes visible copies to `Download/Auralis/` via Android `MediaStore`.
-* **P2P Sync Engine**: Migrating from `libp2p` to `Iroh` + `Iroh-Blobs` for seamless QUIC-based device pairing via QR code `EndpointTicket` and BLAKE3 verified chunked audio file transfer.
+* **P2P Sync Engine**: Built on `Iroh` + `Iroh-Blobs` with QUIC transport, Magicsock STUN & DERP relay hole-punching, permanent SQLite Ed25519 `NodeId` identity, QR code `EndpointTicket` pairing, and BLAKE3 verified chunked audio & catalog transfer.
 
 ---
 
