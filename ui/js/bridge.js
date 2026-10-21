@@ -11,10 +11,12 @@ import { playerMethods } from './modules/player.js';
 import { downloadMethods } from './modules/downloads.js';
 import { syncMethods } from './modules/sync.js';
 import { uiMethods } from './modules/ui.js';
+import { copyText, copyWithToast } from './modules/clipboard.js';
 
 // Compose all module methods onto Bridge prototype
 Object.assign(
     Bridge.prototype,
+    { copyText, copyWithToast },
     coreMethods,
     libraryMethods,
     scanUiMethods,

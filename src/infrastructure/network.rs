@@ -341,7 +341,35 @@ async fn handle_incoming_sync_connection(
     conn: iroh::endpoint::Connection,
     runtime: Arc<NetworkRuntime>,
 ) {
-    debug!(remote = %conn.remote_id(), "Accepted incoming QUIC sync connection");
+    let remote_id_str = conn.remote_id().to_string();
+    debug!(remote = %remote_id_str, "Accepted incoming QUIC sync connection");
+
+    // Auto-record incoming peer into paired_devices if DB is available
+    if let Some(db) = runtime.alias_db().await {
+        if let Ok(sql_conn) = db.connection() {
+            let exists: bool = sql_conn
+                .query_row(
+                    "SELECT 1 FROM paired_devices WHERE peer_id = ?1",
+                    rusqlite::params![remote_id_str],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+
+            if !exists {
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let short_id = &remote_id_str[..remote_id_str.len().min(8)];
+                let name = format!("Auralis Device ({short_id})");
+                let now = chrono::Utc::now().to_rfc3339();
+                let _ = sql_conn.execute(
+                    "INSERT INTO paired_devices (id, name, device_type, ip_address, status, last_synced, created_at, peer_id)
+                     VALUES (?1, ?2, 'mobile', NULL, 'connected', ?3, ?3, ?4)",
+                    rusqlite::params![new_id, name, now, remote_id_str],
+                );
+                info!(remote = %remote_id_str, "Recorded incoming peer as paired device in DB");
+            }
+        }
+    }
+
     while let Ok((mut send, mut recv)) = conn.accept_bi().await {
         match recv.read_to_end(1024 * 1024).await {
             Ok(bytes) => {

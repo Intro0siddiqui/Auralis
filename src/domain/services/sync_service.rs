@@ -511,7 +511,58 @@ impl SyncService {
             .await
             .map_err(|e| SyncError::NetworkError(e.to_string()))?;
 
+        // Extract remote EndpointId if this was an EndpointTicket or raw EndpointId
+        let remote_peer_id = if let Ok(ticket) = <iroh_tickets::endpoint::EndpointTicket as std::str::FromStr>::from_str(clean_addr) {
+            Some(ticket.endpoint_addr().id.to_string())
+        } else if let Ok(endpoint_id) = <iroh::EndpointId as std::str::FromStr>::from_str(clean_addr) {
+            Some(endpoint_id.to_string())
+        } else {
+            None
+        };
+
+        let mut synced_device_id = None;
+        if let Some(ref pid) = remote_peer_id {
+            let already_paired = {
+                let devices = self.paired_devices.read().await;
+                devices.values().any(|d| d.peer_id.as_deref() == Some(pid))
+            };
+
+            if !already_paired {
+                let name = format!("Auralis Device ({})", &pid[..pid.len().min(8)]);
+                let mut device = PairedDevice::new(
+                    name,
+                    DeviceType::Mobile,
+                );
+                device.peer_id = Some(pid.clone());
+                device.ip_address = Some(clean_addr.to_string());
+                device.status = DeviceStatus::Connected;
+                device.mark_synced();
+
+                {
+                    let mut devices = self.paired_devices.write().await;
+                    devices.insert(device.id, device.clone());
+                }
+
+                self.sync_engine
+                    .runtime()
+                    .register_device_alias(device.id.to_string(), pid.clone())
+                    .await;
+
+                if let Err(e) = self.sync_repository.save_paired_device(&device).await {
+                    warn!(error = %e, "Failed to persist newly paired peer in SQLite");
+                }
+                synced_device_id = Some(device.id);
+            }
+        }
+
         info!(address = %clean_addr, "Connected peer via Iroh");
+
+        if let Some(dev_id) = synced_device_id {
+            if let Err(e) = self.sync_with_device(dev_id).await {
+                debug!(error = %e, "Initial sync with newly paired device deferred/non-fatal");
+            }
+        }
+
         Ok(format!("Connected to peer: {clean_addr}"))
     }
 

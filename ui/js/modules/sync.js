@@ -3,6 +3,8 @@
  * P2P synchronization, device pairing, and Iroh QUIC peer connections.
  */
 
+import { copyWithToast, copyText } from './clipboard.js';
+
 export const syncMethods = {
     async loadSyncView() {
         try {
@@ -12,9 +14,17 @@ export const syncMethods = {
                 if (deviceIdEl) {
                     if (pairingInfo.ticket) {
                         window._currentPairingTicket = pairingInfo.ticket;
-                        deviceIdEl.textContent = `Ticket: ${pairingInfo.ticket}`;
+                        if (deviceIdEl.tagName === 'INPUT') {
+                            deviceIdEl.value = pairingInfo.ticket;
+                        } else {
+                            deviceIdEl.textContent = `Ticket: ${pairingInfo.ticket}`;
+                        }
                     } else {
-                        deviceIdEl.textContent = `PIN: ${pairingInfo.pin}`;
+                        if (deviceIdEl.tagName === 'INPUT') {
+                            deviceIdEl.value = `PIN: ${pairingInfo.pin}`;
+                        } else {
+                            deviceIdEl.textContent = `PIN: ${pairingInfo.pin}`;
+                        }
                     }
                 }
                 const pinEl = document.getElementById('sync-pairing-pin');
@@ -78,12 +88,11 @@ export const syncMethods = {
             this.showToast('No active pairing ticket available', 'warning');
             return;
         }
-        const copied = await this.copyText(ticket);
-        if (copied) {
-            this.showToast('Pairing ticket copied to clipboard!', 'success');
-        } else {
-            this.showToast('Failed to copy ticket', 'error');
-        }
+        await copyWithToast({
+            text: ticket,
+            label: 'pairing ticket',
+            showToast: (m, k) => this.showToast(m, k)
+        });
     },
 
     async syncWithDevice(deviceId) {
