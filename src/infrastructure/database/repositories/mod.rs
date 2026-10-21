@@ -39,6 +39,12 @@ pub fn parse_format(s: &str) -> AudioFormat {
     }
 }
 
+pub fn parse_datetime(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::*;
@@ -104,10 +110,4 @@ mod helper_tests {
         assert!(dt.timestamp() >= before);
         assert!(dt.timestamp() <= after);
     }
-}
-
-pub fn parse_datetime(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
 }

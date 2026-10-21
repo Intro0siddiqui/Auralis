@@ -144,27 +144,30 @@ impl NetworkRuntime {
             return Ok(0);
         };
 
-        let conn = db
-            .connection()
-            .map_err(|e| NetworkError::ConnectionError(e.to_string()))?;
+        let pairs: Vec<(String, String)> = {
+            let conn = db
+                .connection()
+                .map_err(|e| NetworkError::ConnectionError(e.to_string()))?;
 
-        let mut stmt = conn
-            .prepare("SELECT id, peer_id FROM paired_devices WHERE peer_id IS NOT NULL")
-            .map_err(|e| NetworkError::ConnectionError(e.to_string()))?;
+            let mut stmt = conn
+                .prepare("SELECT id, peer_id FROM paired_devices WHERE peer_id IS NOT NULL")
+                .map_err(|e| NetworkError::ConnectionError(e.to_string()))?;
 
-        let rows = stmt
-            .query_map([], |row| {
-                let id: String = row.get(0)?;
-                let pid: String = row.get(1)?;
-                Ok((id, pid))
-            })
-            .map_err(|e| NetworkError::ConnectionError(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let pid: String = row.get(1)?;
+                    Ok((id, pid))
+                })
+                .map_err(|e| NetworkError::ConnectionError(e.to_string()))?;
 
-        let mut count = 0;
+            rows.flatten().collect()
+        };
+
+        let count = pairs.len();
         let mut map = self.alias_map.write().await;
-        for row in rows.flatten() {
-            map.insert(row.0, row.1);
-            count += 1;
+        for (id, pid) in pairs {
+            map.insert(id, pid);
         }
 
         debug!(hydrated = count, "Hydrated device aliases from SQLite");
