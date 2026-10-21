@@ -175,14 +175,10 @@ impl SyncService {
 
         for device in &devices {
             if let Some(peer_str) = &device.peer_id {
-                if let Ok(pid) = peer_str.parse::<libp2p::PeerId>() {
-                    self.sync_engine
-                        .runtime()
-                        .register_device_alias(device.id.to_string(), pid)
-                        .await;
-                } else {
-                    warn!(device_id = %device.id, peer_id = %peer_str, "Invalid persisted peer_id; skipping hydrate");
-                }
+                self.sync_engine
+                    .runtime()
+                    .register_device_alias(device.id.to_string(), peer_str.clone())
+                    .await;
             }
         }
 
@@ -362,12 +358,10 @@ impl SyncService {
         // Ensure alias map is warmed from persisted peer_id (HIGH fix: survives restarts)
         // If device has a persisted peer_id, make sure the in-memory map has it.
         if let Some(peer_str) = &device.peer_id {
-            if let Ok(pid) = peer_str.parse::<libp2p::PeerId>() {
-                self.sync_engine
-                    .runtime()
-                    .register_device_alias(device_id.to_string(), pid)
-                    .await;
-            }
+            self.sync_engine
+                .runtime()
+                .register_device_alias(device_id.to_string(), peer_str.clone())
+                .await;
         }
 
         // 3. Perform the actual request-response sync via libp2p
@@ -516,7 +510,6 @@ mod tests {
         SqliteSettingsRepository, SqliteSyncRepository,
     };
     use crate::infrastructure::database::Database;
-    use libp2p::identity::Keypair;
 
     #[tokio::test]
     async fn test_sync_service_init_warms_alias_map() {
@@ -535,11 +528,11 @@ mod tests {
             .set_persistent_store(db_arc.clone())
             .await;
 
-        let peer_id = Keypair::generate_ed25519().public().to_peer_id();
+        let peer_id = iroh::SecretKey::generate().public().to_string();
         let device = PairedDevice::with_peer_id(
             "Paired Phone".to_string(),
             DeviceType::Mobile,
-            peer_id.to_string(),
+            peer_id.clone(),
         );
 
         sync_repo.save_paired_device(&device).await.unwrap();
@@ -573,11 +566,11 @@ mod tests {
             .set_persistent_store(db_arc.clone())
             .await;
 
-        let peer_id = Keypair::generate_ed25519().public().to_peer_id();
+        let peer_id = iroh::SecretKey::generate().public().to_string();
         let device = PairedDevice::with_peer_id(
             "Paired Laptop".to_string(),
             DeviceType::Desktop,
-            peer_id.to_string(),
+            peer_id.clone(),
         );
 
         sync_repo.save_paired_device(&device).await.unwrap();

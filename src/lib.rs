@@ -89,7 +89,7 @@ impl AuralisApp {
                     tracing::error!(error = %e, "Failed to initialize database");
                 }
 
-                // Initialize P2P networking (libp2p mDNS discovery)
+                // Initialize P2P networking (Iroh QUIC transport & discovery)
                 if let Err(e) = Self::init_network(&app_handle) {
                     tracing::error!(error = %e, "Failed to initialize network");
                 }
@@ -352,12 +352,26 @@ impl AuralisApp {
         Ok(())
     }
 
-    /// Initialize P2P networking: starts libp2p mDNS discovery so this node
-    /// is advertised on the LAN and can discover + dial other Auralis devices.
+    /// Initialize P2P networking: starts Iroh QUIC transport & discovery so this node
+    /// is reachable via ticket or NodeId across local networks and relays.
     fn init_network(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-        info!("Initializing P2P network");
+        info!("Initializing P2P network (Iroh QUIC transport)");
 
-        let discovery = crate::infrastructure::network::Discovery::new(0);
+        let db = app_handle
+            .try_state::<Database>()
+            .map(|state| state.inner().clone());
+
+        let secret_key = if let Some(ref db) = db {
+            db.get_or_create_node_secret_key().ok()
+        } else {
+            None
+        };
+
+        let discovery = match secret_key {
+            Some(key) => crate::infrastructure::network::Discovery::with_secret_key(key, 0),
+            None => crate::infrastructure::network::Discovery::new(0),
+        };
+
         tauri::async_runtime::block_on(discovery.start())
             .map_err(|e| format!("Failed to start network discovery: {e}"))?;
 

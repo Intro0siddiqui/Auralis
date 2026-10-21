@@ -34,8 +34,8 @@ pub struct PairedDevice {
     /// Shared library version for conflict detection
     pub library_version: u64,
 
-    /// Persisted libp2p PeerId string for this device (if known).
-    /// Bridges the UUID `id` (used by the app) to the network's `PeerId`
+    /// Persisted Iroh NodeId or ticket string for this device (if known).
+    /// Bridges the UUID `id` (used by the app) to the network's Iroh `NodeId`
     /// so aliases survive restarts. `None` until the device is discovered
     /// or explicitly linked via `register_device_alias`.
     #[serde(default)]
