@@ -132,6 +132,11 @@ impl NetworkRuntime {
         *store = Some(db);
     }
 
+    /// Access the attached persistent SQLite database if available
+    pub async fn alias_db(&self) -> Option<Arc<Database>> {
+        self.alias_db.read().await.clone()
+    }
+
     /// Hydrate the in-memory alias map from persisted database rows
     pub async fn hydrate_aliases(&self) -> Result<usize, NetworkError> {
         let db_opt = { self.alias_db.read().await.clone() };
@@ -341,11 +346,18 @@ async fn handle_incoming_sync_connection(
                 if let Ok(req) = serde_json::from_slice::<SyncRequest>(&bytes) {
                     info!(
                         remote = %conn.remote_id(),
-                        payload_type = ?req.payload.get("type"),
                         "Received P2P sync payload via Iroh"
                     );
+
+                    let db_opt = runtime.alias_db().await;
+                    let applied = if let Some(db) = db_opt {
+                        apply_sync_payload(&req.payload, &db)
+                    } else {
+                        0
+                    };
+
                     let resp = SyncResponse::Ack {
-                        message: "Sync payload received and queued".to_string(),
+                        message: format!("Sync payload processed: {applied} items reconciled"),
                     };
                     if let Ok(resp_bytes) = serde_json::to_vec(&resp) {
                         let _ = send.write_all(&resp_bytes).await;
@@ -360,6 +372,126 @@ async fn handle_incoming_sync_connection(
             }
         }
     }
+}
+
+/// Reconcile incoming sync payload into local SQLite database
+pub fn apply_sync_payload(payload: &serde_json::Value, db: &Database) -> usize {
+    let Ok(conn) = db.connection() else {
+        return 0;
+    };
+
+    let items = if let Some(items) = payload.get("items").and_then(|v| v.as_array()) {
+        items.clone()
+    } else if let Some(changes) = payload.get("changes").and_then(|v| v.as_array()) {
+        changes.clone()
+    } else {
+        vec![payload.clone()]
+    };
+
+    let mut applied = 0;
+    for item in items {
+        if let Some(sub_changes) = item.get("changes").and_then(|v| v.as_array()) {
+            for c in sub_changes {
+                if apply_single_change(c, &conn) {
+                    applied += 1;
+                }
+            }
+        } else if apply_single_change(&item, &conn) {
+            applied += 1;
+        }
+    }
+
+    debug!(applied, "Applied incoming sync changes to database");
+    applied
+}
+
+fn apply_single_change(change: &serde_json::Value, conn: &rusqlite::Connection) -> bool {
+    let entity = change.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+    let payload = change.get("payload").unwrap_or(change);
+    let id = change
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("id").and_then(|v| v.as_str()))
+        .unwrap_or("");
+
+    if entity == "track" || (!id.is_empty() && payload.get("title").is_some()) {
+        let title = payload
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Title");
+        let artist = payload
+            .get("artist")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Artist");
+        let album = payload
+            .get("album")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Album");
+        let duration = payload
+            .get("duration_secs")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let format = payload
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("mp3");
+        let source_url = payload.get("source_url").and_then(|v| v.as_str());
+        let file_path = payload
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("sync://{}", id));
+
+        let res = conn.execute(
+            "INSERT INTO tracks (id, title, artist, album, duration_secs, file_path, format, source_url, date_added)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                artist = excluded.artist,
+                album = excluded.album,
+                duration_secs = excluded.duration_secs",
+            rusqlite::params![
+                id,
+                title,
+                artist,
+                album,
+                duration,
+                file_path,
+                format,
+                source_url,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        );
+        return res.is_ok();
+    } else if entity == "playlist" {
+        let name = payload
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Shared Playlist");
+        let desc = payload
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let track_ids = payload
+            .get("track_ids")
+            .and_then(|v| v.as_str())
+            .unwrap_or("[]");
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let res = conn.execute(
+            "INSERT INTO playlists (id, name, description, created_at, updated_at, track_ids)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                updated_at = excluded.updated_at,
+                track_ids = excluded.track_ids",
+            rusqlite::params![id, name, desc, now, now, track_ids],
+        );
+        return res.is_ok();
+    }
+
+    false
 }
 
 /// Sync engine coordinating P2P library and state synchronization over Iroh QUIC streams.
@@ -602,6 +734,58 @@ mod tests {
 
         let resolved_new = runtime.resolve_peer_id(&device_id).await;
         assert_eq!(resolved_new, Some(new_peer_id));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_apply_sync_payload_reconciles_tracks_and_playlists() {
+        use uuid::Uuid;
+
+        let db_path =
+            std::env::temp_dir().join(format!("test_auralis_net_apply_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).unwrap();
+        db.run_migrations().unwrap();
+
+        let track_id = Uuid::new_v4().to_string();
+        let payload = serde_json::json!({
+            "changes": [
+                {
+                    "entity": "track",
+                    "id": track_id,
+                    "payload": {
+                        "title": "Synced Symphony",
+                        "artist": "QUIC Ensemble",
+                        "album": "Iroh Sessions",
+                        "duration_secs": 240,
+                        "format": "m4a"
+                    }
+                },
+                {
+                    "entity": "playlist",
+                    "id": Uuid::new_v4().to_string(),
+                    "payload": {
+                        "name": "P2P Favorites",
+                        "description": "Exchanged over Iroh",
+                        "track_ids": "[]"
+                    }
+                }
+            ]
+        });
+
+        let applied = apply_sync_payload(&payload, &db);
+        assert_eq!(applied, 2);
+
+        // Verify tracks table contains the reconciled track
+        let conn = db.connection().unwrap();
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM tracks WHERE id = ?1",
+                rusqlite::params![track_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "Synced Symphony");
 
         let _ = std::fs::remove_file(&db_path);
     }

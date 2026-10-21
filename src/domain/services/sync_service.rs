@@ -340,7 +340,7 @@ impl SyncService {
             warn!(device_id = %device_id, error = %e, "Failed to connect to peer, attempting sync anyway");
         }
 
-        // 2. Enqueue our pending changes into the SyncEngine queue
+        // 2. Enqueue our pending changes (or full library catalog) into the SyncEngine queue
         {
             let pending = self.pending_changes.read().await;
             if !pending.is_empty() {
@@ -353,6 +353,39 @@ impl SyncService {
                     })).collect::<Vec<_>>(),
                 });
                 self.sync_engine.enqueue_sync_payload(payload);
+            } else if let Some(db) = self.sync_engine.runtime().alias_db().await {
+                if let Ok(conn) = db.connection() {
+                    if let Ok(mut stmt) = conn.prepare(
+                        "SELECT id, title, artist, album, duration_secs, format, source_url FROM tracks LIMIT 500",
+                    ) {
+                        let tracks: Vec<serde_json::Value> = stmt
+                            .query_map([], |row| {
+                                Ok(serde_json::json!({
+                                    "id": row.get::<_, String>(0)?,
+                                    "title": row.get::<_, String>(1)?,
+                                    "artist": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                                    "album": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                                    "duration_secs": row.get::<_, i64>(4)?,
+                                    "format": row.get::<_, String>(5)?,
+                                    "source_url": row.get::<_, Option<String>>(6)?,
+                                }))
+                            })
+                            .map(|iter| iter.flatten().collect())
+                            .unwrap_or_default();
+
+                        if !tracks.is_empty() {
+                            let payload = serde_json::json!({
+                                "changes": tracks.into_iter().map(|t| serde_json::json!({
+                                    "type": "created",
+                                    "entity": "track",
+                                    "id": t["id"].clone(),
+                                    "payload": t,
+                                })).collect::<Vec<_>>(),
+                            });
+                            self.sync_engine.enqueue_sync_payload(payload);
+                        }
+                    }
+                }
             }
         }
 
