@@ -2,7 +2,7 @@
 //!
 //! Manages SQLite database connections and initialization.
 
-use rusqlite::{Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
@@ -175,6 +175,13 @@ impl Database {
                     data TEXT NOT NULL
                 );
 
+                -- Node identity table (single row: id = 1)
+                CREATE TABLE IF NOT EXISTS node_identity (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    secret_key BLOB NOT NULL,
+                    node_id TEXT NOT NULL
+                );
+
                 -- Indexes for performance
                 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
                 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
@@ -201,7 +208,62 @@ impl Database {
         );
         // Ensure peer_id column exists for device alias persistence (HIGH deficiency fix)
         let _ = connection.execute("ALTER TABLE paired_devices ADD COLUMN peer_id TEXT", []);
+        // Ensure node_identity table exists in case database was already created
+        let _ = connection.execute(
+            "CREATE TABLE IF NOT EXISTS node_identity (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                secret_key BLOB NOT NULL,
+                node_id TEXT NOT NULL
+            )",
+            [],
+        );
         Ok(())
+    }
+
+    /// Retrieve the persistent Iroh node secret key, or generate and store one if it does not exist.
+    ///
+    /// This guarantees the node's `NodeId` never drifts on app restart.
+    pub fn get_or_create_node_secret_key(&self) -> Result<iroh::SecretKey, DatabaseError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|e| DatabaseError::ConnectionError(format!("Mutex poisoned: {e}")))?;
+
+        let mut stmt = conn
+            .prepare("SELECT secret_key FROM node_identity WHERE id = 1")
+            .map_err(|e| {
+                DatabaseError::QueryError(format!("Failed to prepare node_identity query: {e}"))
+            })?;
+
+        let existing_key: Option<Vec<u8>> = stmt
+            .query_row([], |row| row.get(0))
+            .optional()
+            .map_err(|e| {
+                DatabaseError::QueryError(format!("Failed to query node_identity: {e}"))
+            })?;
+
+        if let Some(bytes) = existing_key {
+            let key_array: [u8; 32] = bytes.try_into().map_err(|_| {
+                DatabaseError::QueryError(
+                    "Invalid secret_key length in node_identity (expected 32 bytes)".to_string(),
+                )
+            })?;
+            return Ok(iroh::SecretKey::from_bytes(&key_array));
+        }
+
+        // Generate a new key and persist it
+        let secret_key = iroh::SecretKey::generate();
+        let secret_bytes = secret_key.to_bytes();
+        let node_id = secret_key.public().to_string();
+
+        conn.execute(
+            "INSERT INTO node_identity (id, secret_key, node_id) VALUES (1, ?1, ?2)",
+            params![&secret_bytes[..], &node_id],
+        )
+        .map_err(|e| DatabaseError::QueryError(format!("Failed to persist node_identity: {e}")))?;
+
+        info!(node_id = %node_id, "Generated and stored persistent Iroh node identity");
+        Ok(secret_key)
     }
 
     /// Get a guard for the connection. Note: blocks the current thread.
@@ -252,4 +314,99 @@ pub enum DatabaseError {
 
     #[error("IO error: {0}")]
     IoError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn test_node_identity_persistence_and_retrieval() {
+        let db_path =
+            std::env::temp_dir().join(format!("test_auralis_node_id_{}.db", Uuid::new_v4()));
+        let db = Database::new(&db_path).expect("failed to create database");
+        db.run_migrations().expect("failed to run migrations");
+
+        // First call: generates and stores new key
+        let key1 = db
+            .get_or_create_node_secret_key()
+            .expect("first key generation failed");
+        let node_id1 = key1.public().to_string();
+        assert!(!node_id1.is_empty());
+
+        // Second call: retrieves existing key
+        let key2 = db
+            .get_or_create_node_secret_key()
+            .expect("second key retrieval failed");
+        assert_eq!(key1.to_bytes(), key2.to_bytes());
+        assert_eq!(node_id1, key2.public().to_string());
+
+        // Close and reopen database: verifies persistence across restarts
+        drop(db);
+        let reopened_db = Database::new(&db_path).expect("failed to reopen database");
+        reopened_db
+            .run_migrations()
+            .expect("failed to run migrations on reopen");
+        let key3 = reopened_db
+            .get_or_create_node_secret_key()
+            .expect("third key retrieval failed");
+
+        assert_eq!(key1.to_bytes(), key3.to_bytes());
+        assert_eq!(node_id1, key3.public().to_string());
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_node_identity_table_single_row_constraint() {
+        let db_path = std::env::temp_dir().join(format!(
+            "test_auralis_node_id_constraint_{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::new(&db_path).expect("failed to create database");
+        db.run_migrations().expect("failed to run migrations");
+
+        let _ = db
+            .get_or_create_node_secret_key()
+            .expect("key generation failed");
+
+        // Attempting to insert a row with id != 1 must violate CHECK constraint
+        let conn = db.connection().expect("connection guard failed");
+        let result = conn.execute(
+            "INSERT INTO node_identity (id, secret_key, node_id) VALUES (2, X'00', 'invalid')",
+            [],
+        );
+        assert!(
+            result.is_err(),
+            "CHECK (id = 1) constraint must reject id = 2"
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_node_identity_corrupted_secret_key_length() {
+        let db_path = std::env::temp_dir().join(format!(
+            "test_auralis_node_id_corrupt_{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::new(&db_path).expect("failed to create database");
+        db.run_migrations().expect("failed to run migrations");
+
+        // Insert corrupt secret key (< 32 bytes)
+        {
+            let conn = db.connection().expect("connection guard failed");
+            conn.execute(
+                "INSERT INTO node_identity (id, secret_key, node_id) VALUES (1, X'1234', 'short')",
+                [],
+            )
+            .expect("failed to insert corrupt key");
+        }
+
+        let result = db.get_or_create_node_secret_key();
+        assert!(result.is_err(), "Must error on invalid key length");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 }

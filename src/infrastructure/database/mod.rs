@@ -5,5 +5,5 @@
 mod connection;
 pub mod repositories;
 
-pub use connection::Database;
+pub use connection::{Database, DatabaseError};
 pub use repositories::*;

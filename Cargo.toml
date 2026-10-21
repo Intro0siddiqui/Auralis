@@ -69,6 +69,9 @@ rand = "0.10"
 # `macros` enables the NetworkBehaviour derive; `json` enables the serde_json
 # request-response codec for sync payload transfer.
 libp2p = { version = "0.56", features = ["tcp", "mdns", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "json"] }
+iroh = { version = "0.98", default-features = false, features = ["tls-ring", "portmapper"] }
+iroh-blobs = { version = "0.100", default-features = false, features = ["fs-store"] }
+blake3 = "1"
 
 # QR code generation
 qrcode = "0.14"
