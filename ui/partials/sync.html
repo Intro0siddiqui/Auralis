@@ -7,39 +7,52 @@
         </button>
     </div>
 
+    <!-- P2P Identity & QR Pairing Card -->
     <div class="card pairing-card neu-glass" style="padding: var(--space-5); margin-bottom: var(--space-4);">
         <div class="pairing-layout" style="display: flex; gap: var(--space-4); align-items: center; flex-wrap: wrap;">
-            <div class="card-artwork pairing-qr" id="sync-qr-container" style="width: 100px; height: 100px; display: flex; align-items: center; justify-content: center;">
+            <div class="card-artwork pairing-qr" id="sync-qr-container" style="width: 130px; height: 130px; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.06); border-radius: var(--radius-md); overflow: hidden;">
                 <i data-lucide="radio" style="width: 48px; height: 48px; color: var(--accent);"></i>
             </div>
             <div class="pairing-pin" style="flex: 1; min-width: 220px;">
-                <div class="settings-label" style="font-weight: var(--font-semibold); margin-bottom: var(--space-1);">P2P Sync Engine</div>
-                <div class="settings-description" style="color: var(--text-3); font-size: var(--text-xs); margin-bottom: var(--space-3);">
-                    Local mDNS peer discovery active. Devices on the same Wi-Fi network synchronize music libraries automatically.
+                <div class="settings-label" style="font-weight: var(--font-semibold); margin-bottom: var(--space-1); display: flex; align-items: center; gap: var(--space-2);">
+                    <span>Iroh P2P Engine</span>
+                    <span style="font-size: 10px; background: rgba(var(--accent-rgb, 100, 150, 255), 0.15); color: var(--accent); padding: 2px 6px; border-radius: 4px; font-weight: 600;">QUIC</span>
                 </div>
-                <div id="sync-device-id" class="input neu-inset" style="padding: var(--space-2) var(--space-3); font-family: monospace; font-size: var(--text-xs); color: var(--text-2);">
-                    Discovery active · LAN broadcast
+                <div class="settings-description" style="color: var(--text-3); font-size: var(--text-xs); margin-bottom: var(--space-2);">
+                    Scan the QR code from another Auralis device or copy your Endpoint Ticket to pair securely across local networks and relays.
                 </div>
+                <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-2);">
+                    <div id="sync-device-id" class="input neu-inset" style="flex: 1; padding: var(--space-2) var(--space-3); font-family: monospace; font-size: var(--text-xs); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                        Generating ticket...
+                    </div>
+                    <button class="btn btn-secondary neu btn-sm" id="btn-copy-ticket" onclick="window.Auralis.bridge.copyPairingTicket()" title="Copy Endpoint Ticket">
+                        <i data-lucide="copy" style="width: 14px; height: 14px;"></i> Copy
+                    </button>
+                </div>
+                <div id="sync-pairing-pin" style="font-size: var(--text-xs); color: var(--accent); font-weight: var(--font-semibold);"></div>
             </div>
         </div>
     </div>
 
+    <!-- Pair with Remote Device Card -->
     <div class="card neu-glass" style="padding: var(--space-4); margin-bottom: var(--space-6);">
-        <h4 style="font-size: var(--text-sm); font-weight: var(--font-semibold); margin-bottom: var(--space-2); color: var(--text-1);">Direct IP / Multiaddr Connect</h4>
-        <p style="font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-3);">Connect directly to a peer if local mDNS discovery is blocked by router AP isolation.</p>
+        <h4 style="font-size: var(--text-sm); font-weight: var(--font-semibold); margin-bottom: var(--space-1); color: var(--text-1);">Pair With Another Device</h4>
+        <p style="font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-3);">Paste the Endpoint Ticket or Ticket URL from another Auralis device to establish a direct QUIC connection.</p>
         <div style="display: flex; gap: var(--space-2);">
-            <input type="text" id="direct-peer-address" class="input neu-inset" placeholder="e.g. 192.168.1.50:4001 or /ip4/..." style="flex: 1;">
-            <button class="btn btn-secondary neu" onclick="window.Auralis.bridge.connectDirectPeer()">Connect</button>
+            <input type="text" id="direct-peer-address" class="input neu-inset" placeholder="Paste endpoint... or auralis://pair?ticket=..." style="flex: 1; font-family: monospace; font-size: var(--text-xs);">
+            <button class="btn btn-primary neu" onclick="window.Auralis.bridge.connectDirectPeer()">
+                <i data-lucide="link" style="width: 14px; height: 14px;"></i> Pair
+            </button>
         </div>
     </div>
 
-    <h3 class="section-title" style="font-size: var(--text-lg); margin-bottom: var(--space-3);">Discovered LAN Peers</h3>
+    <h3 class="section-title" style="font-size: var(--text-lg); margin-bottom: var(--space-3);">Paired Devices</h3>
 
     <div id="synced-devices-list" class="track-list">
         <div class="empty-state glass neu" style="padding: var(--space-6); text-align: center; border-radius: var(--radius-md);">
             <i data-lucide="wifi" style="width: 32px; height: 32px; color: var(--accent); margin-bottom: var(--space-2);"></i>
-            <h4 style="color: var(--text-1); font-size: var(--text-base); margin-bottom: var(--space-1);">Searching for nearby devices</h4>
-            <p style="color: var(--text-3); font-size: var(--text-xs);">Make sure other Auralis devices are connected to the same Wi-Fi network.</p>
+            <h4 style="color: var(--text-1); font-size: var(--text-base); margin-bottom: var(--space-1);">No paired devices</h4>
+            <p style="color: var(--text-3); font-size: var(--text-xs);">Scan the QR code or share your ticket to sync music libraries seamlessly.</p>
         </div>
     </div>
 </section>

@@ -1,6 +1,6 @@
 /**
  * Sync Module
- * P2P synchronization, device pairing, and LAN peer connections.
+ * P2P synchronization, device pairing, and Iroh QUIC peer connections.
  */
 
 export const syncMethods = {
@@ -10,11 +10,23 @@ export const syncMethods = {
             if (pairingInfo) {
                 const deviceIdEl = document.getElementById('sync-device-id');
                 if (deviceIdEl) {
-                    deviceIdEl.textContent = `Pairing PIN: ${pairingInfo.pin}`;
+                    if (pairingInfo.ticket) {
+                        window._currentPairingTicket = pairingInfo.ticket;
+                        deviceIdEl.textContent = `Ticket: ${pairingInfo.ticket}`;
+                    } else {
+                        deviceIdEl.textContent = `PIN: ${pairingInfo.pin}`;
+                    }
+                }
+                const pinEl = document.getElementById('sync-pairing-pin');
+                if (pinEl && pairingInfo.pin) {
+                    pinEl.textContent = `PIN: ${pairingInfo.pin}`;
                 }
                 const qrContainer = document.getElementById('sync-qr-container');
                 if (qrContainer && pairingInfo.qr_image) {
-                    qrContainer.innerHTML = `<img src="data:image/png;base64,${pairingInfo.qr_image}" alt="Pairing QR" style="width: 100%; height: 100%; object-fit: contain; border-radius: var(--radius-sm);">`;
+                    const src = pairingInfo.qr_image.startsWith('data:')
+                        ? pairingInfo.qr_image
+                        : `data:image/png;base64,${pairingInfo.qr_image}`;
+                    qrContainer.innerHTML = `<img src="${src}" alt="Pairing QR" style="width: 100%; height: 100%; object-fit: contain; border-radius: var(--radius-sm);">`;
                 }
             }
         } catch (e) {
@@ -32,7 +44,7 @@ export const syncMethods = {
                                 <i data-lucide="${d.device_type === 'mobile' ? 'smartphone' : 'laptop'}" style="width: 24px; height: 24px; color: var(--accent);"></i>
                                 <div>
                                     <div style="font-weight: var(--font-semibold); color: var(--text-1);">${this.escapeHtml(d.name)}</div>
-                                    <div style="font-size: var(--text-xs); color: var(--text-3);">${d.ip_address || 'LAN Peer'} · Status: ${d.status || 'paired'}</div>
+                                    <div style="font-size: var(--text-xs); color: var(--text-3); font-family: monospace;">${d.peer_id ? (d.peer_id.slice(0, 16) + '...') : (d.ip_address || 'P2P Peer')} · Status: ${d.status || 'paired'}</div>
                                 </div>
                             </div>
                             <div style="display: flex; gap: var(--space-2);">
@@ -49,7 +61,7 @@ export const syncMethods = {
                         <div class="empty-state glass neu" style="padding: var(--space-6); text-align: center; border-radius: var(--radius-md);">
                             <i data-lucide="wifi" style="width: 32px; height: 32px; color: var(--accent); margin-bottom: var(--space-2);"></i>
                             <h4 style="color: var(--text-1); font-size: var(--text-base); margin-bottom: var(--space-1);">No paired devices</h4>
-                            <p style="color: var(--text-3); font-size: var(--text-xs);">Use the pairing PIN above on another device to start sharing your library.</p>
+                            <p style="color: var(--text-3); font-size: var(--text-xs);">Scan the QR code or share your ticket to sync music libraries seamlessly.</p>
                         </div>
                     `;
                     if (window.lucide) window.lucide.createIcons();
@@ -57,6 +69,20 @@ export const syncMethods = {
             }
         } catch (e) {
             console.error('Failed to load paired devices:', e);
+        }
+    },
+
+    async copyPairingTicket() {
+        const ticket = window._currentPairingTicket;
+        if (!ticket) {
+            this.showToast('No active pairing ticket available', 'warning');
+            return;
+        }
+        const copied = await this.copyText(ticket);
+        if (copied) {
+            this.showToast('Pairing ticket copied to clipboard!', 'success');
+        } else {
+            this.showToast('Failed to copy ticket', 'error');
         }
     },
 
@@ -75,18 +101,18 @@ export const syncMethods = {
     async connectDirectPeer() {
         const input = document.getElementById('direct-peer-address');
         if (!input || !input.value.trim()) {
-            this.showToast('Please enter an IP:Port or Multiaddr', 'warning');
+            this.showToast('Please enter an Endpoint Ticket or URL', 'warning');
             return;
         }
         const address = input.value.trim();
-        this.showToast(`Connecting to ${address}...`, 'info');
+        this.showToast('Connecting to peer via Iroh QUIC...', 'info');
         try {
             const res = await this.invoke('connect_peer_address', { address });
-            this.showToast(res || 'Direct connection established!', 'success');
+            this.showToast(res || 'Peer connection established!', 'success');
             input.value = '';
             this.loadSyncView();
         } catch (err) {
-            this.showToast(`Direct connection failed: ${err}`, 'error');
+            this.showToast(`Peer connection failed: ${err}`, 'error');
         }
     },
 

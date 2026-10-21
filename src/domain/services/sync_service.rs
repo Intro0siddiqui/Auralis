@@ -207,8 +207,9 @@ impl SyncService {
             .await
             .map_err(|e| SyncError::SettingsError(e.to_string()))?;
 
-        // Generate pairing info
-        let pairing_info = PairingInfo::generate().map_err(SyncError::QrError)?;
+        // Generate pairing info with current Iroh EndpointTicket
+        let ticket = self.sync_engine.runtime().ticket().await;
+        let pairing_info = PairingInfo::generate(ticket).map_err(SyncError::QrError)?;
 
         // Store active pairing
         {
@@ -216,7 +217,7 @@ impl SyncService {
             *active = Some(pairing_info.clone());
         }
 
-        info!("Pairing initiated (PIN not logged)");
+        info!("Pairing initiated with Iroh endpoint ticket");
         Ok(pairing_info)
     }
 
@@ -455,7 +456,7 @@ impl SyncService {
         }
     }
 
-    /// Connect directly to a peer via Multiaddr or IP:Port (fallback when mDNS is unavailable)
+    /// Connect directly to a peer via EndpointTicket, ticket URL, or direct address
     pub async fn connect_address(&self, address: &str) -> Result<String, SyncError> {
         let addr = address.trim();
         if addr.is_empty() {
@@ -464,21 +465,21 @@ impl SyncService {
             ));
         }
 
-        let multiaddr_str = if addr.starts_with('/') {
-            addr.to_string()
-        } else if let Some((ip, port)) = addr.split_once(':') {
-            format!("/ip4/{ip}/tcp/{port}")
+        // Extract ticket parameter if provided as URL (e.g. auralis://pair?ticket=endpoint...&pin=...)
+        let clean_addr = if let Some(idx) = addr.find("ticket=") {
+            let after = &addr[idx + 7..];
+            after.split('&').next().unwrap_or(after)
         } else {
-            format!("/ip4/{addr}/tcp/4001")
+            addr
         };
 
         self.sync_engine
-            .connect(&multiaddr_str)
+            .connect(clean_addr)
             .await
             .map_err(|e| SyncError::NetworkError(e.to_string()))?;
 
-        info!(multiaddr = %multiaddr_str, "Connected direct P2P address");
-        Ok(format!("Direct connection established to {multiaddr_str}"))
+        info!(address = %clean_addr, "Connected peer via Iroh");
+        Ok(format!("Connected to peer: {clean_addr}"))
     }
 
     /// Clear all pending changes

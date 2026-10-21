@@ -233,17 +233,21 @@ pub struct PairingInfo {
     /// QR code as base64 image
     pub qr_image: String,
 
+    /// Iroh EndpointTicket string for direct QUIC & relay connectivity
+    #[serde(default)]
+    pub ticket: Option<String>,
+
     /// Expiration time
     pub expires_at: DateTime<Utc>,
 }
 
 impl PairingInfo {
-    /// Generate a new pairing request.
+    /// Generate a new pairing request with an optional Iroh endpoint ticket.
     ///
     /// Fails instead of panicking when the QR payload cannot be encoded
     /// (oversize data) or the PNG encoder errors — a panic here would kill
     /// the pairing caller mid-flow.
-    pub fn generate() -> Result<Self, String> {
+    pub fn generate(ticket: Option<String>) -> Result<Self, String> {
         use rand::prelude::*;
 
         let mut rng = rand::rng();
@@ -251,14 +255,18 @@ impl PairingInfo {
             .map(|_| rng.random_range(0..10).to_string())
             .collect();
 
-        let qr_data = format!("auralis://pair?pin={}", pin);
+        let qr_data = match &ticket {
+            Some(t) => format!("auralis://pair?ticket={t}&pin={pin}"),
+            None => format!("auralis://pair?pin={pin}"),
+        };
         let qr_image = Self::generate_qr_code(&qr_data)?;
 
         Ok(Self {
             pin,
             qr_data,
             qr_image,
-            expires_at: Utc::now() + chrono::Duration::minutes(5),
+            ticket,
+            expires_at: Utc::now() + chrono::Duration::minutes(15),
         })
     }
 
@@ -308,10 +316,15 @@ mod tests {
 
     #[test]
     fn test_pairing_info() {
-        let info = PairingInfo::generate().expect("pairing generation must succeed");
+        let info = PairingInfo::generate(None).expect("pairing generation must succeed");
         assert_eq!(info.pin.len(), 6);
         assert!(info.pin.chars().all(|c| c.is_ascii_digit()));
         assert!(!info.is_expired());
+
+        let ticket_info = PairingInfo::generate(Some("endpoint12345".to_string()))
+            .expect("pairing generation with ticket must succeed");
+        assert!(ticket_info.qr_data.contains("ticket=endpoint12345"));
+        assert_eq!(ticket_info.ticket, Some("endpoint12345".to_string()));
     }
 
     #[test]
