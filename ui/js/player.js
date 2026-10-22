@@ -590,6 +590,9 @@ class PlayerController {
         this.updatePlayButton();
         if (window._auralisStreamAudio) {
             try {
+                if (window._auralisStreamAudio.ended || (window._auralisStreamAudio.duration && window._auralisStreamAudio.currentTime >= window._auralisStreamAudio.duration - 0.5)) {
+                    window._auralisStreamAudio.currentTime = 0;
+                }
                 await window._auralisStreamAudio.play();
             } catch (e) {
                 console.warn('Stream resume failed:', e);
@@ -600,6 +603,13 @@ class PlayerController {
         // If we have a current track, resume is correct — it preserves position.
         if (this.currentTrack && this.currentTrack.id) {
             const resumeTrackId = this.currentTrack.id;
+            // If the track already reached the end, replay it from 0:00 instead of resuming at EOF
+            if (this.duration > 0 && this.progress >= this.duration - 1.0) {
+                this.progress = 0;
+                this.updateProgressUI();
+                await window.Auralis.bridge.playTrack(resumeTrackId);
+                return;
+            }
             this.resumeInFlight = true;
             try {
                 // Arm the proof-of-life check *before* the invoke: the `resume`
@@ -628,6 +638,12 @@ class PlayerController {
                 // left set would disable togglePlay() for the rest of the session.
                 this.resumeInFlight = false;
             }
+            return;
+        }
+        if (this.currentTrack && !this.currentTrack.id) {
+            console.warn('Stream track without active stream audio cannot be resumed');
+            this.isPlaying = false;
+            this.updatePlayButton();
             return;
         }
         // No track loaded (fresh start / "No track playing") — resume has nothing

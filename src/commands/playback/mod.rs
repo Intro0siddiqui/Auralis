@@ -126,14 +126,17 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
             // guard), fall back to a short MIN_GUARD for unknown-duration
             // streams. This also covers the case where `duration` is zero
             // because metadata was missing.
-            let track_just_ended = was_playing && is_empty && !player.is_recently_seeking() && {
+            let track_just_ended = was_playing && !player.is_recently_seeking() && {
                 let dur = player.duration().await;
                 let elapsed_opt = player.play_started_elapsed().await;
                 if !dur.is_zero() {
                     let pos = player.current_position().await;
                     // Require elapsed_opt.is_some() to avoid false trigger after stop()
                     // zeroes position (0 >= 0 for dur <= 350ms would otherwise be true).
-                    (elapsed_opt.is_some() && pos >= dur.saturating_sub(TRACK_END_EPSILON))
+                    (is_empty
+                        && elapsed_opt.is_some()
+                        && pos >= dur.saturating_sub(TRACK_END_EPSILON))
+                        || (elapsed_opt.is_some_and(|e| e >= dur + Duration::from_millis(500)))
                         || (dur <= Duration::from_millis(1500)
                             && elapsed_opt.is_some_and(|e| {
                                 e + TRACK_END_EPSILON >= dur
@@ -149,7 +152,7 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                     // Unknown duration: require at least MIN_GUARD to filter
                     // the empty-transient after append, but allow sub-1500 ms
                     // clips to advance.
-                    elapsed_opt.is_some_and(|e| e > TRACK_END_MIN_GUARD)
+                    is_empty && elapsed_opt.is_some_and(|e| e > TRACK_END_MIN_GUARD)
                 }
             };
 
@@ -192,12 +195,14 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                         debug!(track_id = %track.id, "Auto-advanced to next track");
                     }
                     Ok(None) => {
+                        let _ = player.stop_at_end().await;
                         emit_state_changed(&app, &player).await;
                         background_service::stop_service();
                         info!("Queue exhausted; playback stopped");
                     }
                     Err(e) => {
                         warn!(error = %e, "Auto-advance failed");
+                        let _ = player.stop_at_end().await;
                         let msg = e.to_string();
                         let _ = app.emit("playback:error", &msg);
                         emit_state_changed(&app, &player).await;
@@ -403,7 +408,12 @@ pub async fn resume(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<()
     let track = player.get_current_track().await;
     let preflight = preflight_audio_file(track.as_ref()).await;
     let strategy = choose_resume_strategy(is_playing, !is_empty, preflight.readable);
-    let pos_before = player.current_position().await;
+    let dur = player.duration().await;
+    let mut pos_before = player.current_position().await;
+    if !dur.is_zero() && pos_before + TRACK_END_EPSILON >= dur {
+        // Track completed — restarting from beginning on resume
+        pos_before = Duration::ZERO;
+    }
     let mut report = ResumeReport::new(
         track.as_ref(),
         strategy,

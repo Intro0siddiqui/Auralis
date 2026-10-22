@@ -1041,7 +1041,7 @@ export const downloadMethods = {
             audio.addEventListener('ended', () => {
                 if (window.Auralis && window.Auralis.player) {
                     window.Auralis.player.isPlaying = false;
-                    window.Auralis.player.progress = 0;
+                    window.Auralis.player.progress = window.Auralis.player.duration || (audio.duration && isFinite(audio.duration) ? audio.duration : 0);
                     window.Auralis.player.updatePlayButton();
                     window.Auralis.player.updateProgressUI();
                 }

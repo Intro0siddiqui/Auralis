@@ -629,6 +629,20 @@ impl AudioPlayer {
         Ok(())
     }
 
+    /// Stop playback when a track naturally reaches EOF, retaining the final position
+    /// (equal to track duration) so the UI shows the track has completed.
+    pub async fn stop_at_end(&self) -> Result<(), PlayerError> {
+        debug!("Stopping playback at track end");
+        if let Some(s) = self.sink.write().await.take() {
+            s.stop();
+        }
+        let dur = *self.track_duration.read().await;
+        *self.played.write().await = dur;
+        *self.play_anchor.write().await = None;
+        *self.play_started_at.write().await = None;
+        Ok(())
+    }
+
     /// Seek using rodio's native `try_seek` with fallback for unseekable MP3 bitstreams.
     ///
     /// Whether the seek had to *replace* the sink is recorded and readable with
@@ -888,6 +902,12 @@ impl AudioPlayer {
     async fn next_internal(&self, for_auto_advance: bool) -> Result<Option<Track>, PlayerError> {
         let queue = self.queue.read().await;
         if queue.is_empty() {
+            drop(queue);
+            if for_auto_advance {
+                self.stop_at_end().await?;
+            } else {
+                self.stop().await?;
+            }
             return Ok(None);
         }
 
@@ -929,7 +949,11 @@ impl AudioPlayer {
                 if shuffle {
                     self.shuffle_history.write().await.clear();
                 }
-                self.stop().await?;
+                if for_auto_advance {
+                    self.stop_at_end().await?;
+                } else {
+                    self.stop().await?;
+                }
                 Ok(None)
             }
         }
