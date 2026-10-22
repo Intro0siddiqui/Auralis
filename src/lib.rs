@@ -192,6 +192,7 @@ impl AuralisApp {
                 commands::sync::sync_with_device,
                 commands::sync::get_sync_status,
                 commands::sync::connect_peer_address,
+                commands::sync::download_synced_track,
                 // Settings commands
                 commands::settings::get_settings,
                 commands::settings::update_settings,
@@ -372,9 +373,10 @@ impl AuralisApp {
             None
         };
 
+        let port = 54521;
         let discovery = match secret_key {
-            Some(key) => crate::infrastructure::network::Discovery::with_secret_key(key, 0),
-            None => crate::infrastructure::network::Discovery::new(0),
+            Some(key) => crate::infrastructure::network::Discovery::with_secret_key(key, port),
+            None => crate::infrastructure::network::Discovery::new(port),
         };
 
         tauri::async_runtime::block_on(discovery.start())

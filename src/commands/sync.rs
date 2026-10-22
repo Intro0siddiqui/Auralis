@@ -9,7 +9,7 @@ use crate::infrastructure::database::Database;
 use crate::infrastructure::network::SyncEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 /// Pairing completion request (PIN entered on the pairing device).
@@ -105,4 +105,23 @@ pub async fn connect_peer_address(
         tracing::error!(error = %e, "Failed to connect to peer address");
         format!("Failed to connect: {e}")
     })
+}
+
+/// Download the audio file for a synced track from a paired device
+#[tauri::command]
+pub async fn download_synced_track(
+    app: AppHandle,
+    service: State<'_, SyncService>,
+    track_id: String,
+) -> Result<String, String> {
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dest_dir = app_data_dir.join("music");
+    tokio::fs::create_dir_all(&dest_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let local_path = service
+        .fetch_audio_for_track(&track_id, &dest_dir)
+        .await
+        .map_err(|e| format!("Failed to fetch track audio: {e}"))?;
+    Ok(local_path.to_string_lossy().to_string())
 }

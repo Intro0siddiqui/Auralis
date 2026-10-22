@@ -11,7 +11,7 @@ use crate::infrastructure::media::AudioPlayer;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -234,9 +234,39 @@ pub async fn play(
     info!(%track_id, ?queue_index, "Play command received");
 
     // Look up track from database
-    let track = lookup_track(track_id, &db)
+    let mut track = lookup_track(track_id, &db)
         .await
         .map_err(|e| format!("Failed to look up track: {e}"))?;
+
+    // If track is a remote sync placeholder (e.g. sync://<track_id>), fetch physical audio from peer on-demand
+    if track.file_path.starts_with("sync://") {
+        info!(%track_id, "Track has sync:// placeholder path; fetching physical audio from P2P peer...");
+        let sync_service = app.state::<crate::domain::services::SyncService>();
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let dest_dir = app_data_dir.join("music");
+        let _ = tokio::fs::create_dir_all(&dest_dir).await;
+
+        match sync_service
+            .fetch_audio_for_track(&track_id.to_string(), &dest_dir)
+            .await
+        {
+            Ok(local_path) => {
+                info!(
+                    ?local_path,
+                    "Successfully received P2P audio track; proceeding with playback"
+                );
+                track.file_path = local_path.to_string_lossy().to_string();
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Cannot play remote track: paired device is offline or audio not found ({e})"
+                ));
+            }
+        }
+    }
 
     // If queue index is provided, set it — but remember what it was.
     //

@@ -9,13 +9,33 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// ALPN protocol identifier for Auralis metadata catalog exchange
 pub const ALPN_SYNC: &[u8] = b"/auralis/sync/1";
+
+/// Parse an Iroh EndpointId from either standard base32 string or 64-character hex string
+pub fn parse_endpoint_id(s: &str) -> Option<EndpointId> {
+    let trimmed = s.trim();
+    if let Ok(endpoint_id) = EndpointId::from_str(trimmed) {
+        return Some(endpoint_id);
+    }
+    if let Ok(bytes) = hex::decode(trimmed) {
+        if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            if let Ok(endpoint_id) = EndpointId::from_bytes(&arr) {
+                return Some(endpoint_id);
+            }
+        }
+    }
+    None
+}
 
 /// Request payload for P2P sync
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,7 +170,9 @@ impl NetworkRuntime {
                 .map_err(|e| NetworkError::ConnectionError(e.to_string()))?;
 
             let mut stmt = conn
-                .prepare("SELECT id, peer_id FROM paired_devices WHERE peer_id IS NOT NULL")
+                .prepare(
+                    "SELECT id, CASE WHEN ip_address LIKE 'endpoint%' THEN ip_address ELSE peer_id END FROM paired_devices WHERE peer_id IS NOT NULL OR ip_address IS NOT NULL",
+                )
                 .map_err(|e| NetworkError::ConnectionError(e.to_string()))?;
 
             let rows = stmt
@@ -205,7 +227,7 @@ impl NetworkRuntime {
         let db_pid = if let Some(db) = db_opt {
             if let Ok(conn) = db.connection() {
                 let result: Result<String, _> = conn.query_row(
-                    "SELECT peer_id FROM paired_devices WHERE id = ?1 AND peer_id IS NOT NULL",
+                    "SELECT CASE WHEN ip_address LIKE 'endpoint%' THEN ip_address ELSE peer_id END FROM paired_devices WHERE id = ?1 AND (peer_id IS NOT NULL OR ip_address IS NOT NULL)",
                     rusqlite::params![device_id],
                     |row| row.get(0),
                 );
@@ -294,14 +316,46 @@ impl Discovery {
             "Starting Iroh QUIC P2P network endpoint"
         );
 
-        let ep = Endpoint::builder(presets::N0)
-            .secret_key(self.runtime.secret_key.clone())
-            .alpns(vec![ALPN_SYNC.to_vec(), iroh_blobs::ALPN.to_vec()])
-            .bind()
-            .await
-            .map_err(|e| {
-                NetworkError::ConnectionError(format!("Failed to bind Iroh endpoint: {e}"))
-            })?;
+        let ep = if self.runtime.listen_port() != 0 {
+            let bind_res = Endpoint::builder(presets::N0)
+                .secret_key(self.runtime.secret_key.clone())
+                .alpns(vec![ALPN_SYNC.to_vec(), iroh_blobs::ALPN.to_vec()])
+                .bind_addr(format!("0.0.0.0:{}", self.runtime.listen_port()))
+                .map_err(|e| NetworkError::ConnectionError(format!("Invalid bind address: {e}")))?
+                .bind()
+                .await;
+            match bind_res {
+                Ok(ep) => {
+                    info!(
+                        port = self.runtime.listen_port(),
+                        "Bound Iroh endpoint to configured port"
+                    );
+                    ep
+                }
+                Err(e) => {
+                    warn!(error = %e, "Configured port busy, falling back to OS ephemeral port");
+                    Endpoint::builder(presets::N0)
+                        .secret_key(self.runtime.secret_key.clone())
+                        .alpns(vec![ALPN_SYNC.to_vec(), iroh_blobs::ALPN.to_vec()])
+                        .bind()
+                        .await
+                        .map_err(|e| {
+                            NetworkError::ConnectionError(format!(
+                                "Failed to bind Iroh endpoint: {e}"
+                            ))
+                        })?
+                }
+            }
+        } else {
+            Endpoint::builder(presets::N0)
+                .secret_key(self.runtime.secret_key.clone())
+                .alpns(vec![ALPN_SYNC.to_vec(), iroh_blobs::ALPN.to_vec()])
+                .bind()
+                .await
+                .map_err(|e| {
+                    NetworkError::ConnectionError(format!("Failed to bind Iroh endpoint: {e}"))
+                })?
+        };
 
         self.runtime.set_endpoint(ep.clone()).await;
 
@@ -371,37 +425,281 @@ async fn handle_incoming_sync_connection(
     }
 
     while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-        match recv.read_to_end(1024 * 1024).await {
-            Ok(bytes) => {
-                runtime.record_bytes_received(bytes.len() as u64);
-                if let Ok(req) = serde_json::from_slice::<SyncRequest>(&bytes) {
-                    info!(
-                        remote = %conn.remote_id(),
-                        "Received P2P sync payload via Iroh"
-                    );
+        let runtime = runtime.clone();
+        let conn_holder = conn.clone();
+        tokio::spawn(async move {
+            let _conn_guard = conn_holder;
+            match recv.read_to_end(1024 * 1024).await {
+                Ok(bytes) => {
+                    runtime.record_bytes_received(bytes.len() as u64);
+                    if let Ok(req) = serde_json::from_slice::<SyncRequest>(&bytes) {
+                        if req.payload.get("action").and_then(|v| v.as_str()) == Some("fetch_audio")
+                        {
+                            handle_audio_fetch_request(req.payload, &mut send, &runtime).await;
+                            return;
+                        }
 
-                    let db_opt = runtime.alias_db().await;
-                    let applied = if let Some(db) = db_opt {
-                        apply_sync_payload(&req.payload, &db)
-                    } else {
-                        0
-                    };
+                        info!("Received P2P sync payload via Iroh");
 
-                    let resp = SyncResponse::Ack {
-                        message: format!("Sync payload processed: {applied} items reconciled"),
-                    };
-                    if let Ok(resp_bytes) = serde_json::to_vec(&resp) {
-                        let _ = send.write_all(&resp_bytes).await;
-                        let _ = send.finish();
-                        runtime.record_bytes_sent(resp_bytes.len() as u64);
+                        let db_opt = runtime.alias_db().await;
+                        let applied = if let Some(db) = db_opt {
+                            apply_sync_payload(&req.payload, &db)
+                        } else {
+                            0
+                        };
+
+                        let resp = SyncResponse::Ack {
+                            message: format!("Sync payload processed: {applied} items reconciled"),
+                        };
+                        if let Ok(resp_bytes) = serde_json::to_vec(&resp) {
+                            let _ = send.write_all(&resp_bytes).await;
+                            let _ = send.finish();
+                            runtime.record_bytes_sent(resp_bytes.len() as u64);
+                        }
                     }
                 }
+                Err(e) => {
+                    warn!(error = %e, "Failed to read incoming sync payload stream");
+                }
             }
+        });
+    }
+}
+
+/// Send a 4-byte length-prefixed JSON header over a QUIC SendStream
+async fn send_framed_header(
+    send: &mut iroh::endpoint::SendStream,
+    header: &serde_json::Value,
+) -> Result<(), std::io::Error> {
+    let header_bytes = serde_json::to_vec(header)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let len = header_bytes.len() as u32;
+    send.write_all(&len.to_be_bytes()).await?;
+    send.write_all(&header_bytes).await?;
+    Ok(())
+}
+
+/// Read a 4-byte length-prefixed JSON header from a QUIC RecvStream
+async fn read_framed_header(
+    recv: &mut iroh::endpoint::RecvStream,
+) -> Result<serde_json::Value, NetworkError> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf)
+        .await
+        .map_err(|e| NetworkError::TransferError(format!("Failed to read header length: {e}")))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > 64 * 1024 {
+        return Err(NetworkError::TransferError(
+            "Header frame too large".to_string(),
+        ));
+    }
+    let mut header_bytes = vec![0u8; len];
+    recv.read_exact(&mut header_bytes)
+        .await
+        .map_err(|e| NetworkError::TransferError(format!("Failed to read header frame: {e}")))?;
+    let val: serde_json::Value = serde_json::from_slice(&header_bytes)
+        .map_err(|e| NetworkError::TransferError(format!("Invalid header JSON: {e}")))?;
+    Ok(val)
+}
+
+/// Handle a remote peer requesting the physical audio file bytes for a track
+async fn handle_audio_fetch_request(
+    payload: serde_json::Value,
+    send: &mut iroh::endpoint::SendStream,
+    runtime: &Arc<NetworkRuntime>,
+) {
+    let track_id = match payload.get("track_id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => {
+            let err_header = serde_json::json!({
+                "status": "error",
+                "message": "Missing track_id in fetch_audio request",
+            });
+            let _ = send_framed_header(send, &err_header).await;
+            let _ = send.finish();
+            return;
+        }
+    };
+
+    let db_opt = runtime.alias_db().await;
+    let Some(db) = db_opt else {
+        let err_header = serde_json::json!({
+            "status": "error",
+            "message": "Database unavailable",
+        });
+        let _ = send_framed_header(send, &err_header).await;
+        let _ = send.finish();
+        return;
+    };
+
+    let track_info: Option<(String, String, String, Option<String>)> = {
+        if let Ok(conn) = db.connection() {
+            conn.query_row(
+                "SELECT file_path, format, title, album_art_path FROM tracks WHERE id = ?1",
+                rusqlite::params![track_id],
+                |row| {
+                    let fp: String = row.get(0)?;
+                    let fmt: String = row.get(1)?;
+                    let title: String = row.get(2)?;
+                    let art: Option<String> = row.get(3)?;
+                    Ok((fp, fmt, title, art))
+                },
+            )
+            .ok()
+        } else {
+            None
+        }
+    };
+
+    let Some((file_path, format, title, album_art_path)) = track_info else {
+        let err_header = serde_json::json!({
+            "status": "error",
+            "message": "Track not found in database",
+        });
+        let _ = send_framed_header(send, &err_header).await;
+        let _ = send.finish();
+        return;
+    };
+
+    if file_path.starts_with("sync://") {
+        let err_header = serde_json::json!({
+            "status": "error",
+            "message": "Track file is not stored locally on this peer",
+        });
+        let _ = send_framed_header(send, &err_header).await;
+        let _ = send.finish();
+        return;
+    }
+
+    let mut file = match tokio::fs::File::open(&file_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            let err_header = serde_json::json!({
+                "status": "error",
+                "message": format!("Cannot open audio file on disk: {e}"),
+            });
+            let _ = send_framed_header(send, &err_header).await;
+            let _ = send.finish();
+            return;
+        }
+    };
+
+    let file_len = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(e) => {
+            let err_header = serde_json::json!({
+                "status": "error",
+                "message": format!("Cannot read file metadata: {e}"),
+            });
+            let _ = send_framed_header(send, &err_header).await;
+            let _ = send.finish();
+            return;
+        }
+    };
+
+    let art_data: Option<(Vec<u8>, String)> = {
+        let candidate_path = album_art_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                let base = std::path::Path::new(&file_path);
+                for ext in ["jpg", "jpeg", "png", "webp"] {
+                    let side = base.with_extension(ext);
+                    if side.is_file() {
+                        return Some(side);
+                    }
+                }
+                None
+            });
+
+        if let Some(path) = candidate_path {
+            if let Ok(bytes) = tokio::fs::read(&path).await {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("jpg")
+                    .to_string();
+                Some((bytes, ext))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let (art_size, art_ext, art_bytes) = match art_data {
+        Some((bytes, ext)) => (bytes.len() as u64, ext, bytes),
+        None => (0u64, "jpg".to_string(), Vec::new()),
+    };
+
+    info!(track_id = %track_id, file_path = %file_path, size = file_len, art_size, "Streaming audio and artwork to P2P peer");
+
+    let header = serde_json::json!({
+        "status": "ok",
+        "size": file_len,
+        "format": format,
+        "title": title,
+        "art_size": art_size,
+        "art_ext": art_ext,
+    });
+
+    if let Err(e) = send_framed_header(send, &header).await {
+        warn!(error = %e, "Failed to send audio header frame to peer");
+        let _ = send.finish();
+        return;
+    }
+
+    if art_size > 0 && !art_bytes.is_empty() {
+        if let Err(e) = send.write_all(&art_bytes).await {
+            warn!(error = %e, "Failed to stream album art to peer");
+        } else {
+            runtime.record_bytes_sent(art_size);
+            info!(art_size, "Streamed album art sidecar to P2P peer");
+        }
+    }
+
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total_sent = 0u64;
+    loop {
+        let n = match tokio::io::AsyncReadExt::read(&mut file, &mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
             Err(e) => {
-                warn!(error = %e, "Failed to read incoming sync payload stream");
+                warn!(error = %e, track_id = %track_id, "Error reading audio file from disk during P2P streaming");
                 break;
             }
+        };
+        if let Err(e) = send.write_all(&buf[..n]).await {
+            warn!(error = %e, track_id = %track_id, "Error streaming audio chunk to P2P peer");
+            break;
         }
+        total_sent += n as u64;
+    }
+    runtime.record_bytes_sent(total_sent);
+    info!(copied = total_sent, track_id = %track_id, "Completed streaming audio file to peer");
+    let _ = send.finish();
+}
+
+/// Produce safe filenames without path traversal or invalid characters
+fn sanitize_filename(name: &str) -> String {
+    let filtered: String = name.chars().filter(|c| !c.is_control()).collect();
+    let cleaned: String = filtered
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().to_string();
+    if trimmed.is_empty() {
+        "track".to_string()
+    } else {
+        trimmed
     }
 }
 
@@ -587,8 +885,23 @@ impl SyncEngine {
             return Ok(());
         }
 
-        // Try parsing as raw EndpointId (Ed25519 public key)
-        if let Ok(endpoint_id) = EndpointId::from_str(peer_str) {
+        // Try parsing as <endpoint_id>@<ip>:<port>
+        if let Some((id_str, addr_str)) = peer_str.split_once('@') {
+            if let (Some(id), Ok(sock)) = (
+                parse_endpoint_id(id_str),
+                std::net::SocketAddr::from_str(addr_str.trim()),
+            ) {
+                let addr = EndpointAddr::new(id).with_ip_addr(sock);
+                debug!(endpoint_id = %addr.id, socket = %sock, "Connecting to peer via endpoint@ip:port");
+                ep.connect(addr, ALPN_SYNC).await.map_err(|e| {
+                    NetworkError::ConnectionError(format!("QUIC connect failed: {e}"))
+                })?;
+                return Ok(());
+            }
+        }
+
+        // Try parsing as raw EndpointId (base32 or hex)
+        if let Some(endpoint_id) = parse_endpoint_id(peer_str) {
             let addr = EndpointAddr::from(endpoint_id);
             debug!(endpoint_id = %endpoint_id, "Connecting to peer via EndpointId");
             ep.connect(addr, ALPN_SYNC)
@@ -619,7 +932,18 @@ impl SyncEngine {
         // Determine destination EndpointAddr
         let target_addr = if let Ok(ticket) = EndpointTicket::from_str(&resolved) {
             ticket.endpoint_addr().clone()
-        } else if let Ok(endpoint_id) = EndpointId::from_str(&resolved) {
+        } else if let Some((id_str, addr_str)) = resolved.split_once('@') {
+            if let (Some(id), Ok(sock)) = (
+                parse_endpoint_id(id_str),
+                std::net::SocketAddr::from_str(addr_str.trim()),
+            ) {
+                EndpointAddr::new(id).with_ip_addr(sock)
+            } else {
+                return Err(NetworkError::ConnectionError(format!(
+                    "Invalid endpoint@ip:port format: {resolved}"
+                )));
+            }
+        } else if let Some(endpoint_id) = parse_endpoint_id(&resolved) {
             EndpointAddr::from(endpoint_id)
         } else {
             return Err(NetworkError::ConnectionError(format!(
@@ -678,6 +1002,214 @@ impl SyncEngine {
                 "Peer rejected sync: {message}"
             ))),
         }
+    }
+
+    /// Fetch the physical audio file for a track from a remote P2P peer over QUIC
+    pub async fn fetch_track_audio(
+        &self,
+        peer: &str,
+        track_id: &str,
+        dest_dir: &std::path::Path,
+    ) -> Result<PathBuf, NetworkError> {
+        let resolved = self
+            .runtime
+            .resolve_peer_id(peer)
+            .await
+            .unwrap_or_else(|| peer.to_string());
+
+        let ep_opt = self.runtime.endpoint().await;
+        let Some(ep) = ep_opt else {
+            return Err(NetworkError::ConnectionError(
+                "Iroh endpoint not started; call Discovery::start() first".to_string(),
+            ));
+        };
+
+        let target_addr = if let Ok(ticket) = EndpointTicket::from_str(&resolved) {
+            ticket.endpoint_addr().clone()
+        } else if let Some((id_str, addr_str)) = resolved.split_once('@') {
+            if let (Some(id), Ok(sock)) = (
+                parse_endpoint_id(id_str),
+                std::net::SocketAddr::from_str(addr_str.trim()),
+            ) {
+                EndpointAddr::new(id).with_ip_addr(sock)
+            } else {
+                return Err(NetworkError::ConnectionError(format!(
+                    "Invalid endpoint@ip:port format: {resolved}"
+                )));
+            }
+        } else if let Some(endpoint_id) = parse_endpoint_id(&resolved) {
+            EndpointAddr::from(endpoint_id)
+        } else {
+            return Err(NetworkError::ConnectionError(format!(
+                "Cannot resolve '{resolved}' to a valid Iroh EndpointTicket or EndpointId"
+            )));
+        };
+
+        info!(endpoint_id = %target_addr.id, track_id = %track_id, "Initiating P2P audio fetch over QUIC");
+
+        let conn = ep
+            .connect(target_addr, ALPN_SYNC)
+            .await
+            .map_err(|e| NetworkError::ConnectionError(format!("QUIC connect failed: {e}")))?;
+
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| NetworkError::TransferError(format!("Open bi-stream failed: {e}")))?;
+
+        let request = SyncRequest {
+            payload: serde_json::json!({
+                "action": "fetch_audio",
+                "track_id": track_id,
+            }),
+        };
+
+        let req_bytes =
+            serde_json::to_vec(&request).map_err(|e| NetworkError::TransferError(e.to_string()))?;
+
+        send.write_all(&req_bytes)
+            .await
+            .map_err(|e| NetworkError::TransferError(format!("Failed to write request: {e}")))?;
+        send.finish().map_err(|e| {
+            NetworkError::TransferError(format!("Failed to finish send stream: {e}"))
+        })?;
+
+        let header = read_framed_header(&mut recv).await?;
+        if header.get("status").and_then(|v| v.as_str()) != Some("ok") {
+            let msg = header
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Remote peer rejected audio fetch");
+            return Err(NetworkError::TransferError(msg.to_string()));
+        }
+
+        let format = header
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("mp3");
+        let title = header
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("track");
+        let art_size = header.get("art_size").and_then(|v| v.as_u64()).unwrap_or(0);
+        let art_ext = header
+            .get("art_ext")
+            .and_then(|v| v.as_str())
+            .unwrap_or("jpg");
+
+        let safe_title = sanitize_filename(title);
+        let short_id = &track_id[..track_id.len().min(8)];
+
+        // Receive sidecar artwork if attached
+        let mut local_art_path: Option<String> = None;
+        if art_size > 0 {
+            let art_file_name = format!("{safe_title}_{short_id}.{art_ext}");
+            let art_dest = dest_dir.join(&art_file_name);
+            let mut art_file = tokio::fs::File::create(&art_dest).await.map_err(|e| {
+                NetworkError::IoError(format!("Failed to create artwork file: {e}"))
+            })?;
+
+            let mut art_received = 0u64;
+            let mut art_buf = vec![0u8; 32 * 1024];
+            while art_received < art_size {
+                let to_read = ((art_size - art_received) as usize).min(art_buf.len());
+                let n =
+                    match tokio::io::AsyncReadExt::read(&mut recv, &mut art_buf[..to_read]).await {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(e) => {
+                            return Err(NetworkError::TransferError(format!(
+                            "Failed to read artwork stream at byte {art_received}/{art_size}: {e}"
+                        )));
+                        }
+                    };
+                art_file
+                    .write_all(&art_buf[..n])
+                    .await
+                    .map_err(|e| NetworkError::IoError(format!("Failed to write artwork: {e}")))?;
+                art_received += n as u64;
+            }
+            let _ = art_file.flush().await;
+            if art_received == art_size {
+                self.runtime.record_bytes_received(art_received);
+                info!(path = ?art_dest, bytes = art_received, "Received and saved P2P album art");
+                local_art_path = Some(art_dest.to_string_lossy().to_string());
+            }
+        }
+
+        let file_name = format!("{safe_title}_{short_id}.{format}");
+        let local_path = dest_dir.join(&file_name);
+
+        let mut dest_file = tokio::fs::File::create(&local_path).await.map_err(|e| {
+            NetworkError::IoError(format!("Failed to create destination file: {e}"))
+        })?;
+
+        let _conn_guard = conn;
+        let expected_size = header.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total_received = 0u64;
+        while total_received < expected_size || expected_size == 0 {
+            let to_read = if expected_size > 0 {
+                ((expected_size - total_received) as usize).min(buf.len())
+            } else {
+                buf.len()
+            };
+            let n = match tokio::io::AsyncReadExt::read(&mut recv, &mut buf[..to_read]).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    return Err(NetworkError::TransferError(format!(
+                        "Failed to read audio stream at byte {total_received}/{expected_size}: {e}"
+                    )));
+                }
+            };
+            dest_file
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| NetworkError::IoError(format!("Failed to write to file: {e}")))?;
+            total_received += n as u64;
+            if expected_size > 0 && total_received >= expected_size {
+                break;
+            }
+        }
+
+        dest_file
+            .flush()
+            .await
+            .map_err(|e| NetworkError::IoError(format!("Failed to flush audio file: {e}")))?;
+
+        self.runtime.record_bytes_received(total_received);
+        info!(path = ?local_path, bytes = total_received, track_id = %track_id, "Successfully received and saved P2P audio track");
+
+        // If no sidecar artwork was received, check if the audio file itself has embedded artwork
+        if local_art_path.is_none() {
+            local_art_path =
+                crate::infrastructure::filesystem::MetadataExtractor::extract_async(&local_path)
+                    .await
+                    .ok()
+                    .and_then(|t| t.album_art_path);
+        }
+
+        // Update track record in local SQLite database
+        if let Some(db) = self.runtime.alias_db().await {
+            if let Ok(sql_conn) = db.connection() {
+                let path_str = local_path.to_string_lossy().to_string();
+                let updated = sql_conn.execute(
+                    "UPDATE tracks SET file_path = ?1, file_size = ?2, format = ?3, album_art_path = COALESCE(?4, album_art_path), is_downloaded = 1 WHERE id = ?5",
+                    rusqlite::params![path_str, total_received as i64, format, local_art_path, track_id],
+                ).unwrap_or(0);
+                if updated == 0 {
+                    let _ = sql_conn.execute(
+                        "INSERT INTO tracks (id, title, file_path, file_size, format, album_art_path, is_downloaded, date_added)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+                        rusqlite::params![track_id, title, path_str, total_received as i64, format, local_art_path, chrono::Utc::now().to_rfc3339()],
+                    );
+                }
+                info!(track_id = %track_id, file_path = %path_str, album_art = ?local_art_path, "Updated track in SQLite with local audio path and album art");
+            }
+        }
+
+        Ok(local_path)
     }
 }
 
@@ -819,5 +1351,99 @@ mod tests {
         assert_eq!(title, "Synced Symphony");
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_p2p_audio_fetch_and_streaming() {
+        use uuid::Uuid;
+
+        let db_path_a =
+            std::env::temp_dir().join(format!("test_auralis_audio_a_{}.db", Uuid::new_v4()));
+        let db_a = Arc::new(Database::new(&db_path_a).unwrap());
+        db_a.run_migrations().unwrap();
+
+        let track_id = Uuid::new_v4().to_string();
+        let dummy_audio_path =
+            std::env::temp_dir().join(format!("test_track_{}.mp3", Uuid::new_v4()));
+        let dummy_art_path = dummy_audio_path.with_extension("jpg");
+        let dummy_data = b"ID3v2.4.0TEST_AUDIO_BYTES_IROH_QUIC_STREAMING_VERIFIED_1234567890";
+        let dummy_art_data = b"\xFF\xD8\xFF\xE0\x00\x10JFIF_DUMMY_ART_BYTES_P2P";
+        tokio::fs::write(&dummy_audio_path, dummy_data)
+            .await
+            .unwrap();
+        tokio::fs::write(&dummy_art_path, dummy_art_data)
+            .await
+            .unwrap();
+
+        // Register track in DB A
+        {
+            let conn = db_a.connection().unwrap();
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist, album, duration_secs, file_path, format, album_art_path, date_added)
+                 VALUES (?1, 'Test Stream Track', 'Iroh Artist', 'P2P Album', 120, ?2, 'mp3', ?3, '2026-10-22T00:00:00Z')",
+                rusqlite::params![
+                    track_id,
+                    dummy_audio_path.to_string_lossy().to_string(),
+                    dummy_art_path.to_string_lossy().to_string()
+                ],
+            )
+            .unwrap();
+        }
+
+        // Setup Endpoint A
+        let disc_a = Discovery::new(0);
+        disc_a.runtime().set_persistent_store(db_a).await;
+        disc_a.start().await.unwrap();
+        let _engine_a = disc_a.sync_engine();
+        let ticket_a = disc_a.runtime().ticket().await.unwrap();
+
+        // Setup Endpoint B
+        let db_path_b =
+            std::env::temp_dir().join(format!("test_auralis_audio_b_{}.db", Uuid::new_v4()));
+        let db_b = Arc::new(Database::new(&db_path_b).unwrap());
+        db_b.run_migrations().unwrap();
+
+        let disc_b = Discovery::new(0);
+        disc_b.runtime().set_persistent_store(db_b.clone()).await;
+        disc_b.start().await.unwrap();
+        let engine_b = disc_b.sync_engine();
+
+        let dest_dir = std::env::temp_dir().join(format!("test_dest_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dest_dir).await.unwrap();
+
+        // B fetches the audio file from A
+        let fetched_path = engine_b
+            .fetch_track_audio(&ticket_a, &track_id, &dest_dir)
+            .await
+            .expect("fetch_track_audio failed");
+
+        assert!(fetched_path.exists());
+        let received_bytes = tokio::fs::read(&fetched_path).await.unwrap();
+        assert_eq!(received_bytes, dummy_data);
+
+        // Verify DB B updated with both audio file_path and album_art_path
+        let conn_b = db_b.connection().unwrap();
+        let (updated_path, updated_art): (String, Option<String>) = conn_b
+            .query_row(
+                "SELECT file_path, album_art_path FROM tracks WHERE id = ?1",
+                rusqlite::params![track_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(updated_path, fetched_path.to_string_lossy().to_string());
+        assert!(updated_art.is_some());
+        let art_path = std::path::PathBuf::from(updated_art.unwrap());
+        assert!(art_path.exists());
+        let received_art = tokio::fs::read(&art_path).await.unwrap();
+        assert_eq!(received_art, dummy_art_data);
+
+        // Cleanup
+        let _ = tokio::fs::remove_file(&dummy_audio_path).await;
+        let _ = tokio::fs::remove_file(&dummy_art_path).await;
+        let _ = tokio::fs::remove_file(&fetched_path).await;
+        let _ = tokio::fs::remove_file(&art_path).await;
+        let _ = tokio::fs::remove_dir_all(&dest_dir).await;
+        let _ = std::fs::remove_file(&db_path_a);
+        let _ = std::fs::remove_file(&db_path_b);
     }
 }

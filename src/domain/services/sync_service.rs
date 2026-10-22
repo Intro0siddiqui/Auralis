@@ -8,6 +8,7 @@ use crate::domain::models::{
 use crate::domain::repositories::{SettingsRepository, SyncRepository};
 use crate::infrastructure::network::SyncEngine;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -389,12 +390,17 @@ impl SyncService {
             }
         }
 
-        // Ensure alias map is warmed from persisted peer_id (HIGH fix: survives restarts)
-        // If device has a persisted peer_id, make sure the in-memory map has it.
-        if let Some(peer_str) = &device.peer_id {
+        // Ensure alias map is warmed from persisted ticket / peer_id
+        let alias_target = device
+            .ip_address
+            .clone()
+            .filter(|ip| ip.starts_with("endpoint") || ip.contains('@'))
+            .or_else(|| device.peer_id.clone());
+
+        if let Some(target) = alias_target {
             self.sync_engine
                 .runtime()
-                .register_device_alias(device_id.to_string(), peer_str.clone())
+                .register_device_alias(device_id.to_string(), target)
                 .await;
         }
 
@@ -469,6 +475,51 @@ impl SyncService {
         Ok(())
     }
 
+    /// Fetch the physical audio file for a remote sync track from a paired peer
+    pub async fn fetch_audio_for_track(
+        &self,
+        track_id: &str,
+        dest_dir: &std::path::Path,
+    ) -> Result<PathBuf, SyncError> {
+        let peers: Vec<String> = {
+            let devices = self.paired_devices.read().await;
+            devices
+                .values()
+                .filter_map(|d| {
+                    d.ip_address
+                        .clone()
+                        .filter(|ip| ip.starts_with("endpoint") || ip.contains('@'))
+                        .or_else(|| d.peer_id.clone())
+                })
+                .collect()
+        };
+
+        if peers.is_empty() {
+            return Err(SyncError::NetworkError(
+                "No paired devices found to fetch audio from".to_string(),
+            ));
+        }
+
+        let mut last_err = String::new();
+        for peer in peers {
+            match self
+                .sync_engine
+                .fetch_track_audio(&peer, track_id, dest_dir)
+                .await
+            {
+                Ok(path) => return Ok(path),
+                Err(e) => {
+                    warn!(peer = %peer, track_id = %track_id, error = %e, "Failed to fetch track audio from peer, trying next");
+                    last_err = e.to_string();
+                }
+            }
+        }
+
+        Err(SyncError::NetworkError(format!(
+            "Failed to fetch audio from paired devices: {last_err}"
+        )))
+    }
+
     /// Get current sync status
     pub async fn get_sync_status(&self) -> SyncStatus {
         let status = self.sync_status.read().await;
@@ -511,28 +562,63 @@ impl SyncService {
             .await
             .map_err(|e| SyncError::NetworkError(e.to_string()))?;
 
-        // Extract remote EndpointId if this was an EndpointTicket or raw EndpointId
-        let remote_peer_id = if let Ok(ticket) = <iroh_tickets::endpoint::EndpointTicket as std::str::FromStr>::from_str(clean_addr) {
+        // Extract remote EndpointId if this was an EndpointTicket, endpoint@ip:port, or raw EndpointId
+        let remote_peer_id = if let Ok(ticket) =
+            <iroh_tickets::endpoint::EndpointTicket as std::str::FromStr>::from_str(clean_addr)
+        {
             Some(ticket.endpoint_addr().id.to_string())
-        } else if let Ok(endpoint_id) = <iroh::EndpointId as std::str::FromStr>::from_str(clean_addr) {
-            Some(endpoint_id.to_string())
+        } else if let Some((id_part, _)) = clean_addr.split_once('@') {
+            crate::infrastructure::network::parse_endpoint_id(id_part).map(|id| id.to_string())
         } else {
-            None
+            crate::infrastructure::network::parse_endpoint_id(clean_addr).map(|id| id.to_string())
         };
 
         let mut synced_device_id = None;
         if let Some(ref pid) = remote_peer_id {
-            let already_paired = {
-                let devices = self.paired_devices.read().await;
-                devices.values().any(|d| d.peer_id.as_deref() == Some(pid))
-            };
+            let mut existing_id = None;
+            {
+                let mut devices = self.paired_devices.write().await;
+                if let Some(device) = devices.values_mut().find(|d| {
+                    if d.peer_id.as_deref() == Some(pid) {
+                        return true;
+                    }
+                    if let (Some(stored_id), Some(parsed_pid)) = (
+                        d.peer_id
+                            .as_deref()
+                            .and_then(crate::infrastructure::network::parse_endpoint_id),
+                        crate::infrastructure::network::parse_endpoint_id(pid),
+                    ) {
+                        return stored_id == parsed_pid;
+                    }
+                    false
+                }) {
+                    device.ip_address = Some(clean_addr.to_string());
+                    device.status = DeviceStatus::Connected;
+                    device.mark_synced();
+                    existing_id = Some(device.id);
+                }
+            }
 
-            if !already_paired {
+            if let Some(id) = existing_id {
+                let alias_target = if clean_addr.starts_with("endpoint") || clean_addr.contains('@')
+                {
+                    clean_addr.to_string()
+                } else {
+                    pid.clone()
+                };
+                self.sync_engine
+                    .runtime()
+                    .register_device_alias(id.to_string(), alias_target)
+                    .await;
+                if let Ok(Some(mut dev)) = self.sync_repository.get_paired_device(id).await {
+                    dev.ip_address = Some(clean_addr.to_string());
+                    dev.status = DeviceStatus::Connected;
+                    let _ = self.sync_repository.save_paired_device(&dev).await;
+                }
+                synced_device_id = Some(id);
+            } else {
                 let name = format!("Auralis Device ({})", &pid[..pid.len().min(8)]);
-                let mut device = PairedDevice::new(
-                    name,
-                    DeviceType::Mobile,
-                );
+                let mut device = PairedDevice::new(name, DeviceType::Mobile);
                 device.peer_id = Some(pid.clone());
                 device.ip_address = Some(clean_addr.to_string());
                 device.status = DeviceStatus::Connected;
@@ -543,9 +629,16 @@ impl SyncService {
                     devices.insert(device.id, device.clone());
                 }
 
+                let alias_target = if clean_addr.starts_with("endpoint") || clean_addr.contains('@')
+                {
+                    clean_addr.to_string()
+                } else {
+                    pid.clone()
+                };
+
                 self.sync_engine
                     .runtime()
-                    .register_device_alias(device.id.to_string(), pid.clone())
+                    .register_device_alias(device.id.to_string(), alias_target)
                     .await;
 
                 if let Err(e) = self.sync_repository.save_paired_device(&device).await {

@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "auralis"
-version = "2.6.70"
+version = "2.6.71"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -211,6 +211,7 @@ dependencies = [
  "dirs",
  "futures",
  "glob",
+ "hex",
  "hostname",
  "image",
  "iroh",

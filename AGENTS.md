@@ -8,15 +8,17 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development — v2.6.69 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
+**Current State: Active Development — v2.6.71 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
 
-**Recent Major Breakthroughs (v2.6.69)**:
-1. **Direct YouTube Streaming (Zero Disk Writes)**: Implemented `StreamProxy` on loopback (`http://127.0.0.1:<port>/stream/<id>`), bridging HTML5 `<audio>` elements to YouTube CDN with custom headers (`User-Agent`, `Referer`, `Origin`). Live streaming on Android device verified (`currentTime > 15s`, `readyState: 4`, zero disk writes).
-2. **The 1 MB 403 CDN Barrier Solved**: Direct measurement proved that `ANDROID_VR` and `IOS` adaptive streams (itag 140) enforce token caps at byte 1,048,576 (1 MiB), returning `HTTP 403 Forbidden` on subsequent chunk ranges. In contrast, `ANDROID` progressive muxed streams (itag 18) return `HTTP 206 Partial Content` across every chunk window (0–512 KB, 1 MB–1.5 MB, etc.) without token restriction.
-3. **Real-time System Night Mode Adaptation**: App dynamically tracks Android/OS system dark/light mode toggles via `matchMedia` and updates themes in real time without reloading, while respecting manual settings overrides.
-4. **CI & Cross-Compilation 100% Green**: GitHub Actions build `39554184840` passed 100% across lint (cargo fmt, clippy, cargo-audit), Linux build/tests, and Android cross-compilation.
-5. **P2P Modernization to Iroh (`libp2p` Fully Excised)**: Completely removed `libp2p` and 150+ transitive dependencies (-2,442 LOC net diff), replacing it with `Iroh` QUIC transport via Quinn + Magicsock STUN/DERP relay hole-punching on ALPN `/auralis/sync/1`. Device identity is persisted as an Ed25519 `SecretKey` in SQLite `node_identity` table (eliminating `PeerId` drift). Pairing uses compact QR `EndpointTicket` strings (`auralis://pair?ticket=...&pin=...`) with 1-click clipboard copy, and incoming sync payloads reconcile directly into SQLite.
-6. **Codebase Modularization Completed**: All files in the codebase brought under the 1.5k LOC target. Decoupled 3,419 lines of unit tests (`downloader/tests.rs`, `playback/tests.rs`, `player/tests.rs`), split `repositories.rs` into domain-specific modules, extracted playback diagnostics (`ResumeLog`/`ResumeProbe`), split downloader into `fs.rs`/`http.rs`/`validation.rs`, modularized CSS into 9 domain stylesheets, and extracted frontend `sync.js`.
+**Recent Major Breakthroughs (v2.6.71)**:
+1. **Bidirectional P2P Physical Audio Streaming over Iroh QUIC (`/auralis/sync/1`)**: Implemented binary framed streaming for physical audio tracks between paired devices. When playing a remote track (`sync://<id>`), `commands::playback::play` fetches the track on-demand over QUIC into `app_data_dir/music/`, reconciles SQLite, and starts playback seamlessly.
+2. **Connection Persistence (`_conn_guard`)**: Resolved Quinn/Iroh connection drop issues during multi-megabyte transfers by keeping the parent QUIC `Connection` alive for the entire duration of the transfer.
+3. **Dual-Format EndpointId Parser (`parse_endpoint_id`)**: Seamlessly parses both Iroh's native 53-character base32 format (`aafv7oek...`) and 64-character hex strings (`0b5fb88a...`), eliminating peer lookup and ticket parsing mismatches.
+4. **Direct Transport Addressing (`<endpoint_id>@<ip>:<port>`)**: Enabled direct IP:port transport fallback for complex NAT, emulator bridges, and USB tethering environments alongside Magicsock STUN/DERP relay.
+5. **End-to-End Cross-Device Hardware Verification**: Verified byte-for-byte exact transfer and audible speaker playback in both directions between a physical Android 15 device (`DA59V4KNJRAIHIBI`) and an Android 14 emulator (`emulator-5554`) (Phone → VM: 4,542,935 bytes; VM → Phone: 8,743,234 bytes).
+6. **Direct YouTube Streaming (Zero Disk Writes)**: Implemented `StreamProxy` on loopback (`http://127.0.0.1:<port>/stream/<id>`), bridging HTML5 `<audio>` elements to YouTube CDN with custom headers (`User-Agent`, `Referer`, `Origin`). Live streaming on Android device verified (`currentTime > 15s`, `readyState: 4`, zero disk writes).
+7. **The 1 MB 403 CDN Barrier Solved**: Progressive muxed streams (itag 18) bypass token restrictions without chunk rate limiting.
+8. **CI & Cross-Compilation 100% Green**: GitHub Actions passed across lint, Linux builds, and 64-bit/32-bit Android targets.
 
 ---
 
@@ -220,7 +222,7 @@ Notes from the audit/upgrade pass:
 
 - `bundle.targets` is `["deb", "app", "dmg", "msi", "nsis"]` (no `"all"`).
 - `identifier` is `com.auralis.v2` (was `com.auralis.app`).
-- `version` is `2.6.64` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
+- `version` is `2.6.71` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
 - CSP is `default-src 'self' tauri: data: blob: ipc: http://ipc.localhost; img-src 'self' data: blob: asset: https://i.ytimg.com https://*.ytimg.com; media-src 'self' data: blob: asset: ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost https://*.googlevideo.com https://*.ytimg.com https://i.ytimg.com https://www.youtube.com https://youtubei.googleapis.com https://*.youtube.com https://jnn-pa.googleapis.com https://www.google.com https://*.google.com; font-src 'self' data: https:;` — all third-party JS vendored under `ui/vendor/` (no CDN), `https:` kept for `youtubei`/`googlevideo`/`jnn-pa` `connect-src` (see `scripts/tests/youtube_resolver.test.js`). `unsafe-eval` is required for `youtube.js` `new Function` decipher (BotGuard) — noted as intentional.
 
 ### 4.3 Android CI Optimization (`.github/workflows/build.yml`) — ✅ DONE (2026-09-03, v2.6.26)
