@@ -8,17 +8,20 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development — v2.6.72 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
+**Current State: Active Development — v2.6.73 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
 
-**Recent Major Breakthroughs (v2.6.72)**:
-1. **Bidirectional P2P Physical Audio Streaming over Iroh QUIC (`/auralis/sync/1`)**: Implemented binary framed streaming for physical audio tracks between paired devices. When playing a remote track (`sync://<id>`), `commands::playback::play` fetches the track on-demand over QUIC into `app_data_dir/music/`, reconciles SQLite, and starts playback seamlessly.
-2. **Connection Persistence (`_conn_guard`)**: Resolved Quinn/Iroh connection drop issues during multi-megabyte transfers by keeping the parent QUIC `Connection` alive for the entire duration of the transfer.
-3. **Dual-Format EndpointId Parser (`parse_endpoint_id`)**: Seamlessly parses both Iroh's native 53-character base32 format (`aafv7oek...`) and 64-character hex strings (`0b5fb88a...`), eliminating peer lookup and ticket parsing mismatches.
-4. **Direct Transport Addressing (`<endpoint_id>@<ip>:<port>`)**: Enabled direct IP:port transport fallback for complex NAT, emulator bridges, and USB tethering environments alongside Magicsock STUN/DERP relay.
-5. **End-to-End Cross-Device Hardware Verification**: Verified byte-for-byte exact transfer and audible speaker playback in both directions between a physical Android 15 device (`DA59V4KNJRAIHIBI`) and an Android 14 emulator (`emulator-5554`) (Phone → VM: 4,542,935 bytes; VM → Phone: 8,743,234 bytes).
-6. **Direct YouTube Streaming (Zero Disk Writes)**: Implemented `StreamProxy` on loopback (`http://127.0.0.1:<port>/stream/<id>`), bridging HTML5 `<audio>` elements to YouTube CDN with custom headers (`User-Agent`, `Referer`, `Origin`). Live streaming on Android device verified (`currentTime > 15s`, `readyState: 4`, zero disk writes).
-7. **The 1 MB 403 CDN Barrier Solved**: Progressive muxed streams (itag 18) bypass token restrictions without chunk rate limiting.
-8. **CI & Cross-Compilation 100% Green**: GitHub Actions passed across lint, Linux builds, and 64-bit/32-bit Android targets.
+**Recent Major Breakthroughs (v2.6.73)**:
+1. **Playback EOF & Auto-Advance Resilience**: Fixed zombie playback at EOF where trailing decoder buffers prevented `is_empty` from flipping; added `stop_at_end()` to preserve finished position (`4:24 / 4:24`) and reset UI button to Play (`▶`). Resuming an ended track rewinds to 0:00.
+2. **Stream Replay & Library Fallback Isolation**: Streamed audio rewinds to 0:00 on finish; tapping resume re-triggers the stream instead of falling back to library track 0 ("Яд").
+3. **Desktop Frameless Mode (`"decorations": false`)**: Removed light GTK3 client-side decoration header bar on Linux tiling window managers (River, Sway, etc.) for a clean, edge-to-edge dark obsidian window.
+4. **Bidirectional P2P Physical Audio Streaming over Iroh QUIC (`/auralis/sync/1`)**: Implemented binary framed streaming for physical audio tracks between paired devices. When playing a remote track (`sync://<id>`), `commands::playback::play` fetches the track on-demand over QUIC into `app_data_dir/music/`, reconciles SQLite, and starts playback seamlessly.
+5. **Connection Persistence (`_conn_guard`)**: Resolved Quinn/Iroh connection drop issues during multi-megabyte transfers by keeping the parent QUIC `Connection` alive for the entire duration of the transfer.
+6. **Dual-Format EndpointId Parser (`parse_endpoint_id`)**: Seamlessly parses both Iroh's native 53-character base32 format (`aafv7oek...`) and 64-character hex strings (`0b5fb88a...`), eliminating peer lookup and ticket parsing mismatches.
+7. **Direct Transport Addressing (`<endpoint_id>@<ip>:<port>`)**: Enabled direct IP:port transport fallback for complex NAT, emulator bridges, and USB tethering environments alongside Magicsock STUN/DERP relay.
+8. **End-to-End Cross-Device Hardware Verification**: Verified byte-for-byte exact transfer and audible speaker playback in both directions between a physical Android 15 device (`DA59V4KNJRAIHIBI`) and an Android 14 emulator (`emulator-5554`) (Phone → VM: 4,542,935 bytes; VM → Phone: 8,743,234 bytes).
+9. **Direct YouTube Streaming (Zero Disk Writes)**: Implemented `StreamProxy` on loopback (`http://127.0.0.1:<port>/stream/<id>`), bridging HTML5 `<audio>` elements to YouTube CDN with custom headers (`User-Agent`, `Referer`, `Origin`). Live streaming on Android device verified (`currentTime > 15s`, `readyState: 4`, zero disk writes).
+10. **The 1 MB 403 CDN Barrier Solved**: Progressive muxed streams (itag 18) bypass token restrictions without chunk rate limiting.
+11. **CI & Cross-Compilation 100% Green**: GitHub Actions passed across lint, Linux builds, and 64-bit/32-bit Android targets.
 
 ---
 
@@ -222,7 +225,7 @@ Notes from the audit/upgrade pass:
 
 - `bundle.targets` is `["deb", "app", "dmg", "msi", "nsis"]` (no `"all"`).
 - `identifier` is `com.auralis.v2` (was `com.auralis.app`).
-- `version` is `2.6.72` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
+- `version` is `2.6.73` and must stay in sync with `Cargo.toml` + `Cargo.lock` (`package.json` too).
 - CSP is `default-src 'self' tauri: data: blob: ipc: http://ipc.localhost; img-src 'self' data: blob: asset: https://i.ytimg.com https://*.ytimg.com; media-src 'self' data: blob: asset: ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost https://*.googlevideo.com https://*.ytimg.com https://i.ytimg.com https://www.youtube.com https://youtubei.googleapis.com https://*.youtube.com https://jnn-pa.googleapis.com https://www.google.com https://*.google.com; font-src 'self' data: https:;` — all third-party JS vendored under `ui/vendor/` (no CDN), `https:` kept for `youtubei`/`googlevideo`/`jnn-pa` `connect-src` (see `scripts/tests/youtube_resolver.test.js`). `unsafe-eval` is required for `youtube.js` `new Function` decipher (BotGuard) — noted as intentional.
 
 ### 4.3 Android CI Optimization (`.github/workflows/build.yml`) — ✅ DONE (2026-09-03, v2.6.26)
