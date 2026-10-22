@@ -1422,14 +1422,16 @@ mod tests {
         assert_eq!(received_bytes, dummy_data);
 
         // Verify DB B updated with both audio file_path and album_art_path
-        let conn_b = db_b.connection().unwrap();
-        let (updated_path, updated_art): (String, Option<String>) = conn_b
-            .query_row(
-                "SELECT file_path, album_art_path FROM tracks WHERE id = ?1",
-                rusqlite::params![track_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+        let (updated_path, updated_art): (String, Option<String>) = {
+            let conn_b = db_b.connection().unwrap();
+            conn_b
+                .query_row(
+                    "SELECT file_path, album_art_path FROM tracks WHERE id = ?1",
+                    rusqlite::params![track_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+        };
         assert_eq!(updated_path, fetched_path.to_string_lossy().to_string());
         assert!(updated_art.is_some());
         let art_path = std::path::PathBuf::from(updated_art.unwrap());
