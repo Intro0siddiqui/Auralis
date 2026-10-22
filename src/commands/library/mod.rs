@@ -326,10 +326,14 @@ pub async fn scan_library_paths(
 pub async fn import_audio_file(
     app: tauri::AppHandle,
     db: State<'_, Database>,
-    name: String,
+    name: Option<String>,
+    file_name: Option<String>,
     data: Option<Vec<u8>>,
     data_base64: Option<String>,
 ) -> Result<Track, String> {
+    let name = name
+        .or(file_name)
+        .ok_or_else(|| "Missing required parameter 'name' or 'fileName'".to_string())?;
     tracing::info!(name = %name, has_data = data.is_some(), has_b64 = data_base64.is_some(), "Importing audio file");
     let bytes = match (data, data_base64) {
         (Some(b), _) => b,

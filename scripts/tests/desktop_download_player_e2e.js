@@ -174,7 +174,7 @@ async function run() {
             : (window.__TAURI__?.core?.invoke) ? window.__TAURI__.core.invoke.bind(window.__TAURI__.core)
             : window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
           const tryImport = async (name, b64d) => {
-            try { const imp = await inv('import_audio_file', { fileName: name, data: b64d }); return {ok:true, via:'import', imp}; }
+            try { const imp = await inv('import_audio_file', { name: name, fileName: name, dataBase64: b64d, data_base64: b64d }); return {ok:true, via:'import', imp}; }
             catch(e){ const m=String(e); if(m.includes('Origin')) return {ok:false, gated:true, e:m}; if(m.includes('not found')||m.includes('Unknown command')) return {ok:false, needFallback:true, e:m}; return {ok:false, e:m}; }
           };
           let r1 = await tryImport('e2e-test-seed-a.wav', ${JSON.stringify(b64)});
