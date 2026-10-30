@@ -207,22 +207,32 @@ class YouTubeResolver {
             });
         }
 
-        const vd = opts.visitorData || opts.visitor_data || '';
-        const key = [opts.cookie || '', opts.poToken || opts.po_token || '', vd].join('|');
+        let session = null;
+        try {
+            const sessMod = await import('./modules/session.js').catch(() => null);
+            if (sessMod && typeof sessMod.getOrInitSession === 'function') {
+                session = await sessMod.getOrInitSession(nativeFetch);
+            }
+        } catch (_) {}
+
+        const cookieToUse = opts.cookie || session?.cookie || '';
+        const vdToUse = opts.visitorData || opts.visitor_data || session?.visitorData || '';
+
+        const key = [cookieToUse, opts.poToken || opts.po_token || '', vdToUse].join('|');
         if (!this._clients[key]) {
             const cfg = {
                 retrieve_player: false,
             };
-            if (opts.cookie) cfg.cookie = opts.cookie;
+            if (cookieToUse) cfg.cookie = cookieToUse;
             // Wire poToken + visitorData for PO (youtubei expects po_token / visitor_data, also accepts camelCase)
             if (opts.poToken || opts.po_token) {
                 const tok = opts.poToken || opts.po_token;
                 cfg.poToken = tok;
                 cfg.po_token = tok;
             }
-            if (vd) {
-                cfg.visitorData = vd;
-                cfg.visitor_data = vd;
+            if (vdToUse) {
+                cfg.visitorData = vdToUse;
+                cfg.visitor_data = vdToUse;
             }
 
             try {
@@ -238,6 +248,16 @@ class YouTubeResolver {
                 } else {
                     this._clients[key] = new Ctor();
                 }
+            }
+
+            // Sync updated visitorData back to persistent session if derived by InnerTube
+            const createdClient = this._clients[key];
+            const activeVd = createdClient?.session?.context?.client?.visitorData;
+            if (activeVd && (!session?.visitorData || activeVd !== session.visitorData)) {
+                try {
+                    const sessMod = await import('./modules/session.js').catch(() => null);
+                    sessMod?.updateSessionVisitorData(activeVd);
+                } catch (_) {}
             }
         }
         return this._clients[key];
@@ -1326,6 +1346,13 @@ class YouTubeResolver {
             'Accept': '*/*',
             'Accept-Language': 'en-US,en;q=0.9',
         };
+
+        try {
+            const sessMod = await import('./modules/session.js').catch(() => null);
+            if (sessMod && typeof sessMod.injectSessionHeaders === 'function') {
+                Object.assign(headers, sessMod.injectSessionHeaders(headers));
+            }
+        } catch (_) {}
 
         // Expose retry metadata so downloads.js/core.js can auto-retry on 403 with next orderedClient
         // Use effectiveOrderedClients (respects excludeClient/forceClient) for retry rotation
