@@ -548,6 +548,29 @@ const MEDIA_DATA_URL_MAX_BYTES: u64 = 10 * 1024 * 1024;
 pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<String, String> {
     use base64::Engine;
     use std::path::{Path, PathBuf};
+    use tauri::Manager;
+
+    let path = if let Some(track_id) = path.strip_prefix("sync-art://") {
+        if let Some(sync_service) = app.try_state::<crate::domain::services::SyncService>() {
+            let cache_dir =
+                crate::infrastructure::filesystem::MetadataExtractor::artwork_cache_dir();
+            let _ = tokio::fs::create_dir_all(&cache_dir).await;
+            match sync_service
+                .fetch_artwork_for_track(track_id, &cache_dir)
+                .await
+            {
+                Ok(cached_path) => cached_path.to_string_lossy().to_string(),
+                Err(e) => {
+                    tracing::warn!(track_id = %track_id, error = %e, "Failed to fetch remote artwork");
+                    return Err(format!("Failed to fetch remote artwork: {e}"));
+                }
+            }
+        } else {
+            return Err("Sync service not available".to_string());
+        }
+    } else {
+        path
+    };
 
     let extension = Path::new(&path)
         .extension()
@@ -576,6 +599,13 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(app_dir) = app.path().app_data_dir() {
         roots.push(app_dir);
+    }
+    if let Ok(cache_dir) = app.path().app_cache_dir() {
+        roots.push(cache_dir);
+    }
+    roots.push(crate::infrastructure::filesystem::MetadataExtractor::artwork_cache_dir());
+    if let Some(cache) = dirs::cache_dir() {
+        roots.push(cache);
     }
     if let Some(music) = dirs::audio_dir() {
         roots.push(music);

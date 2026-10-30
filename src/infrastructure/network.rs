@@ -364,13 +364,17 @@ impl Discovery {
             info!("Iroh accept loop started listening for incoming QUIC streams");
             while let Some(incoming) = ep.accept().await {
                 let runtime = runtime.clone();
+                let remote_sock = match incoming.remote_addr() {
+                    iroh::endpoint::IncomingAddr::Ip(sock) => Some(sock),
+                    _ => None,
+                };
                 tokio::spawn(async move {
                     match incoming.accept() {
                         Ok(connecting) => match connecting.await {
                             Ok(conn) => {
                                 let alpn = conn.alpn();
                                 if alpn == ALPN_SYNC {
-                                    handle_incoming_sync_connection(conn, runtime).await;
+                                    handle_incoming_sync_connection(conn, runtime, remote_sock).await;
                                 }
                             }
                             Err(e) => {
@@ -394,33 +398,56 @@ impl Discovery {
 async fn handle_incoming_sync_connection(
     conn: iroh::endpoint::Connection,
     runtime: Arc<NetworkRuntime>,
+    remote_sock: Option<std::net::SocketAddr>,
 ) {
     let remote_id_str = conn.remote_id().to_string();
-    debug!(remote = %remote_id_str, "Accepted incoming QUIC sync connection");
+    debug!(remote = %remote_id_str, ?remote_sock, "Accepted incoming QUIC sync connection");
 
     // Auto-record incoming peer into paired_devices if DB is available
     if let Some(db) = runtime.alias_db().await {
-        if let Ok(sql_conn) = db.connection() {
-            let exists: bool = sql_conn
-                .query_row(
-                    "SELECT 1 FROM paired_devices WHERE peer_id = ?1",
-                    rusqlite::params![remote_id_str],
-                    |_| Ok(true),
-                )
-                .unwrap_or(false);
+        let (alias_id, target) = {
+            if let Ok(sql_conn) = db.connection() {
+                let existing_id: Option<String> = sql_conn
+                    .query_row(
+                        "SELECT id FROM paired_devices WHERE peer_id = ?1",
+                        rusqlite::params![remote_id_str],
+                        |row| row.get(0),
+                    )
+                    .ok();
 
-            if !exists {
-                let new_id = uuid::Uuid::new_v4().to_string();
-                let short_id = &remote_id_str[..remote_id_str.len().min(8)];
-                let name = format!("Auralis Device ({short_id})");
+                let target_addr = if let Some(sock) = remote_sock {
+                    format!("{remote_id_str}@{sock}")
+                } else {
+                    remote_id_str.clone()
+                };
                 let now = chrono::Utc::now().to_rfc3339();
-                let _ = sql_conn.execute(
-                    "INSERT INTO paired_devices (id, name, device_type, ip_address, status, last_synced, created_at, peer_id)
-                     VALUES (?1, ?2, 'mobile', NULL, 'connected', ?3, ?3, ?4)",
-                    rusqlite::params![new_id, name, now, remote_id_str],
-                );
-                info!(remote = %remote_id_str, "Recorded incoming peer as paired device in DB");
+
+                if let Some(ref id) = existing_id {
+                    let _ = sql_conn.execute(
+                        "UPDATE paired_devices SET ip_address = ?1, status = 'connected', last_sync = ?2 WHERE id = ?3",
+                        rusqlite::params![target_addr, now, id],
+                    );
+                    info!(remote = %remote_id_str, "Updated active connection for paired device in DB");
+                    (id.clone(), target_addr)
+                } else {
+                    let new_id = uuid::Uuid::new_v4().to_string();
+                    let short_id = &remote_id_str[..remote_id_str.len().min(8)];
+                    let name = format!("Auralis Device ({short_id})");
+                    let res = sql_conn.execute(
+                        "INSERT INTO paired_devices (id, name, device_type, ip_address, paired_at, last_sync, status, library_version, peer_id)
+                         VALUES (?1, ?2, 'mobile', ?3, ?4, ?4, 'connected', 0, ?5)",
+                        rusqlite::params![new_id, name, target_addr, now, remote_id_str],
+                    );
+                    info!(remote = %remote_id_str, result = ?res, "Recorded incoming peer as paired device in DB");
+                    (new_id, target_addr)
+                }
+            } else {
+                (String::new(), String::new())
             }
+        };
+
+        if !alias_id.is_empty() {
+            runtime.register_device_alias(alias_id, target).await;
         }
     }
 
@@ -436,6 +463,11 @@ async fn handle_incoming_sync_connection(
                         if req.payload.get("action").and_then(|v| v.as_str()) == Some("fetch_audio")
                         {
                             handle_audio_fetch_request(req.payload, &mut send, &runtime).await;
+                            return;
+                        }
+                        if req.payload.get("action").and_then(|v| v.as_str()) == Some("fetch_artwork")
+                        {
+                            handle_artwork_fetch_request(req.payload, &mut send, &runtime).await;
                             return;
                         }
 
@@ -624,6 +656,26 @@ async fn handle_audio_fetch_request(
             } else {
                 None
             }
+        } else if !file_path.starts_with("sync://") {
+            let fp = std::path::PathBuf::from(&file_path);
+            tokio::task::spawn_blocking(move || {
+                if let Ok(tagged) = lofty::read_from_path(&fp) {
+                    if let Some(pic) =
+                        crate::infrastructure::filesystem::MetadataExtractor::find_best_picture(&tagged)
+                    {
+                        let data = pic.data().to_vec();
+                        let ext =
+                            crate::infrastructure::filesystem::MetadataExtractor::detect_image_extension(
+                                &data,
+                                pic.mime_type(),
+                            );
+                        return Some((data, ext.to_string()));
+                    }
+                }
+                None
+            })
+            .await
+            .unwrap_or(None)
         } else {
             None
         }
@@ -680,6 +732,144 @@ async fn handle_audio_fetch_request(
     runtime.record_bytes_sent(total_sent);
     info!(copied = total_sent, track_id = %track_id, "Completed streaming audio file to peer");
     let _ = send.finish();
+}
+
+/// Handle an incoming framed fetch_artwork request from a remote peer
+async fn handle_artwork_fetch_request(
+    payload: serde_json::Value,
+    send: &mut iroh::endpoint::SendStream,
+    runtime: &Arc<NetworkRuntime>,
+) {
+    let track_id = match payload.get("track_id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => {
+            let err_header = serde_json::json!({
+                "status": "error",
+                "message": "Missing track_id in fetch_artwork request",
+            });
+            let _ = send_framed_header(send, &err_header).await;
+            let _ = send.finish();
+            return;
+        }
+    };
+
+    let db_opt = runtime.alias_db().await;
+    let Some(db) = db_opt else {
+        let err_header = serde_json::json!({
+            "status": "error",
+            "message": "Database unavailable",
+        });
+        let _ = send_framed_header(send, &err_header).await;
+        let _ = send.finish();
+        return;
+    };
+
+    let track_info: Option<(String, Option<String>)> = {
+        if let Ok(conn) = db.connection() {
+            conn.query_row(
+                "SELECT file_path, album_art_path FROM tracks WHERE id = ?1",
+                rusqlite::params![track_id],
+                |row| {
+                    let fp: String = row.get(0)?;
+                    let art: Option<String> = row.get(1)?;
+                    Ok((fp, art))
+                },
+            )
+            .ok()
+        } else {
+            None
+        }
+    };
+
+    let Some((file_path, album_art_path)) = track_info else {
+        let err_header = serde_json::json!({
+            "status": "error",
+            "message": "Track not found in database",
+        });
+        let _ = send_framed_header(send, &err_header).await;
+        let _ = send.finish();
+        return;
+    };
+
+    let art_data: Option<(Vec<u8>, String)> = {
+        let candidate_path = album_art_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                let base = std::path::Path::new(&file_path);
+                for ext in ["jpg", "jpeg", "png", "webp"] {
+                    let side = base.with_extension(ext);
+                    if side.is_file() {
+                        return Some(side);
+                    }
+                }
+                None
+            });
+
+        if let Some(path) = candidate_path {
+            if let Ok(bytes) = tokio::fs::read(&path).await {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("jpg")
+                    .to_string();
+                Some((bytes, ext))
+            } else {
+                None
+            }
+        } else if !file_path.starts_with("sync://") {
+            let fp = std::path::PathBuf::from(&file_path);
+            tokio::task::spawn_blocking(move || {
+                if let Ok(tagged) = lofty::read_from_path(&fp) {
+                    if let Some(pic) =
+                        crate::infrastructure::filesystem::MetadataExtractor::find_best_picture(&tagged)
+                    {
+                        let data = pic.data().to_vec();
+                        let ext =
+                            crate::infrastructure::filesystem::MetadataExtractor::detect_image_extension(
+                                &data,
+                                pic.mime_type(),
+                            );
+                        return Some((data, ext.to_string()));
+                    }
+                }
+                None
+            })
+            .await
+            .unwrap_or(None)
+        } else {
+            None
+        }
+    };
+
+    let Some((bytes, ext)) = art_data else {
+        let err_header = serde_json::json!({
+            "status": "error",
+            "message": "No artwork available for track",
+        });
+        let _ = send_framed_header(send, &err_header).await;
+        let _ = send.finish();
+        return;
+    };
+
+    let ok_header = serde_json::json!({
+        "status": "ok",
+        "format": ext,
+        "size": bytes.len(),
+    });
+    if let Err(e) = send_framed_header(send, &ok_header).await {
+        warn!(error = %e, "Failed to send artwork header");
+        return;
+    }
+
+    if let Err(e) = send.write_all(&bytes).await {
+        warn!(error = %e, "Failed to send artwork bytes");
+        return;
+    }
+    let _ = send.finish();
+    runtime.record_bytes_sent(bytes.len() as u64);
+    info!(track_id = %track_id, bytes = bytes.len(), "Streamed artwork over QUIC to peer");
 }
 
 /// Produce safe filenames without path traversal or invalid characters
@@ -770,15 +960,34 @@ fn apply_single_change(change: &serde_json::Value, conn: &rusqlite::Connection) 
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("sync://{}", id));
+        let album_art_path = payload
+            .get("album_art_path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                if s.starts_with("sync-art://") || s.starts_with("http") {
+                    s.to_string()
+                } else {
+                    format!("sync-art://{}", id)
+                }
+            })
+            .or_else(|| {
+                if payload.get("has_art").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    Some(format!("sync-art://{}", id))
+                } else {
+                    None
+                }
+            });
 
         let res = conn.execute(
-            "INSERT INTO tracks (id, title, artist, album, duration_secs, file_path, format, source_url, date_added)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO tracks (id, title, artist, album, duration_secs, file_path, format, source_url, album_art_path, date_added)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 artist = excluded.artist,
                 album = excluded.album,
-                duration_secs = excluded.duration_secs",
+                duration_secs = excluded.duration_secs,
+                album_art_path = COALESCE(tracks.album_art_path, excluded.album_art_path)",
             rusqlite::params![
                 id,
                 title,
@@ -788,6 +997,7 @@ fn apply_single_change(change: &serde_json::Value, conn: &rusqlite::Connection) 
                 file_path,
                 format,
                 source_url,
+                album_art_path,
                 chrono::Utc::now().to_rfc3339()
             ],
         );
@@ -1024,26 +1234,7 @@ impl SyncEngine {
             ));
         };
 
-        let target_addr = if let Ok(ticket) = EndpointTicket::from_str(&resolved) {
-            ticket.endpoint_addr().clone()
-        } else if let Some((id_str, addr_str)) = resolved.split_once('@') {
-            if let (Some(id), Ok(sock)) = (
-                parse_endpoint_id(id_str),
-                std::net::SocketAddr::from_str(addr_str.trim()),
-            ) {
-                EndpointAddr::new(id).with_ip_addr(sock)
-            } else {
-                return Err(NetworkError::ConnectionError(format!(
-                    "Invalid endpoint@ip:port format: {resolved}"
-                )));
-            }
-        } else if let Some(endpoint_id) = parse_endpoint_id(&resolved) {
-            EndpointAddr::from(endpoint_id)
-        } else {
-            return Err(NetworkError::ConnectionError(format!(
-                "Cannot resolve '{resolved}' to a valid Iroh EndpointTicket or EndpointId"
-            )));
-        };
+        let target_addr = resolve_target_addr(&resolved)?;
 
         info!(endpoint_id = %target_addr.id, track_id = %track_id, "Initiating P2P audio fetch over QUIC");
 
@@ -1210,6 +1401,153 @@ impl SyncEngine {
         }
 
         Ok(local_path)
+    }
+
+    /// Fetch album artwork for a track from a remote P2P peer over QUIC
+    pub async fn fetch_track_artwork(
+        &self,
+        peer: &str,
+        track_id: &str,
+        dest_dir: &std::path::Path,
+    ) -> Result<PathBuf, NetworkError> {
+        let resolved = self
+            .runtime
+            .resolve_peer_id(peer)
+            .await
+            .unwrap_or_else(|| peer.to_string());
+
+        let ep_opt = self.runtime.endpoint().await;
+        let Some(ep) = ep_opt else {
+            return Err(NetworkError::ConnectionError(
+                "Iroh endpoint not started; call Discovery::start() first".to_string(),
+            ));
+        };
+
+        let target_addr = resolve_target_addr(&resolved)?;
+
+        info!(endpoint_id = %target_addr.id, track_id = %track_id, "Initiating P2P artwork fetch over QUIC");
+
+        let conn = ep
+            .connect(target_addr, ALPN_SYNC)
+            .await
+            .map_err(|e| NetworkError::ConnectionError(format!("QUIC connect failed: {e}")))?;
+
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| NetworkError::TransferError(format!("Open bi-stream failed: {e}")))?;
+
+        let request = SyncRequest {
+            payload: serde_json::json!({
+                "action": "fetch_artwork",
+                "track_id": track_id,
+            }),
+        };
+
+        let req_bytes =
+            serde_json::to_vec(&request).map_err(|e| NetworkError::TransferError(e.to_string()))?;
+
+        send.write_all(&req_bytes)
+            .await
+            .map_err(|e| NetworkError::TransferError(format!("Failed to write request: {e}")))?;
+        send.finish().map_err(|e| {
+            NetworkError::TransferError(format!("Failed to finish send stream: {e}"))
+        })?;
+
+        let header = read_framed_header(&mut recv).await?;
+        if header.get("status").and_then(|v| v.as_str()) != Some("ok") {
+            let msg = header
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Remote peer rejected artwork fetch");
+            return Err(NetworkError::TransferError(msg.to_string()));
+        }
+
+        let format = header
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("jpg");
+        let size = header.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        let file_name = format!("{track_id}.{format}");
+        let local_path = dest_dir.join(&file_name);
+
+        let mut dest_file = tokio::fs::File::create(&local_path).await.map_err(|e| {
+            NetworkError::IoError(format!("Failed to create destination file: {e}"))
+        })?;
+
+        let _conn_guard = conn;
+        let mut buf = vec![0u8; 32 * 1024];
+        let mut total_received = 0u64;
+        while total_received < size || size == 0 {
+            let to_read = if size > 0 {
+                ((size - total_received) as usize).min(buf.len())
+            } else {
+                buf.len()
+            };
+            let n = match tokio::io::AsyncReadExt::read(&mut recv, &mut buf[..to_read]).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    return Err(NetworkError::TransferError(format!(
+                        "Failed to read artwork stream: {e}"
+                    )));
+                }
+            };
+            dest_file
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| NetworkError::IoError(format!("Failed to write to file: {e}")))?;
+            total_received += n as u64;
+            if size > 0 && total_received >= size {
+                break;
+            }
+        }
+
+        dest_file
+            .flush()
+            .await
+            .map_err(|e| NetworkError::IoError(format!("Failed to flush artwork file: {e}")))?;
+
+        self.runtime.record_bytes_received(total_received);
+        info!(path = ?local_path, bytes = total_received, track_id = %track_id, "Successfully received and saved P2P album artwork");
+
+        // Update track record in local SQLite database
+        if let Some(db) = self.runtime.alias_db().await {
+            if let Ok(sql_conn) = db.connection() {
+                let path_str = local_path.to_string_lossy().to_string();
+                let _ = sql_conn.execute(
+                    "UPDATE tracks SET album_art_path = ?1 WHERE id = ?2",
+                    rusqlite::params![path_str, track_id],
+                );
+            }
+        }
+
+        Ok(local_path)
+    }
+}
+
+/// Helper: resolve a string (Ticket, NodeId, or NodeId@ip:port) into an EndpointAddr
+fn resolve_target_addr(resolved: &str) -> Result<EndpointAddr, NetworkError> {
+    if let Ok(ticket) = EndpointTicket::from_str(resolved) {
+        Ok(ticket.endpoint_addr().clone())
+    } else if let Some((id_str, addr_str)) = resolved.split_once('@') {
+        if let (Some(id), Ok(sock)) = (
+            parse_endpoint_id(id_str),
+            std::net::SocketAddr::from_str(addr_str.trim()),
+        ) {
+            Ok(EndpointAddr::new(id).with_ip_addr(sock))
+        } else {
+            Err(NetworkError::ConnectionError(format!(
+                "Invalid endpoint@ip:port format: {resolved}"
+            )))
+        }
+    } else if let Some(endpoint_id) = parse_endpoint_id(resolved) {
+        Ok(EndpointAddr::from(endpoint_id))
+    } else {
+        Err(NetworkError::ConnectionError(format!(
+            "Cannot resolve '{resolved}' to a valid Iroh EndpointTicket or EndpointId"
+        )))
     }
 }
 
@@ -1439,7 +1777,20 @@ mod tests {
         let received_art = tokio::fs::read(&art_path).await.unwrap();
         assert_eq!(received_art, dummy_art_data);
 
+        // B also tests fetching standalone artwork on-demand from A
+        let art_dest_dir =
+            std::env::temp_dir().join(format!("test_art_dest_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&art_dest_dir).await.unwrap();
+        let fetched_art_standalone = engine_b
+            .fetch_track_artwork(&ticket_a, &track_id, &art_dest_dir)
+            .await
+            .expect("fetch_track_artwork failed");
+        assert!(fetched_art_standalone.exists());
+        let received_art_standalone = tokio::fs::read(&fetched_art_standalone).await.unwrap();
+        assert_eq!(received_art_standalone, dummy_art_data);
+
         // Cleanup
+        let _ = tokio::fs::remove_dir_all(&art_dest_dir).await;
         let _ = tokio::fs::remove_file(&dummy_audio_path).await;
         let _ = tokio::fs::remove_file(&dummy_art_path).await;
         let _ = tokio::fs::remove_file(&fetched_path).await;

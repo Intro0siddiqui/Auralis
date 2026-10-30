@@ -494,21 +494,24 @@ class YouTubeResolver {
             const scoreFn = (f) => {
                 let base = scoreFormat(f);
                 const mimeL = String(f.mime_type || f.mimeType || '').toLowerCase();
-                if (targetContainer === 'mp4' && (mimeL.includes('mp4') || mimeL.includes('m4a'))) {
+                const isVideo = Boolean(f.has_video || mimeL.includes('video'));
+                if (targetContainer === 'mp4' && !isVideo && (mimeL.includes('mp4') || mimeL.includes('m4a'))) {
                     base += 0.5;
-                } else if (targetContainer === 'webm' && (mimeL.includes('webm') || mimeL.includes('opus'))) {
+                } else if (targetContainer === 'webm' && !isVideo && (mimeL.includes('webm') || mimeL.includes('opus'))) {
                     base += 0.5;
                 }
                 return base;
             };
 
             const sorted = [...valid].sort((a, b) => {
-                const diffScore = scoreFn(b) - scoreFn(a);
-                if (diffScore !== 0) return diffScore;
-                // Secondary tie-breakers: audio-only, direct URL, content-length, bitrate
+                // Audio-only formats (itag 140 / 251) strictly outrank muxed video+audio formats (itag 18)
                 const aAudioOnly = (isAudioOnlyProgressive(a) || !a.has_video) ? 1 : 0;
                 const bAudioOnly = (isAudioOnlyProgressive(b) || !b.has_video) ? 1 : 0;
                 if (bAudioOnly !== aAudioOnly) return bAudioOnly - aAudioOnly;
+
+                const diffScore = scoreFn(b) - scoreFn(a);
+                if (diffScore !== 0) return diffScore;
+                // Secondary tie-breakers: direct URL, content-length, bitrate
                 const aHasUrl = a.url ? 1 : 0;
                 const bHasUrl = b.url ? 1 : 0;
                 if (bHasUrl !== aHasUrl) return bHasUrl - aHasUrl;
@@ -633,14 +636,11 @@ class YouTubeResolver {
         // ANDROID, ANDROID_VR, VISIONOS, YTSTUDIO_ANDROID, YTMUSIC_ANDROID, TV,
         // TV_SIMPLY, TV_EMBEDDED, WEB_EMBEDDED, WEB_CREATOR.
         //
-        // Whether one of the allowlisted clients we do not emit (WEB_EMBEDDED,
-        // VISIONOS) would resolve where mweb and web come back UNPLAYABLE is
-        // still an open question — but it is not urgent, because a device report
-        // has now produced a client that WORKS (ANDROID, via the legacy
-        // progressive path). Churning the ordering for an untried client is not
-        // worth breaking the one we can measure. Left for a report to motivate.
+        // VISIONOS leads the token-free tier as the preferred client: it requires
+        // no PO token, needs no BotGuard decipher, and returns pure audio streams
+        // (itag 140 m4a / itag 251 opus) directly without falling back to muxed 360p.
         const SERVABLE_CLIENTS = ['MWEB', 'WEB'];
-        const TOKEN_FREE_CLIENTS = ['ANDROID_VR', 'TV'];
+        const TOKEN_FREE_CLIENTS = ['VISIONOS'];
         const UNMINTABLE_CLIENTS = ['IOS', 'ANDROID'];
         const orderedClients = opts.poToken
             ? [...SERVABLE_CLIENTS, ...TOKEN_FREE_CLIENTS, ...UNMINTABLE_CLIENTS]
@@ -813,10 +813,19 @@ class YouTubeResolver {
                     throw new Error(`Client '${cl}' produced no usable stream`);
                 };
 
-                const res = await Promise.any(effectiveOrderedClients.map((cl) => executeClient(cl)));
-                info = res.info;
-                winningClient = res.winningClient;
-                if (res.report) res.report.chosen = true;
+                for (const cl of effectiveOrderedClients) {
+                    try {
+                        const res = await executeClient(cl);
+                        if (res && res.info) {
+                            info = res.info;
+                            winningClient = res.winningClient;
+                            if (res.report) res.report.chosen = true;
+                            break;
+                        }
+                    } catch (e) {
+                        lastErr = e;
+                    }
+                }
             } catch (e) {
                 lastErr = e;
             }
@@ -898,10 +907,19 @@ class YouTubeResolver {
                     throw new Error(`getInfo('${cl}') produced no usable stream`);
                 };
 
-                const res = await Promise.any(clientNames.map((cl) => getInfoClient(cl)));
-                info = res.info;
-                winningClient = res.winningClient;
-                if (res.report) res.report.chosen = true;
+                for (const cl of clientNames) {
+                    try {
+                        const res = await getInfoClient(cl);
+                        if (res && res.info) {
+                            info = res.info;
+                            winningClient = res.winningClient;
+                            if (res.report) res.report.chosen = true;
+                            break;
+                        }
+                    } catch (e) {
+                        lastErr = e;
+                    }
+                }
             } catch (e) {
                 lastErr = e;
             }
@@ -1286,6 +1304,7 @@ class YouTubeResolver {
         // Build headers matched to the InnerTube client that produced the URL
         // — googlevideo validates UA/Referer/Origin against the client context.
         const uaMap = {
+            'VISIONOS': 'Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
             'IOS': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
             'ANDROID': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US; Pixel 8 Build/UD1A.230803.041)',
             'ANDROID_VR': 'com.google.android.apps.youtube.vr/1.56.42 (Linux; U; Android 14; en_US; Pixel 8 Build/UD1A.230803.041)',
@@ -1560,20 +1579,23 @@ class YouTubeResolver {
         const scoreFn = (f) => {
             let base = scoreFormat(f);
             const mimeL = String(f.mime_type || f.mimeType || '').toLowerCase();
-            if (targetContainer === 'mp4' && (mimeL.includes('mp4') || mimeL.includes('m4a'))) {
+            const isVideo = Boolean(f.has_video || mimeL.includes('video'));
+            if (targetContainer === 'mp4' && !isVideo && (mimeL.includes('mp4') || mimeL.includes('m4a'))) {
                 base += 0.5;
-            } else if (targetContainer === 'webm' && (mimeL.includes('webm') || mimeL.includes('opus'))) {
+            } else if (targetContainer === 'webm' && !isVideo && (mimeL.includes('webm') || mimeL.includes('opus'))) {
                 base += 0.5;
             }
             return base;
         };
 
         const sorted = [...valid].sort((a, b) => {
-            const diffScore = scoreFn(b) - scoreFn(a);
-            if (diffScore !== 0) return diffScore;
+            // Audio-only formats (itag 140 / 251) strictly outrank muxed video+audio formats (itag 18)
             const aAudioOnly = ((a.has_audio && !a.has_video) || !a.has_video) ? 1 : 0;
             const bAudioOnly = ((b.has_audio && !b.has_video) || !b.has_video) ? 1 : 0;
             if (bAudioOnly !== aAudioOnly) return bAudioOnly - aAudioOnly;
+
+            const diffScore = scoreFn(b) - scoreFn(a);
+            if (diffScore !== 0) return diffScore;
             const aHasUrl = a.url ? 1 : 0;
             const bHasUrl = b.url ? 1 : 0;
             if (bHasUrl !== aHasUrl) return bHasUrl - aHasUrl;

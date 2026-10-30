@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import androidx.annotation.Keep
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -15,6 +16,8 @@ import java.lang.ref.WeakReference
 
 @Keep
 class MainActivity : TauriActivity() {
+
+    private var webViewRef: WeakReference<WebView>? = null
 
     @Keep
     companion object {
@@ -48,13 +51,80 @@ class MainActivity : TauriActivity() {
 
         // Ensure playback notification channel exists early on app startup
         MediaPlaybackService.createNotificationChannel(this)
+
+        // Intercept back gesture / button on Android to prevent finishing the activity
+        // when the user exits the app. Media playback and background services must stay alive!
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                val wv = webViewRef?.get() ?: findWebView()
+                if (wv != null && wv.canGoBack()) {
+                    wv.goBack()
+                } else {
+                    moveTaskToBack(true)
+                }
+            }
+        })
         
         // Post permission check after window and webview layout attach
         Handler(Looper.getMainLooper()).postDelayed({
             if (!isFinishing && !isDestroyed) {
                 checkAndRequestPermissions()
+                try {
+                    findWebView()?.settings?.mediaPlaybackRequiresUserGesture = false
+                } catch (_: Exception) {}
             }
         }, 500)
+    }
+
+    override fun onWebViewCreate(webView: WebView) {
+        super.onWebViewCreate(webView)
+        webViewRef = WeakReference(webView)
+        try {
+            webView.settings.mediaPlaybackRequiresUserGesture = false
+        } catch (_: Exception) {}
+    }
+
+    override fun onPause() {
+        super.onPause()
+        keepWebViewRunningForAudio()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        keepWebViewRunningForAudio()
+    }
+
+    private fun keepWebViewRunningForAudio() {
+        val runnable = Runnable {
+            try {
+                val wv = webViewRef?.get() ?: findWebView()
+                wv?.let {
+                    it.onResume()
+                    it.resumeTimers()
+                }
+            } catch (_: Exception) {}
+        }
+        runnable.run()
+        Handler(Looper.getMainLooper()).postDelayed(runnable, 50)
+    }
+
+    private fun findWebView(): WebView? {
+        try {
+            val root = window?.decorView?.rootView as? android.view.ViewGroup ?: return null
+            val queue: ArrayDeque<android.view.View> = ArrayDeque()
+            queue.add(root)
+            while (queue.isNotEmpty()) {
+                val v = queue.removeFirst()
+                if (v is WebView) {
+                    return v
+                } else if (v is android.view.ViewGroup) {
+                    for (i in 0 until v.childCount) {
+                        v.getChildAt(i)?.let { queue.add(it) }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return null
     }
 
     override fun onResume() {

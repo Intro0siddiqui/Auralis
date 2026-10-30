@@ -206,13 +206,13 @@ impl AndroidScanner {
         let (mtime, size) = inner?;
 
         if let Some(existing_track) = existing.as_ref() {
-            let needs_rescan = existing_track.duration_secs == 0;
+            let needs_rescan = existing_track.duration_secs == 0 || existing_track.album_art_path.is_none();
             if !needs_rescan && existing_track.mtime == mtime && existing_track.file_size == size {
                 debug!(path = %path_str, "File unchanged, skipping");
                 return Ok(crate::infrastructure::filesystem::scanner::ScanResult::Skipped);
             }
             if needs_rescan {
-                debug!(path = %path_str, "Existing track has 0s duration — forcing re-scan");
+                debug!(path = %path_str, "Existing track has 0s duration or missing artwork — forcing re-scan");
             }
         }
 
@@ -574,10 +574,12 @@ impl AndroidScanner {
 
             let mtime = raw.date_modified.unwrap_or(0);
 
-            // Incremental check: if track exists, duration > 0, and size/mtime match, skip
+            // Incremental check: if track exists, duration > 0, has art, and size/mtime match, skip
             if let Some(existing_track) = existing.as_ref() {
                 let mtime_match = raw.date_modified.is_none() || existing_track.mtime == mtime;
-                if existing_track.duration_secs > 0
+                let needs_art = existing_track.album_art_path.is_none();
+                if !needs_art
+                    && existing_track.duration_secs > 0
                     && existing_track.file_size == raw.size
                     && mtime_match
                 {
@@ -650,6 +652,20 @@ impl AndroidScanner {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(ToString::to_string);
+
+            if track.album_art_path.is_none() {
+                let p = path_buf.clone();
+                track.album_art_path = tokio::task::spawn_blocking(move || {
+                    MetadataExtractor::find_sidecar_art(&p).or_else(|| {
+                        lofty::read_from_path(&p)
+                            .ok()
+                            .as_ref()
+                            .and_then(MetadataExtractor::extract_and_cache_embedded_art)
+                    })
+                })
+                .await
+                .unwrap_or(None);
+            }
 
             if let Some(existing_track) = existing {
                 let updated_track = preserve_track_state(&existing_track, track);

@@ -146,6 +146,8 @@ impl AuralisApp {
                 commands::library::get_search_results_html,
                 // Playback commands
                 commands::playback::play,
+                commands::playback::play_or_stream_track,
+                commands::playback::stream_online_audio,
                 commands::playback::pause,
                 commands::playback::resume,
                 commands::playback::stop,
@@ -164,6 +166,8 @@ impl AuralisApp {
                 commands::playback::remove_from_queue,
                 commands::playback::clear_queue,
                 commands::playback::request_notification_permission,
+                commands::playback::update_stream_notification,
+                commands::playback::stop_stream_notification,
                 // Download commands
                 commands::downloads::download_audio,
                 commands::downloads::download_playlist,
@@ -174,6 +178,9 @@ impl AuralisApp {
                 commands::downloads::list_downloads,
                 commands::downloads::http_fetch,
                 commands::downloads::register_stream_url,
+                // Attestation / PO Token commands
+                commands::attestation::harvest_po_token,
+                commands::attestation::record_harvested_po_token,
                 // Playlist commands
                 commands::playlists::get_playlists,
                 commands::playlists::get_playlist,
@@ -254,6 +261,13 @@ impl AuralisApp {
         db.run_migrations()
             .map_err(|e| format!("Failed to run migrations: {e:?}"))?;
         app_handle.manage(db);
+
+        // Configure persistent artwork cache directory in application cache path
+        if let Ok(cache_dir) = app_handle.path().app_cache_dir() {
+            let art_cache = cache_dir.join("artwork");
+            let _ = std::fs::create_dir_all(&art_cache);
+            crate::infrastructure::filesystem::MetadataExtractor::set_artwork_cache_dir(art_cache);
+        }
 
         Ok(())
     }

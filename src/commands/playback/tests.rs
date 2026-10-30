@@ -55,14 +55,14 @@ fn playing_sink_is_never_replayed() {
 }
 
 /// No sink and a drained sink both answer `is_empty == true` from outside
-/// `AudioPlayer`; both must go through `player.resume()` so its
-/// `StateError` still reaches the frontend, which is what triggers the
-/// replay the log then correlates.
+/// `AudioPlayer`. When the audio file is ready and readable, resuming must rebuild
+/// on a fresh sink so that ended, stopped, or drained tracks restart smoothly
+/// rather than failing with `nothing to resume`.
 #[test]
-fn sink_without_a_live_source_keeps_the_old_unpause_route() {
+fn sink_without_a_live_source_replays_on_fresh_sink_if_file_ready() {
     assert_eq!(
         choose_resume_strategy(false, false, true),
-        ResumeStrategy::Unpause
+        ResumeStrategy::FreshSinkReplay
     );
 }
 

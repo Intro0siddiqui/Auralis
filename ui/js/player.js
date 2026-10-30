@@ -44,6 +44,7 @@ class PlayerController {
                 this.updateProgressUI();
             }
             this.updatePlayButton();
+            this.highlightActiveTrack(this.currentTrack?.id, state.is_playing);
         });
 
         window.Auralis.bridge.on('playback:track', (payload) => {
@@ -67,7 +68,8 @@ class PlayerController {
             this.updateFullScreenMetadata();
             this.updateMediaSessionMetadata(track);
             this.updatePositionState();
-            if (this.queuePanel && this.queuePanel.classList.contains('open')) {
+            this.highlightActiveTrack(track.id, this.isPlaying);
+            if (this.queuePanel?.classList?.contains('open')) {
                 this.renderQueuePanel();
             }
         });
@@ -83,9 +85,34 @@ class PlayerController {
             this.updatePositionState();
         });
 
+        window.Auralis.bridge.on('playback:command', (cmd) => {
+            if (cmd === 'play') {
+                if (window._auralisStreamAudio) {
+                    window._auralisStreamAudio.play().catch(() => {});
+                } else {
+                    this.play();
+                }
+            } else if (cmd === 'pause') {
+                if (window._auralisStreamAudio) {
+                    window._auralisStreamAudio.pause();
+                } else {
+                    this.pause();
+                }
+            } else if (cmd === 'next') {
+                this.next();
+            } else if (cmd === 'previous') {
+                this.previous();
+            } else if (cmd && typeof cmd === 'string' && cmd.startsWith('seek:')) {
+                const secs = parseInt(cmd.substring(5), 10);
+                if (!isNaN(secs)) {
+                    this.seek(secs);
+                }
+            }
+        });
+
         window.Auralis.bridge.on('playback:queue', () => {
             const drawer = document.getElementById('player-full-queue-drawer');
-            if ((this.queuePanel && this.queuePanel.classList.contains('open')) || (drawer && drawer.classList.contains('open'))) {
+            if ((this.queuePanel?.classList?.contains('open')) || (drawer?.classList?.contains('open'))) {
                 this.renderQueuePanel();
             }
         });
@@ -230,6 +257,7 @@ class PlayerController {
             // Also re-sync bar when any view swaps
             if (window.Auralis && window.Auralis.player) {
                 window.Auralis.player.hydrateState().catch(() => {});
+                this.highlightActiveTrack(this.currentTrack?.id, this.isPlaying);
             }
             if (isPlayerSwap || document.getElementById('player-full')) {
                 const fp = document.getElementById('player-full');
@@ -461,6 +489,15 @@ class PlayerController {
         fullVolume.addEventListener('touchend', () => { isDragging = false; });
     }
 
+    updateTrackInfo() {
+        if (this.currentTrack && window.Auralis?.bridge?.updatePlayerBar) {
+            window.Auralis.bridge.updatePlayerBar(this.currentTrack);
+        }
+        this.updateFullScreenMetadata();
+        this.updatePlayButton();
+        this.updateProgressUI();
+    }
+
     updateFullScreenMetadata() {
         const fullTitle = document.getElementById('player-full-title');
         const fullArtist = document.getElementById('player-full-artist');
@@ -527,7 +564,7 @@ class PlayerController {
                     break;
                 case 'Escape':
                     const drawer = document.getElementById('player-full-queue-drawer');
-                    if (drawer && drawer.classList.contains('open')) {
+                    if (drawer?.classList?.contains('open')) {
                         this.toggleFullScreenQueue(false);
                     } else {
                         const overlay = document.getElementById('overlay-root');
@@ -903,7 +940,15 @@ class PlayerController {
     }
 
     async hydrateState() {
-        if (window._auralisStreamAudio && !window._auralisStreamAudio.paused) {
+        if (window._auralisStreamAudio) {
+            if (this.currentTrack) {
+                if (window.Auralis?.bridge?.updatePlayerBar) {
+                    window.Auralis.bridge.updatePlayerBar(this.currentTrack);
+                }
+                this.updateFullScreenMetadata();
+                this.updatePlayButton();
+                this.updateProgressUI();
+            }
             return;
         }
         try {
@@ -937,9 +982,30 @@ class PlayerController {
             this.updateFullScreenMetadata();
             this.updateMediaSessionMetadata(np.track);
             this.updatePositionState();
+            this.highlightActiveTrack(np.track.id, this.isPlaying);
         } catch (e) {
             console.warn('hydrateState failed', e);
         }
+    }
+
+    highlightActiveTrack(trackId, isPlaying) {
+        const id = trackId ? String(trackId) : (this.currentTrack?.id ? String(this.currentTrack.id) : null);
+        const playing = typeof isPlaying === 'boolean' ? isPlaying : Boolean(this.isPlaying);
+
+        const rows = document.querySelectorAll('.track-row, .queue-track-row, [data-role="play-card"]');
+        rows.forEach(row => {
+            const rowId = row.dataset.trackId || row.dataset.firstTrackId;
+            if (id && rowId && String(rowId) === id) {
+                row.classList.add('active');
+                if (playing) {
+                    row.classList.add('is-playing');
+                } else {
+                    row.classList.remove('is-playing');
+                }
+            } else {
+                row.classList.remove('active', 'is-playing');
+            }
+        });
     }
 
     seekRelative(delta) {

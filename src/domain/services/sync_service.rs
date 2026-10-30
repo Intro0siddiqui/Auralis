@@ -357,10 +357,11 @@ impl SyncService {
             } else if let Some(db) = self.sync_engine.runtime().alias_db().await {
                 if let Ok(conn) = db.connection() {
                     if let Ok(mut stmt) = conn.prepare(
-                        "SELECT id, title, artist, album, duration_secs, format, source_url FROM tracks LIMIT 500",
+                        "SELECT id, title, artist, album, duration_secs, format, source_url, album_art_path FROM tracks LIMIT 500",
                     ) {
                         let tracks: Vec<serde_json::Value> = stmt
                             .query_map([], |row| {
+                                let art: Option<String> = row.get(7)?;
                                 Ok(serde_json::json!({
                                     "id": row.get::<_, String>(0)?,
                                     "title": row.get::<_, String>(1)?,
@@ -369,6 +370,8 @@ impl SyncService {
                                     "duration_secs": row.get::<_, i64>(4)?,
                                     "format": row.get::<_, String>(5)?,
                                     "source_url": row.get::<_, Option<String>>(6)?,
+                                    "has_art": art.is_some(),
+                                    "album_art_path": art,
                                 }))
                             })
                             .map(|iter| iter.flatten().collect())
@@ -481,7 +484,7 @@ impl SyncService {
         track_id: &str,
         dest_dir: &std::path::Path,
     ) -> Result<PathBuf, SyncError> {
-        let peers: Vec<String> = {
+        let mut peers: Vec<String> = {
             let devices = self.paired_devices.read().await;
             devices
                 .values()
@@ -493,6 +496,44 @@ impl SyncService {
                 })
                 .collect()
         };
+
+        // Fallback 1: reload from database if in-memory paired_devices is empty
+        if peers.is_empty() {
+            if let Ok(db_devices) = self.sync_repository.get_paired_devices().await {
+                let mut in_memory = self.paired_devices.write().await;
+                for d in &db_devices {
+                    in_memory.insert(d.id, d.clone());
+                    if let Some(target) = d
+                        .ip_address
+                        .as_ref()
+                        .filter(|ip| ip.starts_with("endpoint") || ip.contains('@'))
+                        .or(d.peer_id.as_ref())
+                    {
+                        peers.push(target.clone());
+                    }
+                }
+            }
+        }
+
+        // Fallback 2: check NetworkRuntime's alias DB directly
+        if peers.is_empty() {
+            if let Some(db) = self.sync_engine.runtime().alias_db().await {
+                if let Ok(conn) = db.connection() {
+                    let stmt = conn
+                        .prepare(
+                            "SELECT CASE WHEN ip_address LIKE 'endpoint%' OR ip_address LIKE '%@%' THEN ip_address ELSE peer_id END FROM paired_devices WHERE peer_id IS NOT NULL OR ip_address IS NOT NULL",
+                        )
+                        .ok();
+                    if let Some(mut stmt) = stmt {
+                        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                            for r in rows.flatten() {
+                                peers.push(r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if peers.is_empty() {
             return Err(SyncError::NetworkError(
@@ -517,6 +558,89 @@ impl SyncService {
 
         Err(SyncError::NetworkError(format!(
             "Failed to fetch audio from paired devices: {last_err}"
+        )))
+    }
+
+    /// Fetch album artwork for a remote sync track from a paired peer
+    pub async fn fetch_artwork_for_track(
+        &self,
+        track_id: &str,
+        dest_dir: &std::path::Path,
+    ) -> Result<PathBuf, SyncError> {
+        let mut peers: Vec<String> = {
+            let devices = self.paired_devices.read().await;
+            devices
+                .values()
+                .filter_map(|d| {
+                    d.ip_address
+                        .clone()
+                        .filter(|ip| ip.starts_with("endpoint") || ip.contains('@'))
+                        .or_else(|| d.peer_id.clone())
+                })
+                .collect()
+        };
+
+        // Fallback 1: reload from database if in-memory paired_devices is empty
+        if peers.is_empty() {
+            if let Ok(db_devices) = self.sync_repository.get_paired_devices().await {
+                let mut in_memory = self.paired_devices.write().await;
+                for d in &db_devices {
+                    in_memory.insert(d.id, d.clone());
+                    if let Some(target) = d
+                        .ip_address
+                        .as_ref()
+                        .filter(|ip| ip.starts_with("endpoint") || ip.contains('@'))
+                        .or(d.peer_id.as_ref())
+                    {
+                        peers.push(target.clone());
+                    }
+                }
+            }
+        }
+
+        // Fallback 2: check NetworkRuntime's alias DB directly
+        if peers.is_empty() {
+            if let Some(db) = self.sync_engine.runtime().alias_db().await {
+                if let Ok(conn) = db.connection() {
+                    let stmt = conn
+                        .prepare(
+                            "SELECT CASE WHEN ip_address LIKE 'endpoint%' OR ip_address LIKE '%@%' THEN ip_address ELSE peer_id END FROM paired_devices WHERE peer_id IS NOT NULL OR ip_address IS NOT NULL",
+                        )
+                        .ok();
+                    if let Some(mut stmt) = stmt {
+                        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                            for r in rows.flatten() {
+                                peers.push(r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if peers.is_empty() {
+            return Err(SyncError::NetworkError(
+                "No paired devices found to fetch artwork from".to_string(),
+            ));
+        }
+
+        let mut last_err = String::new();
+        for peer in peers {
+            match self
+                .sync_engine
+                .fetch_track_artwork(&peer, track_id, dest_dir)
+                .await
+            {
+                Ok(path) => return Ok(path),
+                Err(e) => {
+                    warn!(peer = %peer, track_id = %track_id, error = %e, "Failed to fetch artwork from peer, trying next");
+                    last_err = e.to_string();
+                }
+            }
+        }
+
+        Err(SyncError::NetworkError(format!(
+            "Failed to fetch artwork from paired devices: {last_err}"
         )))
     }
 

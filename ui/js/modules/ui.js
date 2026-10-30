@@ -185,7 +185,7 @@ export const uiMethods = {
         container.appendChild(toast);
 
         const dismiss = () => {
-            if (toast.classList.contains('toast-out')) return;
+            if (toast?.classList?.contains('toast-out')) return;
             toast.classList.add('toast-out');
             toast.addEventListener('animationend', () => {
                 if (toast.parentElement) toast.remove();

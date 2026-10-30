@@ -19,24 +19,37 @@ export const playerMethods = {
 
     async playTrack(trackId) {
         if (!trackId) return;
+        const track = (this.tracks && this.tracks.find(t => String(t.id) === String(trackId)));
+
+        // Instant visual feedback — zero delay
+        if (window.Auralis?.player) {
+            window.Auralis.player.highlightActiveTrack?.(trackId, true);
+            window.Auralis.player.isPlaying = true;
+            window.Auralis.player.updatePlayButton();
+        }
+        if (track) {
+            this.updatePlayerBar(track);
+            if (track.file_path && String(track.file_path).startsWith('sync://')) {
+                this.showToast(`Fetching “${track.title || 'track'}” from paired device…`, 'info', 4000);
+            }
+        }
+
         try {
-            // Populate Rust queue context-aware before play so Next/Prev work (fixes empty queue dead Next)
-            try {
-                const ids = (this.tracks && this.tracks.length) ? this.tracks.map(t => t.id) : [trackId];
-                if (ids.length > 1) {
-                    await this.setQueue(ids, trackId);
-                } else if (ids.length === 1) {
-                    // Single track view — still set queue so Next wraps correctly
-                    const cur = this.tracks.find(t => String(t.id) === String(trackId));
-                    if (cur) await this.setQueue([String(cur.id)], String(cur.id));
-                }
-            } catch (_) {}
+            // Seed queue in parallel so playback invocation is never blocked
+            const ids = (this.tracks && this.tracks.length) ? this.tracks.map(t => t.id) : [trackId];
+            const queuePromise = (ids.length > 1)
+                ? this.setQueue(ids, trackId).catch(() => {})
+                : (ids.length === 1 && track)
+                    ? this.setQueue([String(track.id)], String(track.id)).catch(() => {})
+                    : Promise.resolve();
+
             const nowPlaying = await this.invoke('play', { track_id: trackId, trackId });
+            await queuePromise;
+
             if (nowPlaying && nowPlaying.track) {
                 this.updatePlayerBar(nowPlaying.track);
-            } else {
-                const track = this.tracks.find(t => t.id === trackId);
-                if (track) this.updatePlayerBar(track);
+            } else if (track) {
+                this.updatePlayerBar(track);
             }
             // Immediate bar sync for mobile where HTMX swap may not have fired yet
             try { if (window.Auralis && window.Auralis.player) window.Auralis.player.hydrateState().catch(()=>{}); } catch (_) {}
@@ -107,6 +120,25 @@ export const playerMethods = {
         }
     },
 
+    closeQueue() {
+        if (window.Auralis && window.Auralis.player) {
+            if (typeof window.Auralis.player.toggleFullScreenQueue === 'function') {
+                window.Auralis.player.toggleFullScreenQueue(false);
+            }
+            if (typeof window.Auralis.player.toggleQueue === 'function') {
+                window.Auralis.player.toggleQueue(false);
+            }
+        }
+        const drawer = document.getElementById('player-full-queue-drawer');
+        if (drawer) drawer.classList.remove('open');
+        const backdrop = document.getElementById('player-full-queue-backdrop');
+        if (backdrop) backdrop.classList.remove('open');
+        const queuePanel = document.getElementById('queue-panel');
+        if (queuePanel) queuePanel.classList.remove('open');
+        const queueBtn = document.getElementById('player-full-queue-btn') || document.getElementById('queue-btn');
+        if (queueBtn) queueBtn.classList.remove('active');
+    },
+
     async clearQueue() {
         try {
             await this.invoke('clear_queue');
@@ -157,17 +189,24 @@ export const playerMethods = {
     },
 
     async toggleTrackFavorite(trackId, buttonEl) {
-        const track = this.tracks.find(t => t.id === trackId);
-        const currentFav = track ? Boolean(track.is_favorite) : (buttonEl && buttonEl.classList.contains('liked'));
+        let el = null;
+        if (buttonEl instanceof Element) {
+            el = buttonEl;
+        } else if (typeof buttonEl === 'string' && buttonEl !== 'this' && buttonEl.trim()) {
+            el = document.getElementById(buttonEl);
+        }
+
+        const track = (this.tracks && this.tracks.find(t => String(t.id) === String(trackId)));
+        const currentFav = track ? Boolean(track.is_favorite) : Boolean(el?.classList?.contains('liked'));
         const nextFav = !currentFav;
 
         if (track) {
             track.is_favorite = nextFav;
         }
 
-        if (buttonEl) {
-            buttonEl.classList.toggle('liked', nextFav);
-            buttonEl.style.color = nextFav ? 'var(--like)' : '';
+        if (el && el.classList) {
+            el.classList.toggle('liked', nextFav);
+            el.style.color = nextFav ? 'var(--like)' : '';
         }
 
         if (window.Auralis && window.Auralis.player && window.Auralis.player.currentTrack && window.Auralis.player.currentTrack.id === trackId) {
@@ -182,9 +221,9 @@ export const playerMethods = {
         } catch (err) {
             console.error('Failed to update track favorite:', err);
             if (track) track.is_favorite = currentFav;
-            if (buttonEl) {
-                buttonEl.classList.toggle('liked', currentFav);
-                buttonEl.style.color = currentFav ? 'var(--like)' : '';
+            if (el && el.classList) {
+                el.classList.toggle('liked', currentFav);
+                el.style.color = currentFav ? 'var(--like)' : '';
             }
             this.showToast(`Failed to update favorite: ${err}`, 'error');
         }

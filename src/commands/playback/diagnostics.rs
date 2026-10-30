@@ -241,14 +241,11 @@ pub struct FilePreflight {
 /// is fall back to the old behaviour, which is exactly the safe direction.
 pub fn choose_resume_strategy(
     is_playing: bool,
-    has_live_source: bool,
+    _has_live_source: bool,
     file_ready: bool,
 ) -> ResumeStrategy {
     if is_playing {
         return ResumeStrategy::AlreadyPlaying;
-    }
-    if !has_live_source {
-        return ResumeStrategy::Unpause;
     }
     if file_ready {
         return ResumeStrategy::FreshSinkReplay;

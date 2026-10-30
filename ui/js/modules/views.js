@@ -111,6 +111,12 @@ export const viewMethods = {
             if (list && html) {
                 list.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
+                if (window.Auralis?.player?.highlightActiveTrack) {
+                    window.Auralis.player.highlightActiveTrack();
+                }
             }
         } catch (err) {
             console.error('Error rendering library tracks:', err);
@@ -139,7 +145,13 @@ export const viewMethods = {
             if (container && html) {
                 container.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
                 this._syncPlayerBar();
+                if (window.Auralis?.player?.highlightActiveTrack) {
+                    window.Auralis.player.highlightActiveTrack();
+                }
             }
         } catch (err) {
             console.error('Error loading home view:', err);
@@ -159,6 +171,9 @@ export const viewMethods = {
             if (grid && html) {
                 grid.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
             }
         } catch (err) {
             console.error('Error loading albums:', err);
@@ -178,6 +193,9 @@ export const viewMethods = {
             if (grid && html) {
                 grid.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
             }
         } catch (err) {
             console.error('Error loading artists:', err);
@@ -236,6 +254,9 @@ export const viewMethods = {
                 `;
                 }).join('');
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
             } else {
                 grid.innerHTML = `
                     <div class="empty-state glass neu" style="grid-column: 1 / -1; padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
@@ -249,6 +270,9 @@ export const viewMethods = {
                     </div>
                 `;
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
             }
         } catch (err) {
             console.error('Error loading playlists:', err);
@@ -314,6 +338,9 @@ export const viewMethods = {
                     `;
                 }
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
             }
         } catch (err) {
             console.error('Failed to open playlist:', err);
@@ -327,6 +354,9 @@ export const viewMethods = {
         if (detailEl) detailEl.style.display = 'none';
         if (gridEl) gridEl.style.display = 'grid';
         if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
     },
 
     async promptCreatePlaylist() {
@@ -359,6 +389,9 @@ export const viewMethods = {
                 if (target && html) {
                     target.innerHTML = html;
                     if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
                 }
             } catch (err) {
                 console.error('Search error:', err);
@@ -458,6 +491,9 @@ export const viewMethods = {
 
             if (settingsView.dataset.bound) {
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
                 return;
             }
             settingsView.dataset.bound = 'true';
@@ -520,7 +556,7 @@ export const viewMethods = {
                 const toggle = e.target.closest && e.target.closest('.toggle[name], .toggle[data-name], [role="switch"]');
                 if (toggle) {
                     const name = toggle.getAttribute('name') || toggle.getAttribute('data-name');
-                    const newState = !toggle.classList.contains('active');
+                    const newState = !toggle?.classList?.contains('active');
                     toggle.classList.toggle('active', newState);
                     toggle.setAttribute('aria-checked', newState.toString());
 
@@ -536,6 +572,9 @@ export const viewMethods = {
             });
 
             if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
         } catch (err) {
             console.error('Settings load error:', err);
         }
@@ -574,6 +613,9 @@ export const viewMethods = {
         }).join('');
 
         if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
     },
 
     closeTrackContextMenu() {
@@ -589,8 +631,10 @@ export const viewMethods = {
     },
 
     async openTrackContextMenu(event, trackId) {
-        if (event) {
+        if (event && typeof event.preventDefault === 'function') {
             event.preventDefault();
+        }
+        if (event && typeof event.stopPropagation === 'function') {
             event.stopPropagation();
         }
         this.closeTrackContextMenu();
@@ -645,6 +689,9 @@ export const viewMethods = {
 
         document.body.appendChild(menu);
         if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
 
         // Calculate positioning
         const triggerEl = event.currentTarget || event.target;
@@ -726,7 +773,7 @@ export const viewMethods = {
 
         // Click outside & ESC listener
         this._contextMenuOutsideListener = (e) => {
-            if (!menu.contains(e.target)) {
+            if (menu && typeof menu.contains === 'function' && !menu.contains(e.target)) {
                 this.closeTrackContextMenu();
             }
         };
@@ -826,6 +873,9 @@ export const viewMethods = {
 
         document.body.appendChild(backdrop);
         if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
 
         const closeModal = () => {
             backdrop.remove();
@@ -945,6 +995,9 @@ export const viewMethods = {
 
         document.body.appendChild(backdrop);
         if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
 
         const closeModal = () => {
             backdrop.remove();
@@ -1033,6 +1086,9 @@ export const viewMethods = {
                     </section>
                 `;
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
             }
         } catch (err) {
             console.error('Failed to filter by artist:', err);
@@ -1064,6 +1120,9 @@ export const viewMethods = {
                     </section>
                 `;
                 if (window.lucide) window.lucide.createIcons();
+        if (window.Auralis?.player?.highlightActiveTrack) {
+            window.Auralis.player.highlightActiveTrack();
+        }
             }
         } catch (err) {
             console.error('Failed to filter by album:', err);

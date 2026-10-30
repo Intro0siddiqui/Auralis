@@ -257,12 +257,12 @@ describe('SABR-only fallback (FreeTube#6977)', () => {
     });
 });
 
-describe('regression: 6-client fallback must be present in youtube.js', () => {
+describe('regression: multi-client fallback must be present in youtube.js', () => {
     const ytPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/youtube.js');
     const src = fs.readFileSync(ytPath, 'utf8');
 
-    it('source contains all 6 clients IOS, ANDROID, ANDROID_VR, TV, MWEB, WEB', () => {
-        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
+    it('source contains all 5 clients VISIONOS, IOS, ANDROID, MWEB, WEB', () => {
+        for (const c of ['VISIONOS', 'IOS', 'ANDROID', 'MWEB', 'WEB']) {
             assert.ok(src.includes(`'${c}'`), `youtube.js missing client '${c}'`);
         }
     });
@@ -285,15 +285,15 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
 
         assert.deepEqual(servable, ['MWEB', 'WEB'],
             'web-family clients are the only ones a BotGuard token is valid on');
-        assert.deepEqual(tokenFree, ['ANDROID_VR', 'TV'],
-            'ANDROID_VR before TV: tv is DRM-capped without cookies and we send none');
+        assert.deepEqual(tokenFree, ['VISIONOS'],
+            'VISIONOS: token-free client; TV removed as DRM-capped, ANDROID_VR removed as non-beneficial adaptive 403');
         assert.deepEqual(unmintable, ['IOS', 'ANDROID'],
             'kept but last — ios does resolve, so this is a prediction, not an observation');
 
         // Disjoint and complete: no client may be in two groups, or in none.
         const all = [...servable, ...tokenFree, ...unmintable];
         assert.equal(new Set(all).size, all.length, 'a client appears in more than one group');
-        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
+        for (const c of ['VISIONOS', 'IOS', 'ANDROID', 'MWEB', 'WEB']) {
             assert.ok(all.includes(c), `${c} is in no group, so it can never be tried`);
         }
 
@@ -313,7 +313,7 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         // is the same UA/client mismatch that produced the byte-0 403.
         const uaBlock = src.match(/const uaMap = \{([\s\S]*?)\n\s*\};/);
         assert.ok(uaBlock, 'uaMap not found');
-        for (const c of ['IOS', 'ANDROID', 'ANDROID_VR', 'TV', 'MWEB', 'WEB']) {
+        for (const c of ['VISIONOS', 'IOS', 'ANDROID', 'ANDROID_VR', 'MWEB', 'WEB']) {
             assert.ok(uaBlock[1].includes(`'${c}':`), `uaMap has no entry for ${c}`);
         }
     });
@@ -343,7 +343,7 @@ describe('regression: 6-client fallback must be present in youtube.js', () => {
         }
     });
 
-    it('getInfo fallback tries 6 clients', () => {
+    it('getInfo fallback tries clients', () => {
         // fallback now uses orderedClients.map(cl => getInfo(... client: cl)) — still must cover all 6
         assert.ok(src.includes('orderedClients') && src.includes('getInfo'), 'fallback must be PO-token-aware via orderedClients + getInfo');
         assert.ok(src.includes("'IOS'") && src.includes("'WEB'"), 'fallback must mention IOS and WEB');
@@ -759,6 +759,9 @@ describe('Audio Stream Selection & Format Integrity', () => {
 });
 
 describe('Format preference scoring (itag 140 m4a rodio compat — opus would DecodeError)', () => {
+    const ytPath = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui/js/youtube.js');
+    const src = fs.readFileSync(ytPath, 'utf8');
+
     it('scoreFormat({itag:140, mimeType:"audio/mp4"}) > scoreFormat({itag:251, mimeType:"audio/webm"})', () => {
         function scoreFormat(fmt) {
             const mime = (fmt.mimeType || '').toLowerCase();
@@ -804,6 +807,13 @@ describe('Format preference scoring (itag 140 m4a rodio compat — opus would De
         assert.equal(sorted[0].itag, 140, 'itag 140 should be first after m4a-preferring sort');
         assert.ok(scoreFormat(sorted[0]) > scoreFormat(candidates[0]), 'top sorted must outrank webm');
     });
+
+    it('pure audio formats (itag 140 / 251) are strictly preferred over muxed itag 18 without falling back to muxed', () => {
+        assert.ok(src.includes('const aAudioOnly = (isAudioOnlyProgressive(a) || !a.has_video) ? 1 : 0'),
+            'selectBestAudioFormat must compute audio-only status');
+        assert.ok(src.includes('if (bAudioOnly !== aAudioOnly) return bAudioOnly - aAudioOnly;'),
+            'pure audio-only formats must outrank muxed video+audio formats before diffScore');
+    });
 });
 
 describe('YouTube Search & Streaming Integration', () => {
@@ -839,7 +849,7 @@ describe('YouTube Search & Streaming Integration', () => {
         assert.ok(src.includes('play-yt-btn'), 'must include play-yt-btn');
         assert.ok(src.includes('download-yt-btn'), 'must include download-yt-btn');
         assert.ok(src.includes('streamYouTubeSearchResult'), 'must call streamYouTubeSearchResult');
-        assert.ok(src.includes('new Audio'), 'must instantiate Audio element for streaming');
+        assert.ok(src.includes('stream_online_audio') || src.includes('new Audio'), 'must use native stream_online_audio or Audio element for streaming');
     });
 
     it('downloads.js auto-retries truncated streams by rotating InnerTube client', () => {

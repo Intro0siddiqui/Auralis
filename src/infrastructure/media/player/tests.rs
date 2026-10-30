@@ -761,5 +761,13 @@ fn test_create_decoder_extension_hint_and_fallback() {
         );
     }
 
+    // 5. Test real M4A/AAC file decoding (if present in scratch)
+    let local_m4a = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch/test_track.m4a");
+    if local_m4a.exists() {
+        let f = File::open(&local_m4a).unwrap();
+        let dec = create_decoder(f, local_m4a.to_str().unwrap());
+        assert!(dec.is_ok(), "Expected M4A track to decode cleanly: {:?}", dec.err());
+    }
+
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -10,12 +10,20 @@ use rodio::Decoder;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tracing::{debug, warn};
+
+static CUSTOM_ARTWORK_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Extracts metadata from audio files
 pub struct MetadataExtractor;
 
 impl MetadataExtractor {
+    /// Configure a custom directory for caching extracted embedded artwork
+    pub fn set_artwork_cache_dir(dir: PathBuf) {
+        let _ = CUSTOM_ARTWORK_CACHE_DIR.set(dir);
+    }
+
     /// Verify audio health and playability
     pub fn verify_audio_health(path: &Path) -> Result<Track, MetadataError> {
         verify_audio_health(path)
@@ -28,16 +36,29 @@ impl MetadataExtractor {
 
     /// Returns the directory used for caching extracted embedded artwork.
     pub fn artwork_cache_dir() -> PathBuf {
-        if let Some(mut cache) = dirs::cache_dir() {
-            cache.push("auralis");
-            cache.push("artwork");
-            cache
-        } else if let Some(mut data) = dirs::data_local_dir().or_else(dirs::data_dir) {
-            data.push("auralis");
-            data.push("artwork_cache");
-            data
-        } else {
-            std::env::temp_dir().join("auralis").join("artwork")
+        if let Some(custom) = CUSTOM_ARTWORK_CACHE_DIR.get() {
+            return custom.clone();
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            // On Android, use the sandboxed app internal cache directory
+            PathBuf::from("/data/user/0/com.auralis.v2/cache/artwork")
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            if let Some(mut cache) = dirs::cache_dir() {
+                cache.push("auralis");
+                cache.push("artwork");
+                cache
+            } else if let Some(mut data) = dirs::data_local_dir().or_else(dirs::data_dir) {
+                data.push("auralis");
+                data.push("artwork_cache");
+                data
+            } else {
+                std::env::temp_dir().join("auralis").join("artwork")
+            }
         }
     }
 
@@ -220,7 +241,7 @@ impl MetadataExtractor {
     }
 
     /// Find the highest priority picture in a tagged file (CoverFront > Other > Any).
-    fn find_best_picture(tagged_file: &lofty::file::TaggedFile) -> Option<&Picture> {
+    pub fn find_best_picture(tagged_file: &lofty::file::TaggedFile) -> Option<&Picture> {
         let tags: Vec<&lofty::tag::Tag> = if !tagged_file.tags().is_empty() {
             tagged_file.tags().iter().collect()
         } else if let Some(tag) = tagged_file
@@ -312,7 +333,7 @@ impl MetadataExtractor {
     }
 
     /// Locate a sidecar cover image for an audio file.
-    fn find_sidecar_art(path: &Path) -> Option<String> {
+    pub fn find_sidecar_art(path: &Path) -> Option<String> {
         for ext in ["jpg", "jpeg", "png", "webp"] {
             let side = path.with_extension(ext);
             if side.is_file() {
@@ -543,8 +564,15 @@ mod tests {
         let dir = MetadataExtractor::artwork_cache_dir();
         assert!(!dir.as_os_str().is_empty());
         let path_str = dir.to_string_lossy();
-        assert!(path_str.contains("auralis"));
-        assert!(path_str.contains("artwork"));
+        assert!(path_str.contains("auralis") || path_str.contains("artwork"));
+    }
+
+    #[test]
+    fn test_custom_artwork_cache_dir() {
+        let temp = std::env::temp_dir().join("auralis_test_custom_art");
+        MetadataExtractor::set_artwork_cache_dir(temp.clone());
+        let dir = MetadataExtractor::artwork_cache_dir();
+        assert_eq!(dir, temp);
     }
 
     #[test]

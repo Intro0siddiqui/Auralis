@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::AppHandle;
+#[cfg(target_os = "android")]
+use tauri::Emitter;
 use tracing::debug;
 #[cfg(target_os = "android")]
 use tracing::warn;
@@ -70,12 +72,27 @@ pub fn attach(player: Arc<AudioPlayer>, app: AppHandle) {
     }
 }
 
+static IS_STREAM_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mark whether an online stream (via HTML5 Audio) is currently controlling the background service.
+pub fn set_stream_active(active: bool) {
+    IS_STREAM_ACTIVE.store(active, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Check whether an online stream is currently controlling the background service.
+pub fn is_stream_active() -> bool {
+    IS_STREAM_ACTIVE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Push the current playback state to the background service.
 ///
 /// No current track ⇒ stops the service (queue exhausted / app stopped).
 /// Otherwise refreshes the notification + MediaSession with the playing or
 /// paused state.
 pub async fn push_now_playing(player: &AudioPlayer) {
+    if is_stream_active() {
+        return;
+    }
     let Some(track) = player.get_current_track().await else {
         stop_service();
         return;
@@ -145,6 +162,7 @@ pub fn request_notification_permission() {
 #[cfg(target_os = "android")]
 fn notify(track: &Track, position: Duration, is_playing: bool) {
     let Some(ctx) = service_context() else { return };
+    let is_stream = is_stream_active() || track.file_path.starts_with("stream://");
     with_attached_env("svc-start", |env| {
         let class = app_class(env, &SERVICE_CLASS_REF, SERVICE_CLASS)?;
         let title = env.new_string(track.title.as_str())?;
@@ -153,7 +171,7 @@ fn notify(track: &Track, position: Duration, is_playing: bool) {
         env.call_static_method(
             class,
             "start",
-            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;IIZLjava/lang/String;)V",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;IIZLjava/lang/String;Z)V",
             &[
                 JValue::Object(&ctx),
                 JValue::Object(&title),
@@ -162,11 +180,12 @@ fn notify(track: &Track, position: Duration, is_playing: bool) {
                 JValue::Int(position.as_secs().min(i32::MAX as u64) as i32),
                 JValue::Bool(is_playing as u8),
                 JValue::Object(&art_path),
+                JValue::Bool(is_stream as u8),
             ],
         )?;
         Ok(())
     });
-    debug!(track_id = %track.id, ?position, is_playing, "Background service notified");
+    debug!(track_id = %track.id, ?position, is_playing, is_stream, "Background service notified");
 }
 
 /// Resolve an app class to a cached global ref, from any thread.
@@ -473,6 +492,10 @@ fn dispatch(command: &str) {
     debug!(command, "Notification media command received");
     let command = command.to_owned();
     tauri::async_runtime::spawn(async move {
+        let _ = app.emit("playback:command", &command);
+        if is_stream_active() {
+            return;
+        }
         match command.as_str() {
             "play" => {
                 // `resume` deliberately reports an error when there is nothing

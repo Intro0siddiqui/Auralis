@@ -739,6 +739,27 @@ export async function generatePoTokenForVideo(innertube, videoId, report = null)
             );
         }
 
+        // Native Hidden WebView Harvester Fallback (AGENTS.md §4.7.7)
+        // If BotGuard emulation could not produce a minter, try harvesting an authentic
+        // browser-minted PO token from YouTube's native watch context via hidden WebView.
+        const tauriInvoke = (typeof window !== 'undefined') ? (window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke || window.__TAURI_INTERNALS__?.invoke || window.Auralis?.bridge?.invoke) : null;
+        if (!poToken && typeof tauriInvoke === 'function') {
+            try {
+                const harvestRes = await tauriInvoke('harvest_po_token', { videoId, video_id: videoId });
+                if (harvestRes?.po_token || harvestRes?.poToken) {
+                    poToken = harvestRes.po_token || harvestRes.poToken;
+                    if (harvestRes.visitor_data || harvestRes.visitorData) {
+                        visitorData = harvestRes.visitor_data || harvestRes.visitorData;
+                    }
+                    proofKind = 'webview-harvested';
+                    recordStep(diag, 'webview-harvest', true, `authentic PO token (${poToken.length} chars) harvested via hidden WebView`);
+                    console.log('[PoToken] Successfully harvested authentic PO token via hidden WebView for', videoId);
+                }
+            } catch (err) {
+                recordStep(diag, 'webview-harvest', false, `hidden WebView harvest skipped: ${err?.message || err}`);
+            }
+        }
+
         // Cold-start token fallback via bgutils helper (no BotGuard needed, works when sps=2)
         if (!poToken && bg.WebPoMinter?.createColdStartToken) {
             // Unreachable in practice: `createColdStartToken` is a module-level

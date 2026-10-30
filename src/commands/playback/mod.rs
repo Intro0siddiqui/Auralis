@@ -9,6 +9,7 @@ use crate::infrastructure::database::Database;
 use crate::infrastructure::media::background_service;
 use crate::infrastructure::media::AudioPlayer;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -156,22 +157,24 @@ pub fn spawn_playback_watcher(app: AppHandle, player: Arc<AudioPlayer>) {
                 }
             };
 
-            // Truncated / buffer-underrun detection: sink went empty mid-track far from duration
+            // Truncated / buffer-underrun detection: sink went empty mid-track far from duration.
+            // Requires active playback history (play_started_elapsed > 1s) to avoid false-triggering
+            // during start_sink() / stop() transitions where position is reset to 0 before the new sink attaches.
             let truncated_stop = was_playing
                 && !is_playing
                 && is_empty
                 && !track_just_ended
                 && !player.is_recently_seeking()
-                && {
-                    let dur = player.duration().await;
-                    let pos = player.current_position().await;
-                    let elapsed = player
-                        .play_started_elapsed()
-                        .await
-                        .unwrap_or(Duration::ZERO);
-                    !dur.is_zero()
-                        && pos + Duration::from_secs(5) < dur
-                        && elapsed + Duration::from_secs(5) < dur
+                && match player.play_started_elapsed().await {
+                    Some(elapsed) => {
+                        let dur = player.duration().await;
+                        let pos = player.current_position().await;
+                        !dur.is_zero()
+                            && elapsed > Duration::from_secs(1)
+                            && pos + Duration::from_secs(5) < dur
+                            && elapsed + Duration::from_secs(5) < dur
+                    }
+                    None => false,
                 };
             if truncated_stop {
                 let dur = player.duration().await.as_secs();
@@ -333,12 +336,347 @@ pub async fn play(
         shuffle_enabled: player.get_shuffle().await,
     };
 
+    background_service::set_stream_active(false);
     emit_track_changed(&app, &player).await;
     emit_state_changed(&app, &player).await;
     background_service::push_now_playing(&player).await;
     background_service::request_notification_permission();
 
     debug!(%track_id, "Playback started");
+    Ok(now_playing)
+}
+
+/// Request payload for streaming online audio directly into ephemeral cache / RAM.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamAudioRequest {
+    pub url: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub duration_secs: Option<u32>,
+    pub album_art_path: Option<String>,
+    pub headers: Option<HashMap<String, String>>,
+}
+
+/// Stream audio directly from an online URL into an ephemeral cache file (/tmp / app_cache_dir),
+/// without writing to user's downloads or polluting the library database.
+///
+/// Streams chunks via reqwest, then hands the cache file to [`AudioPlayer`] so that
+/// playback continues natively with foreground service & partial wake lock when screen turns off.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn stream_online_audio(
+    request: Option<StreamAudioRequest>,
+    url: Option<String>,
+    title: Option<String>,
+    artist: Option<String>,
+    duration_secs: Option<u32>,
+    album_art_path: Option<String>,
+    headers: Option<HashMap<String, String>>,
+    app: AppHandle,
+    player: State<'_, AudioPlayer>,
+) -> Result<NowPlaying, String> {
+    let request = match request {
+        Some(r) => r,
+        None => {
+            let url = url.ok_or_else(|| "Missing required stream url".to_string())?;
+            let title = title.unwrap_or_else(|| "YouTube Audio".to_string());
+            StreamAudioRequest {
+                url,
+                title,
+                artist,
+                duration_secs,
+                album_art_path,
+                headers,
+            }
+        }
+    };
+    info!(url = %request.url, title = %request.title, "stream_online_audio received");
+
+    // 1. Resolve cache directory (ephemeral cache / tempfs, never downloads/ or public storage)
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let _ = tokio::fs::create_dir_all(&cache_dir).await;
+
+    // Clean up previous stream cache files so only the single active stream buffer exists
+    if let Ok(mut entries) = tokio::fs::read_dir(&cache_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("stream_cache_")
+                && (name.ends_with(".m4a") || name.ends_with(".mp4") || name.ends_with(".webm"))
+            {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+    }
+
+    // 2. Ephemeral stream cache file path in /tmp or app cache
+    let ext = if request.url.contains("audio%2Fwebm")
+        || request.url.contains("audio/webm")
+        || request.url.contains(".webm")
+    {
+        "webm"
+    } else {
+        "m4a"
+    };
+    let cache_file = cache_dir.join(format!("stream_cache_{}.{}", Uuid::new_v4(), ext));
+
+    // 3. Clean up the URL by stripping range capping parameters
+    let clean_url = crate::infrastructure::media::downloader::http::strip_response_range_params(&request.url);
+
+    // 4. Fetch stream using reqwest with upstream InnerTube client headers
+    let ua = request
+        .headers
+        .as_ref()
+        .and_then(|h| h.get("User-Agent").or_else(|| h.get("user-agent")))
+        .cloned()
+        .unwrap_or_else(|| {
+            "Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15".to_string()
+        });
+
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .user_agent(&ua)
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    // 5. Ephemeral Track struct (NOT inserted into SQLite tracks table!)
+    let format = crate::domain::models::AudioFormat::from_extension(ext)
+        .unwrap_or(crate::domain::models::AudioFormat::M4a);
+
+    let mut track = Track::new(
+        request.title.clone(),
+        cache_file.to_string_lossy().to_string(),
+        request.duration_secs.unwrap_or(0),
+        format,
+    );
+    track.artist = request.artist.clone();
+    track.album_art_path = request.album_art_path.clone();
+
+    // 6. Fast Bounded Chunk Streaming (1 MB Range Chunks):
+    // Bounded range requests bypass YouTube's 1x audio playback bitrate throttling (40 KB/s),
+    // downloading the ~3 MB track at full line speed in ~1-2 seconds.
+    const CHUNK_SIZE: u64 = 1024 * 1024;
+    let t0 = Instant::now();
+
+    let mut file = tokio::fs::File::create(&cache_file)
+        .await
+        .map_err(|e| format!("Failed to create cache file: {e}"))?;
+
+    use tokio::io::AsyncWriteExt;
+    let mut current_downloaded: u64 = 0;
+    let mut total_bytes: Option<u64> = None;
+    let mut attempts = 0;
+
+    loop {
+        attempts += 1;
+        if attempts > 30 {
+            break;
+        }
+
+        let mut req = client.get(&clean_url);
+        req = crate::infrastructure::media::downloader::http::inject_stream_headers(
+            req,
+            request.headers.as_ref(),
+        );
+
+        let chunk_end = if let Some(tot) = total_bytes {
+            (current_downloaded + CHUNK_SIZE - 1).min(tot.saturating_sub(1))
+        } else {
+            current_downloaded + CHUNK_SIZE - 1
+        };
+        req = req.header(
+            reqwest::header::RANGE,
+            format!("bytes={current_downloaded}-{chunk_end}"),
+        );
+
+        let mut response = match req.send().await {
+            Ok(r) if r.status().is_success() || r.status().as_u16() == 206 => r,
+            Ok(r) => {
+                warn!(status = %r.status(), "Stream chunk request returned non-success");
+                break;
+            }
+            Err(e) => {
+                warn!(error = %e, "Stream chunk request failed to send");
+                break;
+            }
+        };
+
+        if total_bytes.is_none() {
+            let resp_tot: Option<u64> = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.rsplit('/').next())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .or_else(|| {
+                    if current_downloaded > 0 {
+                        response.content_length().map(|cl| cl + current_downloaded)
+                    } else {
+                        response.content_length()
+                    }
+                });
+            if let Some(tot) = resp_tot {
+                total_bytes = Some(tot);
+            }
+        }
+
+        let mut bytes_in_this_chunk: u64 = 0;
+        while let Ok(Some(chunk)) = response.chunk().await {
+            if chunk.is_empty() {
+                continue;
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("Cache write error: {e}"))?;
+            current_downloaded += chunk.len() as u64;
+            bytes_in_this_chunk += chunk.len() as u64;
+        }
+
+        if let Some(total) = total_bytes {
+            if total > 0 && current_downloaded >= total {
+                break;
+            }
+        }
+
+        if bytes_in_this_chunk == 0 {
+            break;
+        }
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("Cache flush error: {e}"))?;
+
+    if current_downloaded == 0 {
+        return Err("No audio bytes received from online stream".to_string());
+    }
+
+    info!(
+        downloaded = current_downloaded,
+        total = ?total_bytes,
+        elapsed_ms = t0.elapsed().as_millis(),
+        "Online audio stream buffered completely into cache"
+    );
+
+    // 7. Instant Native Playback via rodio/Symphonia with wake lock & foreground service
+    player
+        .play_track(track.clone())
+        .await
+        .map_err(|e| format!("Playback error: {e}"))?;
+
+    player.set_queue(vec![track.clone()]).await;
+    player.set_current_index(Some(0)).await;
+
+    let now_playing = build_now_playing(&player, &track).await;
+
+    background_service::set_stream_active(false);
+    emit_track_changed(&app, &player).await;
+    emit_state_changed(&app, &player).await;
+    emit_queue_updated(
+        &app,
+        &PlaybackQueue {
+            tracks: vec![track.clone()],
+            current_index: Some(0),
+        },
+    )
+    .await;
+
+    info!("stream_online_audio started playback");
+    background_service::push_now_playing(&player).await;
+    background_service::request_notification_permission();
+    Ok(now_playing)
+}
+
+/// Play a track directly from a file path (used for online streaming / downloaded playback).
+///
+/// Looks up or inserts the track in SQLite, then starts native playback through
+/// [`AudioPlayer`], emitting full media session metadata, notification, and wake lock.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn play_or_stream_track(
+    file_path: String,
+    title: String,
+    artist: Option<String>,
+    duration_secs: u32,
+    album_art_path: Option<String>,
+    app: AppHandle,
+    player: State<'_, AudioPlayer>,
+    db: State<'_, Database>,
+) -> Result<NowPlaying, String> {
+    info!(file_path = %file_path, title = %title, "play_or_stream_track received");
+
+    use crate::domain::repositories::TrackRepository;
+    let repo = Arc::new(
+        crate::infrastructure::database::repositories::SqliteTrackRepository::new(Arc::new(
+            db.inner().clone(),
+        )),
+    );
+
+    // Check if track with this path already exists in database
+    let existing = repo.find_by_path(&file_path).await.ok().flatten();
+    let track = match existing {
+        Some(t) => t,
+        None => {
+            let ext = std::path::Path::new(&file_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("m4a");
+            let format = crate::domain::models::AudioFormat::from_extension(ext)
+                .unwrap_or(crate::domain::models::AudioFormat::M4a);
+            let mut t = Track::new(title, file_path.clone(), duration_secs, format);
+            t.artist = artist;
+            t.album_art_path = album_art_path;
+            if let Err(e) = repo.insert(&t).await {
+                warn!(error = %e, "Could not insert stream track into DB (proceeding anyway)");
+            }
+            t
+        }
+    };
+
+    // Play via native AudioPlayer
+    if let Err(e) = player.play_track(track.clone()).await {
+        warn!(file_path = %track.file_path, title = %track.title, error = %e, "Native play_or_stream_track failed");
+        return Err(format!("Playback error [{} — {}]: {}", track.title, track.file_path, e));
+    }
+
+    // Seed single-track queue if currently empty
+    if player.get_queue().await.is_empty() {
+        player.set_queue(vec![track.clone()]).await;
+        player.set_current_index(Some(0)).await;
+        emit_queue_updated(
+            &app,
+            &PlaybackQueue {
+                tracks: vec![track.clone()],
+                current_index: Some(0),
+            },
+        )
+        .await;
+    }
+
+    let initial_dur = track.duration_secs;
+    let track = player.get_current_track().await.unwrap_or(track);
+    if track.duration_secs != initial_dur {
+        let _ = repo.update(&track).await;
+    }
+
+    let now_playing = NowPlaying {
+        track,
+        position_secs: 0,
+        is_playing: player.is_playing().await,
+        volume: player.get_volume().await,
+        repeat_mode: player.get_repeat_mode().await,
+        shuffle_enabled: player.get_shuffle().await,
+    };
+
+    background_service::set_stream_active(false);
+    emit_track_changed(&app, &player).await;
+    emit_state_changed(&app, &player).await;
+    background_service::push_now_playing(&player).await;
+    background_service::request_notification_permission();
+
+    info!("play_or_stream_track successfully started native playback");
     Ok(now_playing)
 }
 
@@ -837,7 +1175,7 @@ pub(crate) fn render_queue_html(current_track: Option<&Track>, queue_tracks: &[T
     );
     html.push_str(&queue_count.to_string());
     html.push_str(
-        r#")</h3></div><div style="display: flex; align-items: center; gap: var(--space-2);"><button type="button" class="btn btn-ghost btn-icon btn-sm" style="padding: var(--space-1);" onclick="event.stopPropagation(); window.Auralis &amp;&amp; window.Auralis.player &amp;&amp; (window.Auralis.player.toggleFullScreenQueue &amp;&amp; window.Auralis.player.toggleFullScreenQueue(false), window.Auralis.player.toggleQueue &amp;&amp; window.Auralis.player.toggleQueue(false))" title="Close"><i data-lucide="x"></i></button></div></div>"#,
+        r#")</h3></div><div style="display: flex; align-items: center; gap: var(--space-2);"><button type="button" class="btn btn-ghost btn-icon btn-sm" style="padding: var(--space-1);" data-action="close-queue" onclick="event.stopPropagation(); window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.closeQueue()" title="Close"><i data-lucide="x"></i></button></div></div>"#,
     );
 
     html.push_str(r#"<div class="queue-content queue-body" style="flex: 1; overflow-y: auto;">"#);
@@ -999,6 +1337,50 @@ pub(crate) async fn emit_track_changed(app: &AppHandle, player: &AudioPlayer) {
 /// Notify the frontend that the playback queue changed.
 async fn emit_queue_updated(app: &AppHandle, queue: &PlaybackQueue) {
     let _ = app.emit("playback:queue_updated", queue);
+}
+
+/// Update or start background notification for online streaming audio (Android foreground service).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn update_stream_notification(
+    title: String,
+    artist: String,
+    duration_secs: u32,
+    position_secs: u32,
+    is_playing: bool,
+    art_url: Option<String>,
+) -> Result<(), String> {
+    background_service::set_stream_active(true);
+    #[cfg(target_os = "android")]
+    {
+        use crate::domain::models::{AudioFormat, Track};
+        use std::time::Duration;
+        let mut track = Track::new(
+            title.clone(),
+            "stream://online".to_string(),
+            duration_secs,
+            AudioFormat::Mp3,
+        );
+        track.artist = Some(artist.clone());
+        track.album_art_path = art_url.clone();
+        if is_playing {
+            background_service::notify_playing(&track, Duration::from_secs(position_secs as u64));
+        } else {
+            background_service::notify_paused(&track, Duration::from_secs(position_secs as u64));
+        }
+    }
+    let _ = (title, artist, duration_secs, position_secs, is_playing, art_url);
+    Ok(())
+}
+
+/// Stop background notification for online streaming audio.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn stop_stream_notification() -> Result<(), String> {
+    background_service::set_stream_active(false);
+    #[cfg(target_os = "android")]
+    {
+        background_service::stop_service();
+    }
+    Ok(())
 }
 
 pub mod diagnostics;

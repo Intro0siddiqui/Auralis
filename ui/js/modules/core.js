@@ -4,6 +4,8 @@
  * event emitter (on/emit), invoke wrapper, and DOM lifecycle events.
  */
 
+import { getStorageAdapter } from './storage/index.js';
+
 export class Bridge {
     constructor() {
         this.listeners = {};
@@ -81,6 +83,10 @@ export const coreMethods = {
                     console.error('[playback:error]', msg);
                     this.showToast(`Playback failed: ${msg}`, 'error', 6000);
                     try { window.__auralisLastPlaybackError = { at: new Date().toISOString(), msg }; } catch (_) {}
+                });
+
+                await tauriListen('playback:command', (event) => {
+                    this.emit('playback:command', event.payload);
                 });
 
                 await tauriListen('download:progress', (event) => {
@@ -244,58 +250,7 @@ export const coreMethods = {
     },
 
     ensureFileInput() {
-        // Guarantee clean <input type="file"> elements exist in the DOM with direct event listeners
-        // for Android 16 WebView / Scoped Storage compatibility without clipped/z-index issues.
-        if (!document || typeof document.getElementById !== 'function' || typeof document.createElement !== 'function') return;
-
-        let audioInput = document.getElementById('global-audio-import-input');
-        if (!audioInput) {
-            audioInput = document.createElement('input');
-            audioInput.type = 'file';
-            audioInput.id = 'global-audio-import-input';
-            audioInput.accept = 'audio/*';
-            audioInput.multiple = true;
-            audioInput.style.display = 'none';
-            if (document.body && typeof document.body.appendChild === 'function') {
-                document.body.appendChild(audioInput);
-            }
-        }
-        if (audioInput && !audioInput.dataset.bound) {
-            audioInput.dataset.bound = 'true';
-            audioInput.addEventListener('change', (e) => this.handleAudioImport(e.target));
-        }
-
-        let folderInput = document.getElementById('global-folder-scan-input');
-        if (!folderInput) {
-            folderInput = document.createElement('input');
-            folderInput.type = 'file';
-            folderInput.id = 'global-folder-scan-input';
-            folderInput.webkitdirectory = true;
-            folderInput.setAttribute('directory', '');
-            folderInput.multiple = true;
-            folderInput.style.display = 'none';
-            if (document.body && typeof document.body.appendChild === 'function') {
-                document.body.appendChild(folderInput);
-            }
-        }
-        if (folderInput && !folderInput.dataset.bound) {
-            folderInput.dataset.bound = 'true';
-            folderInput.addEventListener('change', (e) => this.handleFolderScan(e.target));
-        }
-
-        // Global fallback listener on document for change events on file inputs
-        if (document.body && !document.body.dataset.audioImportFallbackBound) {
-            document.body.dataset.audioImportFallbackBound = 'true';
-            document.addEventListener('change', (e) => {
-                const target = e.target;
-                if (!target) return;
-                if (target.id === 'global-audio-import-input') {
-                    this.handleAudioImport(target);
-                } else if (target.id === 'global-folder-scan-input') {
-                    this.handleFolderScan(target);
-                }
-            });
-        }
+        return getStorageAdapter().ensureFileInput(this);
     },
 
     async invoke(command, args = {}) {
@@ -409,7 +364,60 @@ export const coreMethods = {
                 }
             };
             document.addEventListener('click', handlePlayDelegate);
-            document.addEventListener('touchend', handlePlayDelegate, { passive: false });
+            // Native click handles tap detection and suppresses events on scrolls/drags.
+            // Do NOT bind raw touchend on document — it fires at the end of a scroll gesture,
+            // accidentally playing whichever track row or card was released over.
+
+            // Global delegation for CSP-safe inline bridge actions & data-action triggers
+            const handleGlobalActionDelegate = (e) => {
+                // 1. Explicit data-action attribute
+                const actionEl = e.target.closest && e.target.closest('[data-action]');
+                if (actionEl) {
+                    const action = actionEl.dataset.action;
+                    const bridge = window.Auralis?.bridge;
+                    if (action && bridge) {
+                        if (action === 'trigger-folder-scan') {
+                            e.preventDefault();
+                            bridge.triggerFolderScan?.();
+                            return;
+                        }
+                        if (action === 'close-queue') {
+                            e.preventDefault();
+                            bridge.closeQueue?.();
+                            return;
+                        }
+                    }
+                }
+
+                // 2. Intercept inline onclick="window.Auralis.bridge.<method>()" blocked by WebView CSP
+                const onclickEl = e.target.closest && e.target.closest('[onclick*="window.Auralis.bridge"]');
+                if (onclickEl) {
+                    const onclickAttr = onclickEl.getAttribute('onclick') || '';
+                    const match = onclickAttr.match(/window\.Auralis\.bridge\.([a-zA-Z0-9_]+)\(([^)]*)\)/);
+                    if (match) {
+                        const method = match[1];
+                        const rawArgs = match[2].trim();
+                        const bridge = window.Auralis?.bridge;
+                        if (bridge && typeof bridge[method] === 'function') {
+                            e.preventDefault();
+                            let args = [];
+                            if (rawArgs) {
+                                args = rawArgs.split(',').map(s => s.trim()).map(s => {
+                                    if (s === 'this') return onclickEl;
+                                    if (s === 'event') return e;
+                                    try {
+                                        return JSON.parse(s);
+                                    } catch (_) {
+                                        return s.replace(/^['"]|['"]$/g, '');
+                                    }
+                                });
+                            }
+                            bridge[method](...args);
+                        }
+                    }
+                }
+            };
+            document.addEventListener('click', handleGlobalActionDelegate);
         }
     },
 
@@ -427,13 +435,20 @@ export const coreMethods = {
             dismissed = true;
         }
 
-        // 2. Queue drawer inside full-screen player
+        // 2. Queue drawer inside full-screen player or sidebar queue panel
         const drawer = document.getElementById('player-full-queue-drawer');
-        if (drawer && drawer.classList.contains('open')) {
-            if (window.AuralisPlayer && typeof window.AuralisPlayer.toggleFullScreenQueue === 'function') {
-                window.AuralisPlayer.toggleFullScreenQueue(false);
+        const queuePanel = document.getElementById('queue-panel');
+        if (drawer?.classList?.contains('open') || queuePanel?.classList?.contains('open')) {
+            if (typeof this.closeQueue === 'function') {
+                this.closeQueue();
+            } else if (window.Auralis?.player && typeof window.Auralis.player.toggleFullScreenQueue === 'function') {
+                window.Auralis.player.toggleFullScreenQueue(false);
+                if (typeof window.Auralis.player.toggleQueue === 'function') {
+                    window.Auralis.player.toggleQueue(false);
+                }
             } else {
-                drawer.classList.remove('open');
+                if (drawer) drawer.classList.remove('open');
+                if (queuePanel) queuePanel.classList.remove('open');
             }
             dismissed = true;
         }

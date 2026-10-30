@@ -97,7 +97,8 @@ class MediaPlaybackService : Service() {
             durationSecs: Int,
             positionSecs: Int,
             isPlaying: Boolean,
-            artPath: String
+            artPath: String,
+            isStream: Boolean
         ) {
             // Wrap entire body — createNotificationChannel / permission / Intent /
             // startForegroundService can all throw (e.g. MIUI HyperOS quirks,
@@ -130,6 +131,7 @@ class MediaPlaybackService : Service() {
                     putExtra("positionSecs", positionSecs)
                     putExtra("isPlaying", isPlaying)
                     putExtra("artPath", artPath)
+                    putExtra("isStream", isStream)
                 }
 
                 try {
@@ -138,7 +140,7 @@ class MediaPlaybackService : Service() {
                     } else {
                         context.startService(intent)
                     }
-                    Log.i("AuralisMedia", "start: startForegroundService succeeded isPlaying=$isPlaying title=$title")
+                    Log.i("AuralisMedia", "start: startForegroundService succeeded isPlaying=$isPlaying isStream=$isStream title=$title")
                     return
                 } catch (e: Throwable) {
                     Log.e("AuralisMedia", "startForegroundService failed; falling back to direct notify", e)
@@ -152,7 +154,7 @@ class MediaPlaybackService : Service() {
                     val art = loadArtBitmapStatic(context, artPath)
                     val notification = buildNotificationStatic(context, title, artist, isPlaying, art, null)
                     notificationManager?.notify(NOTIFICATION_ID, notification)
-                    Log.i("AuralisMedia", "start: fallback notify posted isPlaying=$isPlaying")
+                    Log.i("AuralisMedia", "start: fallback notify posted isPlaying=$isPlaying isStream=$isStream")
                 } catch (fallbackErr: Throwable) {
                     Log.e("AuralisMedia", "Fallback notification notify failed", fallbackErr)
                 }
@@ -166,6 +168,21 @@ class MediaPlaybackService : Service() {
                     if (n != null) nm?.notify(NOTIFICATION_ID, n)
                 } catch (_: Throwable) {}
             }
+        }
+
+        /** 7-argument backward-compatible overload */
+        @Keep
+        @JvmStatic
+        fun start(
+            context: Context,
+            title: String,
+            artist: String,
+            durationSecs: Int,
+            positionSecs: Int,
+            isPlaying: Boolean,
+            artPath: String
+        ) {
+            start(context, title, artist, durationSecs, positionSecs, isPlaying, artPath, false)
         }
 
         /** Stop the foreground service (queue exhausted / explicit stop). */
@@ -326,6 +343,7 @@ class MediaPlaybackService : Service() {
      * paused on our behalf later: there is no earlier playback to restore.
      */
     private var hasAudioFocus: Boolean = false
+    private var isCurrentStream: Boolean = false
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
@@ -366,33 +384,29 @@ class MediaPlaybackService : Service() {
         val positionSecs = intent.getIntExtra("positionSecs", 0)
         val isPlaying = intent.getBooleanExtra("isPlaying", true)
         val artPath = intent.getStringExtra("artPath").orEmpty()
+        val isStream = intent.getBooleanExtra("isStream", false)
+        isCurrentStream = isStream
 
         if (isPlaying) {
-            requestAudioFocus()
+            if (isStream) {
+                // When streaming via WebView HTML5 <audio>, Chromium holds and manages
+                // its own AudioFocus via org.chromium.content.browser.AudioFocusDelegate.
+                // If MediaPlaybackService also requests audio focus, Android notifies
+                // Chromium of focus loss (AUDIOFOCUS_LOSS_TRANSIENT), causing Chromium
+                // to auto-pause the stream. Abandon any previous focus hold so Chromium
+                // has full focus uninterrupted.
+                if (hasAudioFocus) {
+                    abandonAudioFocus()
+                }
+            } else {
+                requestAudioFocus()
+            }
             acquireWakeLock()
         } else {
             releaseWakeLock()
-            // Release focus on pause, per the ordinary Android contract.
-            //
-            // Previously focus was abandoned ONLY in onDestroy(), so every pause
-            // left the previous AudioFocusRequest registered and every resume
-            // layered a new request on top of it. The framework invalidated the
-            // stale entry and delivered AUDIOFOCUS_LOSS on the SAME listener
-            // lambda that had just been re-registered — whose loss branch read it
-            // as an external steal and fired command("pause"), ~25 ms after every
-            // grant. Each resume recreated the collision.
-            //
-            // Measured (owner, 2026-10-03 23:24 UTC, @audit diag/focus-abandon):
-            // with this line, every cycle that previously produced
-            // `pause-dispatch: audio-focus-loss` produces none, and pause/resume
-            // work. The stale-request mechanism is INFERRED from that delta, one
-            // step removed from the log — the measurement is the absence of the
-            // storm, not a direct observation of the invalidation.
-            //
-            // The `pause-dispatch:` markers below are kept on purpose. They are the
-            // regression tripwire for exactly this: if the re-pause ever returns,
-            // one grep names the actor that dispatched the pause.
-            abandonAudioFocus()
+            if (!isStream) {
+                abandonAudioFocus()
+            }
         }
 
         val art = loadArtBitmap(artPath)
@@ -444,6 +458,10 @@ class MediaPlaybackService : Service() {
     }
 
     private fun requestAudioFocus() {
+        if (isCurrentStream) {
+            Log.i("AuralisMedia", "requestAudioFocus: stream active, skipping service audio focus")
+            return
+        }
         val am = audioManager ?: return
         // A fresh request only ever happens because the user asked to play (Rust
         // pushes now-playing on every playback change). So any earlier focus-pause is
@@ -471,6 +489,10 @@ class MediaPlaybackService : Service() {
                 .setOnAudioFocusChangeListener { focusChange ->
                     if (audioFocusRequest != null && audioFocusRequest != req) {
                         Log.i("AuralisMedia", "focusChange: ignoring callback from superseded request")
+                        return@setOnAudioFocusChangeListener
+                    }
+                    if (isCurrentStream) {
+                        Log.i("AuralisMedia", "focusChange: ignoring callback while streaming (handled by WebView)")
                         return@setOnAudioFocusChangeListener
                     }
                     when (focusChange) {

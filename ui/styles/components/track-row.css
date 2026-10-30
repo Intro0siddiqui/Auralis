@@ -8,7 +8,7 @@
     gap: var(--space-3);
     padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
-    transition: background var(--transition-fast);
+    transition: background var(--transition-fast), border-color var(--transition-fast);
     cursor: pointer;
 }
 
@@ -16,8 +16,39 @@
     background: var(--glass-weak);
 }
 
-.track-row.active {
-    background: var(--glass-base);
+.track-row.active,
+.queue-track-row.active {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border: 1px solid rgba(255, 255, 255, 0.06) !important;
+    box-shadow: none !important;
+}
+
+.track-row.active:hover,
+.queue-track-row.active:hover {
+    background: rgba(255, 255, 255, 0.07) !important;
+}
+
+.track-row.active .track-row-title,
+.queue-track-row.active .track-row-title {
+    color: var(--accent) !important;
+    font-weight: var(--font-semibold);
+    text-shadow: 0 0 12px rgba(110, 231, 255, 0.35);
+}
+
+.track-row.active .play-track-btn,
+.queue-track-row.active .play-track-btn {
+    color: var(--accent) !important;
+}
+
+.track-row.active .track-row-artwork,
+.queue-track-row.active .track-row-artwork {
+    box-shadow: 0 0 10px rgba(110, 231, 255, 0.2);
+}
+
+.track-row.glass-weak,
+.track-row.neu-glass {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
 }
 
 .track-row-artwork {

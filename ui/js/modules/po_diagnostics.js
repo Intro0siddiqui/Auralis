@@ -121,6 +121,9 @@ export const MINT_STEPS = [
     // ODM:Invalid (proof not a Uint8Array). They are recorded verbatim because
     // the code alone says which stage of BotGuard refused.
     { id: 'mint', label: 'WebPoMinter.mintAsWebsafeString' },
+    // po_token.js:742-761 — native hidden WebView fallback to harvest authentic
+    // browser-minted PO token directly from YouTube's watch context.
+    { id: 'webview-harvest', label: 'harvest authentic PO token via hidden WebView', fatal: false },
     // po_token.js:296-306 — cold-start token, used only when the BotGuard path
     // produced nothing. A different kind of token for the same purpose.
     { id: 'cold-start-fallback', label: 'cold-start token fallback' },

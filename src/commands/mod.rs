@@ -3,6 +3,7 @@
 //! This module aggregates all Tauri command handlers exposed to the
 //! frontend. Each sub-module groups commands by domain area.
 
+pub mod attestation;
 pub mod downloads;
 pub mod library;
 pub mod playback;

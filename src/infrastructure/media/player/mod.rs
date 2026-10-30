@@ -1250,6 +1250,7 @@ struct DecoderContext<'a> {
     file: &'a mut File,
     path: &'a str,
     ext: String,
+    len: Option<u64>,
     is_ebml: bool,
 }
 
@@ -1261,6 +1262,8 @@ impl<'a> DecoderContext<'a> {
             .unwrap_or_default()
             .to_lowercase();
 
+        let len = file.metadata().map(|m| m.len()).ok();
+
         let mut header = [0u8; 4];
         let is_ebml = file.read(&mut header).unwrap_or(0) == 4 && &header == b"\x1a\x45\xdf\xa3";
         let _ = file.seek(SeekFrom::Start(0));
@@ -1269,6 +1272,7 @@ impl<'a> DecoderContext<'a> {
             file,
             path,
             ext,
+            len,
             is_ebml,
         }
     }
@@ -1291,6 +1295,7 @@ impl DecoderStrategy for OpusContainerStrategy {
         ctx: &mut DecoderContext,
     ) -> Result<Option<DecodedAudioSource>, PlayerError> {
         if ctx.is_ebml || ctx.ext == "webm" || ctx.ext == "opus" {
+            let _ = ctx.file.seek(SeekFrom::Start(0));
             if let Ok(cloned_file) = ctx.file.try_clone() {
                 if let Ok(opus_src) = OpusSource::new(cloned_file, ctx.path) {
                     return Ok(Some(DecodedAudioSource::Opus(Box::new(opus_src))));
@@ -1301,7 +1306,7 @@ impl DecoderStrategy for OpusContainerStrategy {
     }
 }
 
-/// Decoder strategy using Rodio with format extension hinting.
+/// Decoder strategy using Rodio with format extension hinting, seekable stream support, and container MIME types.
 struct RodioHintedStrategy;
 
 impl DecoderStrategy for RodioHintedStrategy {
@@ -1309,14 +1314,27 @@ impl DecoderStrategy for RodioHintedStrategy {
         &self,
         ctx: &mut DecoderContext,
     ) -> Result<Option<DecodedAudioSource>, PlayerError> {
+        let _ = ctx.file.seek(SeekFrom::Start(0));
         if !ctx.ext.is_empty() {
             if let Ok(cloned_file) = ctx.file.try_clone() {
                 let reader = BufReader::with_capacity(64 * 1024, cloned_file);
-                match Decoder::builder()
+                let mut builder = Decoder::builder()
                     .with_data(reader)
-                    .with_hint(&ctx.ext)
-                    .build()
-                {
+                    .with_seekable(true)
+                    .with_hint(&ctx.ext);
+
+                let is_streaming_cache = ctx.path.contains("stream_cache_");
+                if let Some(l) = ctx.len {
+                    if !is_streaming_cache {
+                        builder = builder.with_byte_len(l);
+                    }
+                }
+
+                if ctx.ext == "m4a" || ctx.ext == "mp4" || ctx.ext == "aac" {
+                    builder = builder.with_mime_type("audio/mp4");
+                }
+
+                match builder.build() {
                     Ok(decoder) => return Ok(Some(DecodedAudioSource::Rodio(decoder))),
                     Err(e) => {
                         warn!(
@@ -1333,7 +1351,7 @@ impl DecoderStrategy for RodioHintedStrategy {
     }
 }
 
-/// Decoder strategy using default unhinted Rodio format probing.
+/// Decoder strategy using default unhinted Rodio format probing with seekable stream support.
 struct RodioDefaultStrategy;
 
 impl DecoderStrategy for RodioDefaultStrategy {
@@ -1344,7 +1362,18 @@ impl DecoderStrategy for RodioDefaultStrategy {
         let _ = ctx.file.seek(SeekFrom::Start(0));
         if let Ok(cloned_file) = ctx.file.try_clone() {
             let reader = BufReader::with_capacity(64 * 1024, cloned_file);
-            if let Ok(decoder) = Decoder::new(reader) {
+            let mut builder = Decoder::builder()
+                .with_data(reader)
+                .with_seekable(true);
+
+            let is_streaming_cache = ctx.path.contains("stream_cache_");
+            if let Some(l) = ctx.len {
+                if !is_streaming_cache {
+                    builder = builder.with_byte_len(l);
+                }
+            }
+
+            if let Ok(decoder) = builder.build() {
                 return Ok(Some(DecodedAudioSource::Rodio(decoder)));
             }
         }
@@ -1362,19 +1391,11 @@ impl DecoderStrategy for OpusFallbackStrategy {
     ) -> Result<Option<DecodedAudioSource>, PlayerError> {
         let _ = ctx.file.seek(SeekFrom::Start(0));
         if let Ok(cloned_file) = ctx.file.try_clone() {
-            match OpusSource::new(cloned_file, ctx.path) {
-                Ok(opus_src) => Ok(Some(DecodedAudioSource::Opus(Box::new(opus_src)))),
-                Err(e) => Err(PlayerError::DecodeError(format!(
-                    "Failed to decode audio file {}: {e}",
-                    ctx.path
-                ))),
+            if let Ok(opus_src) = OpusSource::new(cloned_file, ctx.path) {
+                return Ok(Some(DecodedAudioSource::Opus(Box::new(opus_src))));
             }
-        } else {
-            Err(PlayerError::DecodeError(format!(
-                "Failed to decode audio file {}: failed to clone file handle",
-                ctx.path
-            )))
         }
+        Ok(None)
     }
 }
 

@@ -85,17 +85,15 @@ pub(crate) fn render_track_row_html(
     <div class="track-row-actions">
         <button type="button" class="btn btn-ghost btn-icon play-track-btn" 
                 title="Play" data-role="play-btn" data-track-id="{safe_id}" 
-                onclick="event.stopPropagation(); window._safePlayTrack ? window._safePlayTrack('{safe_id}') : (window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.playTrack('{safe_id}'))" 
-                ontouchend="event.stopPropagation(); window._safePlayTrack ? window._safePlayTrack('{safe_id}') : (window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.playTrack('{safe_id}'))">
+                onclick="event.stopPropagation(); window._safePlayTrack ? window._safePlayTrack('{safe_id}') : (window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.playTrack('{safe_id}'))">
             <i data-lucide="play"></i>
         </button>
-        <button type="button" class="btn btn-ghost btn-icon{is_fav_class}"{is_fav_style} title="Like" onclick="event.stopPropagation(); window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.toggleTrackFavorite('{safe_id}', this)" ontouchend="event.stopPropagation(); window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.toggleTrackFavorite('{safe_id}', this)">
+        <button type="button" class="btn btn-ghost btn-icon{is_fav_class}"{is_fav_style} title="Like" onclick="event.stopPropagation(); window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.toggleTrackFavorite('{safe_id}', this)">
             <i data-lucide="heart"></i>
         </button>
         <button type="button" class="btn btn-ghost btn-icon track-menu-btn" 
                 title="More options" data-role="menu-btn" data-track-id="{safe_id}" 
-                onclick="event.stopPropagation(); window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.openTrackContextMenu(event, '{safe_id}')" 
-                ontouchend="event.stopPropagation(); window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.openTrackContextMenu(event, '{safe_id}')">
+                onclick="event.stopPropagation(); window.Auralis &amp;&amp; window.Auralis.bridge &amp;&amp; window.Auralis.bridge.openTrackContextMenu(event, '{safe_id}')">
             <i data-lucide="more-vertical"></i>
         </button>
     </div>
@@ -297,7 +295,7 @@ pub async fn get_library_tracks_html(
             <i data-lucide="file-plus-2"></i>
             Import Audio
         </label>
-        <button type="button" class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+        <button type="button" class="btn btn-secondary neu" data-action="trigger-folder-scan" onclick="window.Auralis.bridge.triggerFolderScan()" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
             <i data-lucide="folder-search"></i>
             Scan Storage
         </button>
@@ -329,7 +327,7 @@ pub async fn get_home_shelves_html(db: State<'_, Database>) -> Result<String, St
             <i data-lucide="file-plus-2"></i>
             Import Audio
         </label>
-        <button type="button" class="btn btn-secondary neu" onclick="window.Auralis.bridge.triggerFolderScan()" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+        <button type="button" class="btn btn-secondary neu" data-action="trigger-folder-scan" onclick="window.Auralis.bridge.triggerFolderScan()" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
             <i data-lucide="folder-search"></i>
             Scan Storage
         </button>

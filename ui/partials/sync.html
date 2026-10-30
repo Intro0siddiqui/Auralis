@@ -1,7 +1,7 @@
 <section class="page-sync">
     <div class="section-header">
         <h2 class="section-title">Devices & Sync</h2>
-        <button class="btn btn-primary neu" onclick="window.Auralis.bridge.syncNow()">
+        <button class="btn btn-primary neu" data-action="sync-now" onclick="window.Auralis.bridge.syncNow()">
             <i data-lucide="refresh-cw"></i>
             Sync Now
         </button>
@@ -23,7 +23,7 @@
                 </div>
                 <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-2);">
                     <input type="text" id="sync-device-id" class="input neu-inset" readonly value="Generating ticket..." onclick="this.select()" style="flex: 1; padding: var(--space-2) var(--space-3); font-family: monospace; font-size: var(--text-xs); color: var(--text-2);">
-                    <button class="btn btn-secondary neu btn-sm" id="btn-copy-ticket" onclick="window.Auralis.bridge.copyPairingTicket()" title="Copy Endpoint Ticket">
+                    <button class="btn btn-secondary neu btn-sm" id="btn-copy-ticket" data-action="copy-pairing-ticket" onclick="window.Auralis.bridge.copyPairingTicket()" title="Copy Endpoint Ticket">
                         <i data-lucide="copy" style="width: 14px; height: 14px;"></i> Copy
                     </button>
                 </div>
@@ -34,13 +34,57 @@
 
     <!-- Pair with Remote Device Card -->
     <div class="card neu-glass" style="padding: var(--space-4); margin-bottom: var(--space-6);">
-        <h4 style="font-size: var(--text-sm); font-weight: var(--font-semibold); margin-bottom: var(--space-1); color: var(--text-1);">Pair With Another Device</h4>
-        <p style="font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-3);">Paste the Endpoint Ticket or Ticket URL from another Auralis device to establish a direct QUIC connection.</p>
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-1); flex-wrap: wrap; gap: var(--space-2);">
+            <h4 style="font-size: var(--text-sm); font-weight: var(--font-semibold); margin: 0; color: var(--text-1);">Pair With Another Device</h4>
+            <button class="btn btn-primary neu btn-sm" data-action="open-qr-scanner" onclick="window.Auralis.bridge.openQrScanner()" style="display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3);">
+                <i data-lucide="scan-line" style="width: 14px; height: 14px;"></i>
+                <span>Scan QR</span>
+            </button>
+        </div>
+        <p style="font-size: var(--text-xs); color: var(--text-3); margin-bottom: var(--space-3);">Scan the QR code from another device's screen with your camera, or paste an Endpoint Ticket.</p>
         <div style="display: flex; gap: var(--space-2);">
             <input type="text" id="direct-peer-address" class="input neu-inset" placeholder="Paste endpoint... or auralis://pair?ticket=..." style="flex: 1; font-family: monospace; font-size: var(--text-xs);">
-            <button class="btn btn-primary neu" onclick="window.Auralis.bridge.connectDirectPeer()">
+            <button class="btn btn-secondary neu" data-action="connect-direct-peer" onclick="window.Auralis.bridge.connectDirectPeer()">
                 <i data-lucide="link" style="width: 14px; height: 14px;"></i> Pair
             </button>
+        </div>
+    </div>
+
+    <!-- Camera QR Scanner Viewfinder Modal -->
+    <div id="qr-scanner-modal" class="scanner-modal" style="display: none;">
+        <div class="scanner-backdrop" data-action="close-qr-scanner" onclick="window.Auralis.bridge.closeQrScanner()"></div>
+        <div class="scanner-container glass-strong neu">
+            <div class="scanner-header">
+                <div class="scanner-title">
+                    <i data-lucide="scan-line" style="width: 18px; height: 18px; color: var(--accent);"></i>
+                    <span>Scan Pairing QR</span>
+                </div>
+                <button class="btn-icon" data-action="close-qr-scanner" onclick="window.Auralis.bridge.closeQrScanner()" title="Close scanner">
+                    <i data-lucide="x" style="width: 18px; height: 18px;"></i>
+                </button>
+            </div>
+            <div class="scanner-viewport">
+                <video id="qr-scanner-video" playsinline muted autoplay></video>
+                <canvas id="qr-scanner-canvas" style="display: none;"></canvas>
+                <div class="scanner-reticle" id="scanner-reticle">
+                    <div class="reticle-corner tl"></div>
+                    <div class="reticle-corner tr"></div>
+                    <div class="reticle-corner bl"></div>
+                    <div class="reticle-corner br"></div>
+                    <div class="reticle-laser"></div>
+                </div>
+                <div id="scanner-status" class="scanner-status">Align QR code inside the frame</div>
+            </div>
+            <div class="scanner-footer">
+                <button class="btn btn-secondary neu btn-sm" id="btn-switch-camera" data-action="switch-scanner-camera" onclick="window.Auralis.bridge.switchScannerCamera()">
+                    <i data-lucide="switch-camera" style="width: 14px; height: 14px;"></i>
+                    <span>Switch Camera</span>
+                </button>
+                <button class="btn btn-secondary neu btn-sm" id="btn-toggle-torch" data-action="toggle-scanner-torch" onclick="window.Auralis.bridge.toggleScannerTorch()" style="display: none;">
+                    <i data-lucide="flashlight" style="width: 14px; height: 14px;"></i>
+                    <span>Flashlight</span>
+                </button>
+            </div>
         </div>
     </div>
 
