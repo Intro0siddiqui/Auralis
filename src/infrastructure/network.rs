@@ -374,7 +374,8 @@ impl Discovery {
                             Ok(conn) => {
                                 let alpn = conn.alpn();
                                 if alpn == ALPN_SYNC {
-                                    handle_incoming_sync_connection(conn, runtime, remote_sock).await;
+                                    handle_incoming_sync_connection(conn, runtime, remote_sock)
+                                        .await;
                                 }
                             }
                             Err(e) => {
@@ -465,7 +466,8 @@ async fn handle_incoming_sync_connection(
                             handle_audio_fetch_request(req.payload, &mut send, &runtime).await;
                             return;
                         }
-                        if req.payload.get("action").and_then(|v| v.as_str()) == Some("fetch_artwork")
+                        if req.payload.get("action").and_then(|v| v.as_str())
+                            == Some("fetch_artwork")
                         {
                             handle_artwork_fetch_request(req.payload, &mut send, &runtime).await;
                             return;
@@ -972,7 +974,11 @@ fn apply_single_change(change: &serde_json::Value, conn: &rusqlite::Connection) 
                 }
             })
             .or_else(|| {
-                if payload.get("has_art").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if payload
+                    .get("has_art")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     Some(format!("sync-art://{}", id))
                 } else {
                     None
@@ -1778,8 +1784,7 @@ mod tests {
         assert_eq!(received_art, dummy_art_data);
 
         // B also tests fetching standalone artwork on-demand from A
-        let art_dest_dir =
-            std::env::temp_dir().join(format!("test_art_dest_{}", Uuid::new_v4()));
+        let art_dest_dir = std::env::temp_dir().join(format!("test_art_dest_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&art_dest_dir).await.unwrap();
         let fetched_art_standalone = engine_b
             .fetch_track_artwork(&ticket_a, &track_id, &art_dest_dir)

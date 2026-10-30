@@ -134,11 +134,12 @@ pub async fn harvest_po_token(
             })();
         "#;
 
-        let window = WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::External(parsed_url))
-            .visible(false)
-            .initialization_script(hook_script)
-            .build()
-            .map_err(|e| format!("Failed to create harvester window: {e}"))?;
+        let window =
+            WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::External(parsed_url))
+                .visible(false)
+                .initialization_script(hook_script)
+                .build()
+                .map_err(|e| format!("Failed to create harvester window: {e}"))?;
 
         // Wait up to 15 seconds for token capture
         let result = tokio::time::timeout(Duration::from_secs(15), rx).await;

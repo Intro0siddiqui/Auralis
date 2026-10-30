@@ -364,6 +364,7 @@ pub struct StreamAudioRequest {
 /// Streams chunks via reqwest, then hands the cache file to [`AudioPlayer`] so that
 /// playback continues natively with foreground service & partial wake lock when screen turns off.
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub async fn stream_online_audio(
     request: Option<StreamAudioRequest>,
     url: Option<String>,
@@ -423,7 +424,8 @@ pub async fn stream_online_audio(
     let cache_file = cache_dir.join(format!("stream_cache_{}.{}", Uuid::new_v4(), ext));
 
     // 3. Clean up the URL by stripping range capping parameters
-    let clean_url = crate::infrastructure::media::downloader::http::strip_response_range_params(&request.url);
+    let clean_url =
+        crate::infrastructure::media::downloader::http::strip_response_range_params(&request.url);
 
     // 4. Fetch stream using reqwest with upstream InnerTube client headers
     let ua = request
@@ -595,6 +597,7 @@ pub async fn stream_online_audio(
 /// Looks up or inserts the track in SQLite, then starts native playback through
 /// [`AudioPlayer`], emitting full media session metadata, notification, and wake lock.
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub async fn play_or_stream_track(
     file_path: String,
     title: String,
@@ -638,7 +641,10 @@ pub async fn play_or_stream_track(
     // Play via native AudioPlayer
     if let Err(e) = player.play_track(track.clone()).await {
         warn!(file_path = %track.file_path, title = %track.title, error = %e, "Native play_or_stream_track failed");
-        return Err(format!("Playback error [{} — {}]: {}", track.title, track.file_path, e));
+        return Err(format!(
+            "Playback error [{} — {}]: {}",
+            track.title, track.file_path, e
+        ));
     }
 
     // Seed single-track queue if currently empty
@@ -1368,7 +1374,14 @@ pub async fn update_stream_notification(
             background_service::notify_paused(&track, Duration::from_secs(position_secs as u64));
         }
     }
-    let _ = (title, artist, duration_secs, position_secs, is_playing, art_url);
+    let _ = (
+        title,
+        artist,
+        duration_secs,
+        position_secs,
+        is_playing,
+        art_url,
+    );
     Ok(())
 }
 

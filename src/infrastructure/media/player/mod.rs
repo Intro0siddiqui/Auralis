@@ -1362,9 +1362,7 @@ impl DecoderStrategy for RodioDefaultStrategy {
         let _ = ctx.file.seek(SeekFrom::Start(0));
         if let Ok(cloned_file) = ctx.file.try_clone() {
             let reader = BufReader::with_capacity(64 * 1024, cloned_file);
-            let mut builder = Decoder::builder()
-                .with_data(reader)
-                .with_seekable(true);
+            let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
 
             let is_streaming_cache = ctx.path.contains("stream_cache_");
             if let Some(l) = ctx.len {

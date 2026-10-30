@@ -206,7 +206,8 @@ impl AndroidScanner {
         let (mtime, size) = inner?;
 
         if let Some(existing_track) = existing.as_ref() {
-            let needs_rescan = existing_track.duration_secs == 0 || existing_track.album_art_path.is_none();
+            let needs_rescan =
+                existing_track.duration_secs == 0 || existing_track.album_art_path.is_none();
             if !needs_rescan && existing_track.mtime == mtime && existing_track.file_size == size {
                 debug!(path = %path_str, "File unchanged, skipping");
                 return Ok(crate::infrastructure::filesystem::scanner::ScanResult::Skipped);
