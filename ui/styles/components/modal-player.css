@@ -7,15 +7,23 @@
     overflow: hidden !important;
     user-select: none;
     -webkit-user-select: none;
+    animation: playerSlideUp 0.26s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
+@keyframes playerSlideUp {
+    from {
+        transform: translateY(100%);
+        opacity: 0.6;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
 
 .player-full-close {
-    position: absolute;
-    top: calc(var(--space-4) + env(safe-area-inset-top));
-    right: var(--space-4);
-    width: 48px;
-    height: 48px;
+    width: 44px;
+    height: 44px;
     border-radius: var(--radius-full);
     display: flex;
     align-items: center;
@@ -24,7 +32,6 @@
     border: 1px solid var(--glass-border);
     color: var(--text-1);
     cursor: pointer;
-    z-index: 10;
 }
 
 .player-full-art {
@@ -67,6 +74,21 @@
     font-weight: var(--font-bold);
     color: var(--text-1);
     margin-bottom: var(--space-1);
+    max-width: 280px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+#player-full-like {
+    width: 44px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-full);
 }
 
 .player-full-artist {

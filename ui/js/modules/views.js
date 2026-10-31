@@ -60,6 +60,16 @@ export const viewMethods = {
         }
     },
 
+    navigateToView(viewName) {
+        if (!viewName) return;
+        const normalized = viewName.endsWith('.html') ? viewName : `${viewName}.html`;
+        const partialUrl = `/partials/${normalized}`;
+        const content = document.getElementById('content');
+        if (content && window.htmx) {
+            window.htmx.ajax('GET', partialUrl, { target: '#content', swap: 'innerHTML' });
+        }
+    },
+
     async loadLibraryView() {
         const expected = 'library';
         if (this.activeView !== expected) return;
@@ -306,7 +316,7 @@ export const viewMethods = {
                             Back to Playlists
                         </button>
                         ${tracks && tracks.length > 0 ? `
-                            <button class="btn btn-primary btn-sm neu" onclick="window.Auralis.bridge.playTrack('${tracks[0].id}')">
+                            <button class="btn btn-primary btn-sm neu" id="playlist-play-all-btn">
                                 <i data-lucide="play"></i>
                                 Play All (${tracks.length})
                             </button>
@@ -337,10 +347,15 @@ export const viewMethods = {
                         </div>
                     `;
                 }
+                detailEl.querySelector('#playlist-play-all-btn')?.addEventListener('click', () => {
+                    if (tracks && tracks.length > 0) {
+                        window.Auralis.bridge.playTrack(tracks[0].id, tracks.map(t => String(t.id)));
+                    }
+                });
                 if (window.lucide) window.lucide.createIcons();
-        if (window.Auralis?.player?.highlightActiveTrack) {
-            window.Auralis.player.highlightActiveTrack();
-        }
+                if (window.Auralis?.player?.highlightActiveTrack) {
+                    window.Auralis.player.highlightActiveTrack();
+                }
             }
         } catch (err) {
             console.error('Failed to open playlist:', err);
@@ -359,22 +374,151 @@ export const viewMethods = {
         }
     },
 
-    async promptCreatePlaylist() {
-        const name = prompt('Enter playlist name:');
-        if (!name || !name.trim()) return;
+    promptCreatePlaylist() {
+        this.openCreatePlaylistModal();
+    },
 
-        try {
-            const created = await this.invoke('create_playlist', { request: { name: name.trim() } });
-            if (created) {
-                this.showToast(`Playlist "${created.name}" created!`, 'success');
-                this.loadPlaylistsView();
+    openCreatePlaylistModal() {
+        const existingModal = document.getElementById('create-playlist-modal');
+        if (existingModal) existingModal.remove();
+
+        const backdrop = document.createElement('div');
+        backdrop.id = 'create-playlist-modal';
+        backdrop.className = 'modal-backdrop';
+
+        backdrop.innerHTML = `
+            <div class="modal-dialog glass neu" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <h3 class="modal-title">New Playlist</h3>
+                    <button type="button" class="modal-close" id="create-playlist-close" aria-label="Close">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
+                <div class="modal-body" style="display: flex; flex-direction: column; gap: var(--space-2);">
+                    <div>
+                        <label class="form-label" for="new-pl-name-input">Playlist Name</label>
+                        <input type="text" id="new-pl-name-input" class="input" placeholder="e.g. Chill Vibes, Night Drive" style="width: 100%;" enterkeyhint="next">
+                    </div>
+                    <div>
+                        <label class="form-label" for="new-pl-desc-input">Description (optional)</label>
+                        <input type="text" id="new-pl-desc-input" class="input" placeholder="e.g. My favorite relaxing tracks" style="width: 100%;" enterkeyhint="done">
+                    </div>
+                </div>
+                <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: var(--space-2); flex-shrink: 0; padding-top: var(--space-2);">
+                    <button type="button" class="btn btn-secondary neu" id="create-playlist-cancel">Cancel</button>
+                    <button type="button" class="btn btn-primary neu" id="create-playlist-submit">
+                        <i data-lucide="plus"></i>
+                        Create
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(backdrop);
+        if (window.lucide) window.lucide.createIcons();
+
+        const nameInput = backdrop.querySelector('#new-pl-name-input');
+        const descInput = backdrop.querySelector('#new-pl-desc-input');
+        const submitBtn = backdrop.querySelector('#create-playlist-submit');
+        const cancelBtn = backdrop.querySelector('#create-playlist-cancel');
+        const closeBtn = backdrop.querySelector('#create-playlist-close');
+
+        setTimeout(() => nameInput?.focus(), 50);
+
+        const closeModal = () => {
+            backdrop.remove();
+            document.removeEventListener('keydown', escListener);
+        };
+
+        const escListener = (e) => {
+            if (e.key === 'Escape') closeModal();
+        };
+        document.addEventListener('keydown', escListener);
+
+        backdrop.addEventListener('click', closeModal);
+        cancelBtn?.addEventListener('click', closeModal);
+        closeBtn?.addEventListener('click', closeModal);
+
+        const handleCreate = async () => {
+            const name = nameInput?.value.trim();
+            if (!name) {
+                this.showToast('Please enter a playlist name', 'warning');
+                nameInput?.focus();
+                return;
             }
-        } catch (err) {
-            this.showToast(`Failed to create playlist: ${err}`, 'error');
-        }
+            const description = descInput?.value.trim() || undefined;
+            try {
+                const created = await this.invoke('create_playlist', { request: { name, description } });
+                if (created) {
+                    this.showToast(`Playlist "${created.name}" created!`, 'success');
+                    closeModal();
+                    this.loadPlaylistsView();
+                }
+            } catch (err) {
+                this.showToast(`Failed to create playlist: ${err}`, 'error');
+            }
+        };
+
+        submitBtn?.addEventListener('click', handleCreate);
+        nameInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') handleCreate();
+        });
+        descInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') handleCreate();
+        });
     },
 
     async loadSearchView() {
+        if (typeof this._ensureDownloadSubmitListeners === 'function') {
+            this._ensureDownloadSubmitListeners();
+        }
+        if (typeof this._bindSearchBridgeMethods === 'function') {
+            this._bindSearchBridgeMethods();
+        }
+
+        const tabLib = document.getElementById('search-tab-library');
+        const tabYT = document.getElementById('search-tab-youtube');
+        const secLib = document.getElementById('search-section-library');
+        const secYT = document.getElementById('search-section-youtube');
+
+        const setTab = (target) => {
+            if (target === 'youtube') {
+                if (tabLib) tabLib.classList.remove('active');
+                if (tabYT) tabYT.classList.add('active');
+                if (secLib) secLib.style.display = 'none';
+                if (secYT) secYT.style.display = 'block';
+                const ytInput = secYT ? secYT.querySelector('input[name="q"]') : null;
+                if (ytInput) ytInput.focus();
+            } else {
+                if (tabYT) tabYT.classList.remove('active');
+                if (tabLib) tabLib.classList.add('active');
+                if (secYT) secYT.style.display = 'none';
+                if (secLib) secLib.style.display = 'block';
+                const libInput = secLib ? secLib.querySelector('input[name="q"]') : null;
+                if (libInput) libInput.focus();
+            }
+            if (window.lucide) window.lucide.createIcons();
+        };
+
+        if (tabLib) tabLib.onclick = () => setTab('library');
+        if (tabYT) tabYT.onclick = () => setTab('youtube');
+
+        // Expose method to switch to YouTube tab and query from search results empty state
+        this.switchToYouTubeSearch = (query) => {
+            setTab('youtube');
+            const ytInput = secYT ? secYT.querySelector('input[name="q"]') : null;
+            if (ytInput && query) {
+                ytInput.value = query;
+                const form = document.getElementById('youtube-search-form');
+                if (form && typeof this.handleSearchFormSubmit === 'function') {
+                    this.handleSearchFormSubmit(null, form);
+                }
+            }
+        };
+        if (window.Auralis && window.Auralis.bridge) {
+            window.Auralis.bridge.switchToYouTubeSearch = this.switchToYouTubeSearch.bind(this);
+        }
+
         const form = document.getElementById('search-form');
         const resultsContainer = document.getElementById('search-results');
         if (!form || !resultsContainer) return;
@@ -389,9 +533,9 @@ export const viewMethods = {
                 if (target && html) {
                     target.innerHTML = html;
                     if (window.lucide) window.lucide.createIcons();
-        if (window.Auralis?.player?.highlightActiveTrack) {
-            window.Auralis.player.highlightActiveTrack();
-        }
+                    if (window.Auralis?.player?.highlightActiveTrack) {
+                        window.Auralis.player.highlightActiveTrack();
+                    }
                 }
             } catch (err) {
                 console.error('Search error:', err);
@@ -470,7 +614,7 @@ export const viewMethods = {
                 }
             }
 
-            if (window.AuralisYouTube && settings.downloads) {
+            if (window.AuralisYouTube && typeof window.AuralisYouTube.setCredentials === 'function' && settings.downloads) {
                 window.AuralisYouTube.setCredentials({
                     cookie: settings.downloads.youtube_cookie,
                     po_token: settings.downloads.youtube_po_token,
@@ -570,6 +714,15 @@ export const viewMethods = {
                     await saveSettings();
                 }
             });
+
+            // Dynamically populate version
+            try {
+                const version = await this.invoke('get_app_version');
+                const subtitle = settingsView.querySelector('.about-subtitle');
+                if (subtitle && version) {
+                    subtitle.innerHTML = `Version ${this.escapeHtml(version)} &bull; 16KB Page Aligned &bull; Native Pure-Rust Audio Core`;
+                }
+            } catch (_) {}
 
             if (window.lucide) window.lucide.createIcons();
         if (window.Auralis?.player?.highlightActiveTrack) {

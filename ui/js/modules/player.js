@@ -17,9 +17,26 @@ export const playerMethods = {
         }
     },
 
-    async playTrack(trackId) {
+    async playTrack(trackId, queueIds = null) {
         if (!trackId) return;
-        const track = (this.tracks && this.tracks.find(t => String(t.id) === String(trackId)));
+        let track = (this.tracks && this.tracks.find(t => String(t.id) === String(trackId)));
+
+        // Optimistic DOM extraction if track is not in memory (fixes Bug 3 artwork & title latency)
+        if (!track) {
+            const rowEl = document.querySelector(`[data-track-id="${trackId}"]`);
+            if (rowEl) {
+                const titleEl = rowEl.querySelector('.track-row-title');
+                const subEl = rowEl.querySelector('.track-row-subtitle');
+                const imgEl = rowEl.querySelector('.track-row-artwork img');
+                track = {
+                    id: trackId,
+                    title: titleEl ? titleEl.textContent : 'Playing…',
+                    artist: subEl ? subEl.textContent.split('—')[0].trim() : '',
+                    album_art_path: imgEl ? (imgEl.dataset.artPath || imgEl.src) : null,
+                    _cachedImgSrc: imgEl ? imgEl.src : null,
+                };
+            }
+        }
 
         // Instant visual feedback — zero delay
         if (window.Auralis?.player) {
@@ -36,12 +53,29 @@ export const playerMethods = {
 
         try {
             // Seed queue in parallel so playback invocation is never blocked
-            const ids = (this.tracks && this.tracks.length) ? this.tracks.map(t => t.id) : [trackId];
+            let ids = (Array.isArray(queueIds) && queueIds.length > 0)
+                ? queueIds
+                : (this.tracks && this.tracks.length)
+                    ? this.tracks.map(t => t.id)
+                    : [];
+
+            if (ids.length <= 1) {
+                // Collect surrounding tracks from visible DOM list
+                const domIds = Array.from(document.querySelectorAll('.page-library [data-track-id], .track-list [data-track-id], #playlist-track-list [data-track-id]'))
+                    .map(el => el.dataset.trackId)
+                    .filter((v, i, a) => v && a.indexOf(v) === i);
+                if (domIds.includes(String(trackId))) {
+                    ids = domIds;
+                }
+            }
+
+            if (ids.length === 0) {
+                ids = [trackId];
+            }
+
             const queuePromise = (ids.length > 1)
                 ? this.setQueue(ids, trackId).catch(() => {})
-                : (ids.length === 1 && track)
-                    ? this.setQueue([String(track.id)], String(track.id)).catch(() => {})
-                    : Promise.resolve();
+                : this.setQueue([trackId], trackId).catch(() => {});
 
             const nowPlaying = await this.invoke('play', { track_id: trackId, trackId });
             await queuePromise;
@@ -242,10 +276,16 @@ export const playerMethods = {
             artist.style.color = '';
         }
         if (artwork) {
-            if (actualTrack.album_art_path) {
-                artwork.innerHTML = this.artImgTag(actualTrack.album_art_path, actualTrack.title);
+            const artPath = actualTrack.album_art_path;
+            const cachedSrc = actualTrack._cachedImgSrc;
+            if (cachedSrc || artPath) {
+                const src = cachedSrc || this.assetUrl(artPath);
+                const existingImg = artwork.querySelector('img');
+                if (!existingImg || existingImg.getAttribute('src') !== src) {
+                    artwork.innerHTML = `<img src="${src}" alt="${this.escapeHtml(actualTrack.title || '')}" data-art-path="${this.escapeHtml(artPath || '')}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;" onerror="this.style.display='none'">`;
+                }
             } else {
-                artwork.innerHTML = `<i data-lucide="music"></i>`;
+                artwork.innerHTML = `<div class="artwork-placeholder" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;"><i data-lucide="disc"></i></div>`;
                 if (window.lucide) window.lucide.createIcons();
             }
         }

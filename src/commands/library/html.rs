@@ -299,6 +299,10 @@ pub async fn get_library_tracks_html(
             <i data-lucide="folder-search"></i>
             Scan Storage
         </button>
+        <button type="button" class="btn btn-secondary neu" onclick="if(window.Auralis&&window.Auralis.bridge&&typeof window.Auralis.bridge.navigateToView==='function'){window.Auralis.bridge.navigateToView('download');}" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+            <i data-lucide="download"></i>
+            Download Music
+        </button>
     </div>
 </div>"#.to_string());
     }
@@ -523,11 +527,18 @@ pub async fn get_search_results_html(
     let tracks = query_search_tracks(&conn, trimmed)?;
 
     if tracks.is_empty() {
-        return Ok(r#"<div class="empty-state glass neu" style="padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
+        let escaped_q = html_escape(trimmed);
+        return Ok(format!(
+            r#"<div class="empty-state glass neu" style="padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
     <div class="empty-state-icon"><i data-lucide="search"></i></div>
-    <h2 class="empty-state-title">No matching tracks</h2>
-    <p class="empty-state-description">Try searching for a different title, artist, or album.</p>
-</div>"#.to_string());
+    <h2 class="empty-state-title">No matching tracks in library</h2>
+    <p class="empty-state-description">No local audio matches “{escaped_q}”.</p>
+    <button type="button" class="btn btn-primary neu" style="margin-top: var(--space-4);" onclick="if(window.Auralis&&window.Auralis.bridge&&typeof window.Auralis.bridge.switchToYouTubeSearch==='function'){{window.Auralis.bridge.switchToYouTubeSearch('{escaped_q}');}}">
+        <i data-lucide="youtube"></i>
+        Search YouTube for “{escaped_q}”
+    </button>
+</div>"#
+        ));
     }
 
     Ok(render_search_results_html(&tracks))

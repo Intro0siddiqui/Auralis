@@ -133,6 +133,17 @@
     height: 4px;
     position: relative;
     cursor: pointer;
+    touch-action: none;
+}
+
+.progress-track::before {
+    content: '';
+    position: absolute;
+    top: -16px;
+    bottom: -16px;
+    left: 0;
+    right: 0;
+    z-index: 1;
 }
 
 .progress-fill {
@@ -190,6 +201,17 @@
     height: 4px;
     position: relative;
     cursor: pointer;
+    touch-action: none;
+}
+
+.volume-slider::before {
+    content: '';
+    position: absolute;
+    top: -14px;
+    bottom: -14px;
+    left: 0;
+    right: 0;
+    z-index: 1;
 }
 
 .volume-fill {

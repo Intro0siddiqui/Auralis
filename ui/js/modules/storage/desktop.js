@@ -45,14 +45,17 @@ export const desktopStorageAdapter = {
                 } else {
                     bridge?.showToast?.(`Scan complete: ${added} added, ${updated} updated`, 'success');
                 }
+                bridge?.finishScanProgressUI?.(summary);
                 await bridge?.loadLibraryView?.();
                 bridge?.refreshCurrentView?.();
                 return summary;
             }
+            bridge?.finishScanProgressUI?.({ tracks_added: 0, errors: [] });
             return null;
         } catch (err) {
             bridge?.appendScanLog?.(`❌ Scan error: ${err}`);
             bridge?.showToast?.(`Scan error: ${err}`, 'error');
+            bridge?.finishScanProgressUI?.({ tracks_added: 0, errors: [String(err)] });
             throw err;
         }
     },

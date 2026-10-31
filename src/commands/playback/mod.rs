@@ -326,6 +326,46 @@ pub async fn play(
         }
     }
 
+    // If queue is empty or does not contain current track, seed it from library tracks so auto-advance continues seamlessly
+    let current_q = player.get_queue().await;
+    if current_q.is_empty() || !current_q.iter().any(|t| t.id == track_id) {
+        use crate::domain::models::TrackFilter;
+        use crate::domain::repositories::TrackRepository;
+        let repo = Arc::new(
+            crate::infrastructure::database::repositories::SqliteTrackRepository::new(Arc::new(
+                db.inner().clone(),
+            )),
+        );
+        let lib_tracks = repo
+            .find_all(TrackFilter::default())
+            .await
+            .unwrap_or_default();
+        if !lib_tracks.is_empty() && lib_tracks.iter().any(|t| t.id == track_id) {
+            let idx = lib_tracks.iter().position(|t| t.id == track_id);
+            player.set_queue(lib_tracks.clone()).await;
+            player.set_current_index(idx).await;
+            emit_queue_updated(
+                &app,
+                &PlaybackQueue {
+                    tracks: lib_tracks,
+                    current_index: idx,
+                },
+            )
+            .await;
+        } else {
+            player.set_queue(vec![track.clone()]).await;
+            player.set_current_index(Some(0)).await;
+            emit_queue_updated(
+                &app,
+                &PlaybackQueue {
+                    tracks: vec![track.clone()],
+                    current_index: Some(0),
+                },
+            )
+            .await;
+        }
+    }
+
     // Build NowPlaying response
     let now_playing = NowPlaying {
         track,

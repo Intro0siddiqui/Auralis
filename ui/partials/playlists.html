@@ -7,6 +7,26 @@
         </button>
     </div>
 
+    <!-- Library Sub-Navigation Chips (Mobile & Desktop) -->
+    <nav class="library-subnav" aria-label="Library collections" style="display: flex; gap: var(--space-2); margin-bottom: var(--space-3); overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch;">
+        <a href="#" class="btn btn-sm btn-secondary neu" hx-get="/partials/library.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace" style="border-radius: var(--radius-full); padding: 6px 14px; font-weight: var(--font-medium); text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;">
+            <i data-lucide="music" style="width: 15px; height: 15px;"></i>
+            <span>Tracks</span>
+        </a>
+        <a href="#" class="btn btn-sm btn-primary neu" style="border-radius: var(--radius-full); padding: 6px 14px; font-weight: var(--font-medium); text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;">
+            <i data-lucide="list-music" style="width: 15px; height: 15px;"></i>
+            <span>Playlists</span>
+        </a>
+        <a href="#" class="btn btn-sm btn-secondary neu" hx-get="/partials/albums.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace" style="border-radius: var(--radius-full); padding: 6px 14px; font-weight: var(--font-medium); text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;">
+            <i data-lucide="disc" style="width: 15px; height: 15px;"></i>
+            <span>Albums</span>
+        </a>
+        <a href="#" class="btn btn-sm btn-secondary neu" hx-get="/partials/artists.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace" style="border-radius: var(--radius-full); padding: 6px 14px; font-weight: var(--font-medium); text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;">
+            <i data-lucide="users" style="width: 15px; height: 15px;"></i>
+            <span>Artists</span>
+        </a>
+    </nav>
+
     <!-- Dynamic Playlist Detail View -->
     <div id="playlist-detail" style="display: none; margin-top: var(--space-4);"></div>
 

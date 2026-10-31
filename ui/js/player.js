@@ -304,6 +304,7 @@ class PlayerController {
 
     wireFullScreenControls() {
         this.wireFullScreenButtons();
+        this.wireFullScreenSwipeDismiss();
         this.wireFullScreenProgressSlider();
         this.wireFullScreenVolumeSlider();
     }
@@ -413,19 +414,77 @@ class PlayerController {
         }
     }
 
+    wireFullScreenSwipeDismiss() {
+        const fullPlayer = document.getElementById('player-full');
+        if (!fullPlayer) return;
+
+        let startY = 0;
+        let currentY = 0;
+        let isTracking = false;
+
+        const onTouchStart = (e) => {
+            if (!e.touches || e.touches.length !== 1) return;
+            const target = e.target;
+            if (target && target.closest('button, .progress-track, .volume-slider, #player-full-queue-drawer, .track-like')) {
+                return;
+            }
+            startY = e.touches[0].clientY;
+            currentY = startY;
+            isTracking = true;
+            fullPlayer.style.transition = 'none';
+        };
+
+        const onTouchMove = (e) => {
+            if (!isTracking || !e.touches || e.touches.length !== 1) return;
+            currentY = e.touches[0].clientY;
+            const deltaY = currentY - startY;
+            if (deltaY > 0) {
+                fullPlayer.style.transform = `translateY(${deltaY}px)`;
+                fullPlayer.style.opacity = `${Math.max(0.3, 1 - (deltaY / 400))}`;
+            }
+        };
+
+        const onTouchEnd = () => {
+            if (!isTracking) return;
+            isTracking = false;
+            const deltaY = currentY - startY;
+            if (deltaY > 75) {
+                fullPlayer.style.transition = 'transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1), opacity 0.2s linear';
+                fullPlayer.style.transform = 'translateY(100%)';
+                fullPlayer.style.opacity = '0';
+                setTimeout(() => {
+                    const overlay = document.getElementById('overlay-root');
+                    if (overlay) overlay.innerHTML = '';
+                }, 190);
+            } else {
+                fullPlayer.style.transition = 'transform 0.22s ease-out, opacity 0.22s ease-out';
+                fullPlayer.style.transform = 'translateY(0)';
+                fullPlayer.style.opacity = '1';
+            }
+        };
+
+        fullPlayer.addEventListener('touchstart', onTouchStart, { passive: true });
+        fullPlayer.addEventListener('touchmove', onTouchMove, { passive: true });
+        fullPlayer.addEventListener('touchend', onTouchEnd, { passive: true });
+        fullPlayer.addEventListener('touchcancel', onTouchEnd, { passive: true });
+    }
+
     wireFullScreenProgressSlider() {
-        // 5. Progress Seek
+        // 5. Progress Seek with pointer capture
         const fullProgress = document.getElementById('player-full-progress');
         if (!fullProgress) return;
 
         let isSeeking = false;
         const getPercent = (e) => {
             const rect = fullProgress.getBoundingClientRect();
-            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-            return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            const clientX = e.clientX !== undefined ? e.clientX : (e.touches ? e.touches[0].clientX : 0);
+            return Math.max(0, Math.min(1, (clientX - rect.left) / (rect.width || 1)));
         };
 
-        const startSeek = (e) => {
+        const onPointerDown = (e) => {
+            if (e.pointerId !== undefined && typeof fullProgress.setPointerCapture === 'function') {
+                try { fullProgress.setPointerCapture(e.pointerId); } catch (_) {}
+            }
             isSeeking = true;
             this.isSeeking = true;
             const pct = getPercent(e);
@@ -433,7 +492,8 @@ class PlayerController {
             this.updateProgressUI();
             this.updatePositionState();
         };
-        const moveSeek = (e) => {
+
+        const onPointerMove = (e) => {
             if (isSeeking) {
                 const pct = getPercent(e);
                 this.progress = pct * (this.duration || 0);
@@ -441,52 +501,65 @@ class PlayerController {
                 this.updatePositionState();
             }
         };
-        const endSeek = () => {
+
+        const onPointerUp = (e) => {
             if (isSeeking) {
+                if (e.pointerId !== undefined && typeof fullProgress.releasePointerCapture === 'function') {
+                    try { fullProgress.releasePointerCapture(e.pointerId); } catch (_) {}
+                }
                 isSeeking = false;
                 this.isSeeking = false;
                 this.commitSeek();
             }
         };
 
-        fullProgress.addEventListener('mousedown', startSeek);
-        document.addEventListener('mousemove', moveSeek);
-        document.addEventListener('mouseup', endSeek);
-
-        fullProgress.addEventListener('touchstart', startSeek, { passive: true });
-        fullProgress.addEventListener('touchmove', moveSeek, { passive: true });
-        fullProgress.addEventListener('touchend', endSeek);
+        fullProgress.addEventListener('pointerdown', onPointerDown);
+        fullProgress.addEventListener('pointermove', onPointerMove);
+        fullProgress.addEventListener('pointerup', onPointerUp);
+        fullProgress.addEventListener('pointercancel', onPointerUp);
     }
 
     wireFullScreenVolumeSlider() {
-        // 6. Volume Slider
+        // 6. Volume Slider with pointer capture
         const fullVolume = document.getElementById('player-full-volume');
         if (!fullVolume) return;
 
         let isDragging = false;
         const getPercent = (e) => {
             const rect = fullVolume.getBoundingClientRect();
-            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-            return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            const clientX = e.clientX !== undefined ? e.clientX : (e.touches ? e.touches[0].clientX : 0);
+            return Math.max(0, Math.min(1, (clientX - rect.left) / (rect.width || 1)));
         };
 
         const setVol = (e) => {
             this.setVolumeLevel(getPercent(e));
         };
 
-        fullVolume.addEventListener('mousedown', (e) => {
+        const onPointerDown = (e) => {
+            if (e.pointerId !== undefined && typeof fullVolume.setPointerCapture === 'function') {
+                try { fullVolume.setPointerCapture(e.pointerId); } catch (_) {}
+            }
             isDragging = true;
             setVol(e);
-        });
-        document.addEventListener('mousemove', (e) => { if (isDragging) setVol(e); });
-        document.addEventListener('mouseup', () => { isDragging = false; });
+        };
 
-        fullVolume.addEventListener('touchstart', (e) => {
-            isDragging = true;
-            setVol(e);
-        }, { passive: true });
-        fullVolume.addEventListener('touchmove', (e) => { if (isDragging) setVol(e); }, { passive: true });
-        fullVolume.addEventListener('touchend', () => { isDragging = false; });
+        const onPointerMove = (e) => {
+            if (isDragging) setVol(e);
+        };
+
+        const onPointerUp = (e) => {
+            if (isDragging) {
+                if (e.pointerId !== undefined && typeof fullVolume.releasePointerCapture === 'function') {
+                    try { fullVolume.releasePointerCapture(e.pointerId); } catch (_) {}
+                }
+                isDragging = false;
+            }
+        };
+
+        fullVolume.addEventListener('pointerdown', onPointerDown);
+        fullVolume.addEventListener('pointermove', onPointerMove);
+        fullVolume.addEventListener('pointerup', onPointerUp);
+        fullVolume.addEventListener('pointercancel', onPointerUp);
     }
 
     updateTrackInfo() {
@@ -512,15 +585,20 @@ class PlayerController {
                 : 'Select a song to play';
         }
         if (fullArt && this.currentTrack) {
-            if (this.currentTrack.album_art_path) {
-                const src = (window.Auralis && window.Auralis.assetUrl)
-                    ? window.Auralis.assetUrl(this.currentTrack.album_art_path)
-                    : this.currentTrack.album_art_path;
-                const safePath = this.escapeHtml(this.currentTrack.album_art_path);
-                fullArt.innerHTML = `<img src="${src}" alt="${this.escapeHtml(this.currentTrack.title)}" data-art-path="${safePath}" style="width: 100%; height: 100%; object-fit: cover;">`;
+            const artPath = this.currentTrack.album_art_path;
+            const cachedSrc = this.currentTrack._cachedImgSrc;
+            if (cachedSrc || artPath) {
+                const src = cachedSrc || ((window.Auralis && window.Auralis.assetUrl)
+                    ? window.Auralis.assetUrl(artPath)
+                    : artPath);
+                const safePath = this.escapeHtml(artPath || '');
+                const existingImg = fullArt.querySelector('img');
+                if (!existingImg || existingImg.getAttribute('src') !== src) {
+                    fullArt.innerHTML = `<img src="${src}" alt="${this.escapeHtml(this.currentTrack.title || '')}" data-art-path="${safePath}" style="width: 100%; height: 100%; object-fit: cover;">`;
+                }
                 const imgEl = fullArt.querySelector('img');
-                if (imgEl && window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.embedArt === 'function') {
-                    window.Auralis.bridge.embedArt(imgEl, this.currentTrack.album_art_path);
+                if (imgEl && artPath && window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.embedArt === 'function') {
+                    window.Auralis.bridge.embedArt(imgEl, artPath);
                 }
             } else {
                 fullArt.innerHTML = `<div class="artwork-placeholder"><i data-lucide="disc-3"></i></div>`;
@@ -915,7 +993,7 @@ class PlayerController {
                 artwork.push({ src, sizes: '512x512', type: 'image/jpeg' });
             }
             navigator.mediaSession.metadata = new MediaMetadata({ title, artist, album, artwork });
-            if (track.album_art_path && window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.invoke === 'function') {
+            if (track.album_art_path && !/^(https?:|data:|blob:)/.test(track.album_art_path) && window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.invoke === 'function') {
                 window.Auralis.bridge.invoke('media_data_url', { path: track.album_art_path }).then((dataUrl) => {
                     if (dataUrl && typeof dataUrl === 'string' && dataUrl.startsWith('data:')) {
                         try {

@@ -52,13 +52,24 @@ class MainActivity : TauriActivity() {
         // Ensure playback notification channel exists early on app startup
         MediaPlaybackService.createNotificationChannel(this)
 
-        // Intercept back gesture / button on Android to prevent finishing the activity
-        // when the user exits the app. Media playback and background services must stay alive!
+        // Intercept back gesture / button on Android:
+        // 1. Give WebView JavaScript a chance to dismiss open overlays/modals/drawers/player.
+        // 2. Otherwise fall back to webView.goBack() or moveTaskToBack() without killing the process.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 val wv = webViewRef?.get() ?: findWebView()
-                if (wv != null && wv.canGoBack()) {
-                    wv.goBack()
+                if (wv != null) {
+                    wv.evaluateJavascript(
+                        "window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.dismissOpenOverlays === 'function' ? window.Auralis.bridge.dismissOpenOverlays() : false"
+                    ) { result ->
+                        if (result != "true") {
+                            if (wv.canGoBack()) {
+                                wv.goBack()
+                            } else {
+                                moveTaskToBack(true)
+                            }
+                        }
+                    }
                 } else {
                     moveTaskToBack(true)
                 }

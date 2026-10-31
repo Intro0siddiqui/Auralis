@@ -13,6 +13,26 @@
         </div>
     </header>
 
+    <!-- Library Sub-Navigation Chips (Mobile & Desktop) -->
+    <nav class="library-subnav" aria-label="Library collections" style="display: flex; gap: var(--space-2); margin-bottom: var(--space-3); overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch;">
+        <a href="#" class="btn btn-sm btn-primary neu" style="border-radius: var(--radius-full); padding: 6px 14px; font-weight: var(--font-medium); text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;">
+            <i data-lucide="music" style="width: 15px; height: 15px;"></i>
+            <span>Tracks</span>
+        </a>
+        <a href="#" class="btn btn-sm btn-secondary neu" hx-get="/partials/playlists.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace" style="border-radius: var(--radius-full); padding: 6px 14px; font-weight: var(--font-medium); text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;">
+            <i data-lucide="list-music" style="width: 15px; height: 15px;"></i>
+            <span>Playlists</span>
+        </a>
+        <a href="#" class="btn btn-sm btn-secondary neu" hx-get="/partials/albums.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace" style="border-radius: var(--radius-full); padding: 6px 14px; font-weight: var(--font-medium); text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;">
+            <i data-lucide="disc" style="width: 15px; height: 15px;"></i>
+            <span>Albums</span>
+        </a>
+        <a href="#" class="btn btn-sm btn-secondary neu" hx-get="/partials/artists.html" hx-target="#content" hx-swap="innerHTML" hx-sync="#content:replace" style="border-radius: var(--radius-full); padding: 6px 14px; font-weight: var(--font-medium); text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;">
+            <i data-lucide="users" style="width: 15px; height: 15px;"></i>
+            <span>Artists</span>
+        </a>
+    </nav>
+
     <div class="filter-bar">
         <select name="sort_by" class="input">
             <option value="date_added">Date added</option>
@@ -28,20 +48,25 @@
 
     <!-- Live Scan & Import Progress Indicator & Diagnostic Console -->
     <div id="library-scan-progress" class="neu-glass scan-progress-banner" style="display: none;">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); width: 100%;">
-            <div style="display: flex; align-items: center; gap: var(--space-3); flex: 1; min-width: 0;">
-                <i data-lucide="loader-2" style="width: 20px; height: 20px; color: var(--accent); flex-shrink: 0;" class="spin"></i>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); width: 100%;">
+            <div style="display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0;">
+                <span class="scan-icon-container" style="display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 22px; height: 22px;">
+                    <i data-lucide="loader-2" style="width: 18px; height: 18px; color: var(--accent); flex-shrink: 0;" class="spin"></i>
+                </span>
                 <div style="flex: 1; min-width: 0;">
                     <div id="library-scan-title" style="font-weight: var(--font-semibold); font-size: var(--text-sm); color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Scanning library...</div>
                     <div id="library-scan-subtitle" style="font-size: var(--text-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Processing audio files</div>
                 </div>
             </div>
-            <div style="display: flex; align-items: center; gap: var(--space-3);">
+            <div style="display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0;">
                 <span id="library-scan-counter" style="font-size: var(--text-xs); color: var(--accent); font-weight: var(--font-medium); white-space: nowrap;"></span>
-                <div class="progress-track neu-inset" style="width: 100px; height: 6px; flex-shrink: 0;">
+                <div class="progress-track neu-inset" style="width: 60px; height: 6px; flex-shrink: 0;">
                     <div id="library-scan-bar" class="progress-fill" style="width: 0%; background: var(--accent); height: 100%; transition: width 0.2s ease;"></div>
                 </div>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="window.Auralis.bridge.toggleScanLogs()" style="font-size: 10px; padding: 2px 8px;">Logs</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="window.Auralis.bridge.toggleScanLogs()" style="font-size: 11px; padding: 2px 7px;">Logs</button>
+                <button type="button" class="btn-icon btn-sm" onclick="window.Auralis.bridge.hideScanProgressUI()" title="Dismiss" style="opacity: 0.75; padding: 2px; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: none; cursor: pointer; color: var(--text-2);">
+                    <i data-lucide="x" style="width: 16px; height: 16px;"></i>
+                </button>
             </div>
         </div>
 

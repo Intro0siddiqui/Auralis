@@ -347,7 +347,9 @@ export const coreMethods = {
                         if (tid && (_lastDelegatedTrackId !== tid || (now - _lastDelegatedPlayTime >= 350))) {
                             _lastDelegatedPlayTime = now;
                             _lastDelegatedTrackId = tid;
-                            this.playTrack(tid);
+                            const container = playBtn.closest('.track-list, #playlist-track-list, #search-results, .page-library') || playBtn.parentElement;
+                            const siblingIds = container ? Array.from(container.querySelectorAll('[data-track-id]')).map(el => el.dataset.trackId).filter((v, i, a) => v && a.indexOf(v) === i) : [];
+                            this.playTrack(tid, siblingIds.length > 1 ? siblingIds : null);
                         }
                     }
                     return;
@@ -360,7 +362,9 @@ export const coreMethods = {
                     e.preventDefault();
                     _lastDelegatedPlayTime = now;
                     _lastDelegatedTrackId = tid;
-                    this.playTrack(tid);
+                    const container = playEl.closest('.track-list, #playlist-track-list, #search-results, .page-library') || playEl.parentElement;
+                    const siblingIds = container ? Array.from(container.querySelectorAll('[data-track-id]')).map(el => el.dataset.trackId).filter((v, i, a) => v && a.indexOf(v) === i) : [];
+                    this.playTrack(tid, siblingIds.length > 1 ? siblingIds : null);
                 }
             };
             document.addEventListener('click', handlePlayDelegate);
@@ -422,9 +426,7 @@ export const coreMethods = {
     },
 
     dismissOpenOverlays() {
-        let dismissed = false;
-
-        // 1. Floating context menus
+        // 1. Floating context menus (highest z-index layer)
         const contextMenu = document.getElementById('floating-track-context-menu') || document.querySelector('.context-menu');
         if (contextMenu) {
             if (typeof this.closeTrackContextMenu === 'function') {
@@ -432,10 +434,17 @@ export const coreMethods = {
             } else {
                 contextMenu.remove();
             }
-            dismissed = true;
+            return true;
         }
 
-        // 2. Queue drawer inside full-screen player or sidebar queue panel
+        // 2. Open modal backdrops and dialogs (e.g. Playlist creation, Tag editor)
+        const modals = document.querySelectorAll('.modal-backdrop, .modal--dialog');
+        if (modals && modals.length > 0) {
+            modals.forEach(m => m.remove());
+            return true;
+        }
+
+        // 3. Queue drawer inside full-screen player or sidebar queue panel
         const drawer = document.getElementById('player-full-queue-drawer');
         const queuePanel = document.getElementById('queue-panel');
         if (drawer?.classList?.contains('open') || queuePanel?.classList?.contains('open')) {
@@ -450,24 +459,31 @@ export const coreMethods = {
                 if (drawer) drawer.classList.remove('open');
                 if (queuePanel) queuePanel.classList.remove('open');
             }
-            dismissed = true;
-        }
-
-        // 3. Open modal backdrops and dialogs
-        const modals = document.querySelectorAll('.modal-backdrop, .modal--dialog');
-        if (modals && modals.length > 0) {
-            modals.forEach(m => m.remove());
-            dismissed = true;
+            return true;
         }
 
         // 4. Full-screen player / overlay in #overlay-root
         const overlayRoot = document.getElementById('overlay-root');
         if (overlayRoot && overlayRoot.innerHTML.trim() !== '') {
             overlayRoot.innerHTML = '';
-            dismissed = true;
+            return true;
         }
 
-        return dismissed;
+        // 5. Playlist detail sub-view
+        const playlistDetail = document.getElementById('playlist-detail');
+        if (playlistDetail && playlistDetail.style.display !== 'none' && playlistDetail.innerHTML.trim() !== '') {
+            if (typeof this.closePlaylistDetail === 'function') {
+                this.closePlaylistDetail();
+            } else {
+                playlistDetail.style.display = 'none';
+                playlistDetail.innerHTML = '';
+                const grid = document.getElementById('playlists-grid');
+                if (grid) grid.style.display = 'grid';
+            }
+            return true;
+        }
+
+        return false;
     },
 
     initBackDismissalHandler() {

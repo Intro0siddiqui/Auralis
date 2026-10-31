@@ -17,6 +17,12 @@ fn settings_repo(db: &Database) -> Arc<dyn SettingsRepository> {
     )
 }
 
+/// Get the application version.
+#[tauri::command]
+pub async fn get_app_version(app: tauri::AppHandle) -> Result<String, String> {
+    Ok(app.package_info().version.to_string())
+}
+
 /// Get the current settings.
 #[tauri::command]
 pub async fn get_settings(db: State<'_, Database>) -> Result<Settings, String> {

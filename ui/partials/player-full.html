@@ -1,10 +1,14 @@
 <div id="player-full" class="overlay modal--full glass-strong">
-    <button id="player-full-queue-btn" class="btn btn-ghost btn-icon player-full-queue-toggle" style="position: absolute; top: calc(var(--space-4) + env(safe-area-inset-top)); left: var(--space-4); width: 48px; height: 48px; border-radius: var(--radius-full); display: flex; align-items: center; justify-content: center; background: var(--glass-base); border: 1px solid var(--glass-border); color: var(--text-1); cursor: pointer; z-index: 10;" aria-label="Toggle Queue">
-        <i data-lucide="list-music"></i>
-    </button>
-    <button id="player-full-close" class="btn btn-ghost btn-icon player-full-close" onclick="event.stopPropagation(); document.getElementById('overlay-root').innerHTML = ''" aria-label="Close">
-        <i data-lucide="x"></i>
-    </button>
+    <!-- Top Header Bar with Queue & Close Actions (No Artwork Overlap) -->
+    <div class="player-full-header" style="width: 100%; max-width: 360px; display: flex; align-items: center; justify-content: space-between; padding: calc(var(--space-2) + env(safe-area-inset-top)) var(--space-4) var(--space-1) var(--space-4); z-index: 10; margin-bottom: var(--space-1);">
+        <button id="player-full-queue-btn" class="btn btn-ghost btn-icon player-full-queue-toggle" style="width: 44px; height: 44px; border-radius: var(--radius-full); display: flex; align-items: center; justify-content: center; background: var(--glass-base); border: 1px solid var(--glass-border); color: var(--text-1); cursor: pointer;" aria-label="Toggle Queue">
+            <i data-lucide="list-music"></i>
+        </button>
+        <span style="font-size: var(--text-xs); font-weight: var(--font-semibold); text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-3);">Now Playing</span>
+        <button id="player-full-close" class="btn btn-ghost btn-icon player-full-close" style="width: 44px; height: 44px; border-radius: var(--radius-full); display: flex; align-items: center; justify-content: center; background: var(--glass-base); border: 1px solid var(--glass-border); color: var(--text-1); cursor: pointer;" onclick="event.stopPropagation(); document.getElementById('overlay-root').innerHTML = ''" aria-label="Close">
+            <i data-lucide="x"></i>
+        </button>
+    </div>
 
     <div class="player-full-art">
         <div class="card-artwork" id="player-full-art">

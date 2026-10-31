@@ -165,13 +165,24 @@
         display: none;
     }
 
-    .player-controls #play-pause-btn,
+    .player-controls #play-pause-btn {
+        display: inline-flex;
+        min-width: 48px;
+        min-height: 48px;
+        width: 48px;
+        height: 48px;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-full);
+        padding: 0;
+    }
+
     .player-controls #next-btn {
         display: inline-flex;
-        min-width: 40px;
-        min-height: 40px;
-        width: 40px;
-        height: 40px;
+        min-width: 44px;
+        min-height: 44px;
+        width: 44px;
+        height: 44px;
         align-items: center;
         justify-content: center;
         border-radius: var(--radius-full);
@@ -184,8 +195,8 @@
     
     .track-like {
         display: flex;
-        min-width: 36px;
-        min-height: 36px;
+        min-width: 44px;
+        min-height: 44px;
         align-items: center;
         justify-content: center;
     }

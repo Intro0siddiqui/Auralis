@@ -201,6 +201,7 @@ impl AuralisApp {
                 commands::sync::connect_peer_address,
                 commands::sync::download_synced_track,
                 // Settings commands
+                commands::settings::get_app_version,
                 commands::settings::get_settings,
                 commands::settings::update_settings,
                 // Template commands

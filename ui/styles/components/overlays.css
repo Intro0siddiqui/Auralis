@@ -386,6 +386,25 @@
     overflow-y: auto;
 }
 
+@media (max-width: 768px) {
+    .modal-backdrop {
+        align-items: flex-start;
+        padding: var(--space-3);
+        padding-top: calc(env(safe-area-inset-top, 24px) + var(--space-4));
+        overflow-y: auto;
+    }
+    .modal-dialog {
+        padding: var(--space-4);
+        gap: var(--space-3);
+        max-height: calc(100dvh - 48px);
+        margin: 0 auto;
+    }
+    .modal-footer {
+        flex-shrink: 0;
+        padding-top: var(--space-1);
+    }
+}
+
 @keyframes modal-dialog-pop {
     from {
         opacity: 0;

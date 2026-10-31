@@ -141,7 +141,7 @@ export const libraryMethods = {
                             </div>
                         </div>
 
-                        <div style="display: flex; justify-content: flex-end; gap: var(--space-2);">
+                        <div class="modal-footer" style="position: sticky; bottom: 0; background: var(--bg-1); padding-top: var(--space-2); margin-top: var(--space-3); border-top: 1px solid var(--glass-border); display: flex; justify-content: flex-end; gap: var(--space-2); z-index: 5;">
                             <button type="button" class="btn btn-secondary neu" onclick="window.Auralis && window.Auralis.bridge && window.Auralis.bridge.closeTagEditor()">Cancel</button>
                             <button type="submit" class="btn btn-primary neu" id="tag-editor-save-btn">
                                 <i data-lucide="check"></i>

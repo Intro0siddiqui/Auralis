@@ -130,6 +130,10 @@ export const uiMethods = {
 
     async embedArt(imgEl, path) {
         if (!imgEl || !path) return;
+        if (/^(https?:|data:|blob:)/.test(path)) {
+            imgEl.src = path;
+            return;
+        }
         try {
             const dataUri = await this.invoke('media_data_url', { path });
             if (dataUri) {
@@ -179,9 +183,18 @@ export const uiMethods = {
     showToast(message, type = 'info', duration = 3500) {
         const container = document.getElementById('toast-container') || document.body;
         if (!container || !document.createElement) return;
+
+        // Cap active visible toasts to 2 to prevent stacking over headers and inputs
+        while (container.children && container.children.length >= 2) {
+            const oldest = container.firstElementChild;
+            if (oldest) oldest.remove();
+            else break;
+        }
+
         const toast = document.createElement('div');
         toast.className = `toast toast-${type}`;
         toast.textContent = message;
+        toast.style.cursor = 'pointer';
         container.appendChild(toast);
 
         const dismiss = () => {
@@ -192,9 +205,10 @@ export const uiMethods = {
             }, { once: true });
             setTimeout(() => {
                 if (toast.parentElement) toast.remove();
-            }, 400);
+            }, 300);
         };
 
+        toast.addEventListener('click', () => dismiss());
         setTimeout(dismiss, duration);
         return toast;
     }

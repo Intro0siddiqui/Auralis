@@ -572,6 +572,8 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
         path
     };
 
+    let path = path.split('?').next().unwrap_or(&path).to_string();
+
     let extension = Path::new(&path)
         .extension()
         .and_then(|e| e.to_str())

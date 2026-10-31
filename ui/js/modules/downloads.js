@@ -744,7 +744,7 @@ export const downloadMethods = {
     },
 
     async handleSearchFormSubmit(e, searchForm) {
-        if (e) {
+        if (e && typeof e.preventDefault === 'function') {
             e.preventDefault();
             e.stopPropagation();
         }
@@ -837,10 +837,10 @@ export const downloadMethods = {
                             <div class="track-row-subtitle" style="font-size: var(--text-xs); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(subtitleText)}</div>
                         </div>
                         <div class="track-row-actions" style="display: flex; align-items: center; gap: var(--space-2); opacity: 1; flex-shrink: 0;">
-                            <button type="button" class="btn btn-ghost btn-icon play-yt-btn" title="Stream Now" aria-label="Stream Now" data-action="stream-search-result" data-index="${i}" onclick="event.stopPropagation(); window.Auralis.bridge.streamYouTubeSearchResult(${i})" style="touch-action: manipulation; width: 36px; height: 36px; padding: 0; display: inline-flex; align-items: center; justify-content: center;">
+                            <button type="button" class="btn btn-ghost btn-icon play-yt-btn" title="Stream Now" aria-label="Stream Now" data-action="stream-search-result" data-index="${i}" onclick="event.stopPropagation(); window.Auralis.bridge.streamYouTubeSearchResult(${i})" style="touch-action: manipulation; width: 44px; height: 44px; min-width: 44px; min-height: 44px; border-radius: var(--radius-full); padding: 0; display: inline-flex; align-items: center; justify-content: center;">
                                 <i data-lucide="play"></i>
                             </button>
-                            <button type="button" class="btn btn-primary btn-icon neu download-yt-btn" title="Download Audio" aria-label="Download Audio" data-action="download-search-result" data-index="${i}" data-video-id="${this.escapeHtml(r.id)}" data-video-url="${this.escapeHtml(r.url)}" data-title="${this.escapeHtml(r.title)}" onclick="event.stopPropagation(); window.Auralis.bridge.downloadSearchResult(${i})" style="touch-action: manipulation; width: 36px; height: 36px; padding: 0; display: inline-flex; align-items: center; justify-content: center;">
+                            <button type="button" class="btn btn-primary btn-icon neu download-yt-btn" title="Download Audio" aria-label="Download Audio" data-action="download-search-result" data-index="${i}" data-video-id="${this.escapeHtml(r.id)}" data-video-url="${this.escapeHtml(r.url)}" data-title="${this.escapeHtml(r.title)}" onclick="event.stopPropagation(); window.Auralis.bridge.downloadSearchResult(${i})" style="touch-action: manipulation; width: 44px; height: 44px; min-width: 44px; min-height: 44px; border-radius: var(--radius-full); padding: 0; display: inline-flex; align-items: center; justify-content: center;">
                                 <i data-lucide="download"></i>
                             </button>
                         </div>
