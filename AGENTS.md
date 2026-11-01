@@ -8,7 +8,7 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development — v2.7.1 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
+**Current State: Active Development — v2.7.3 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
 
 **Recent Major Breakthroughs (v2.7.1)**:
 1. **Playback EOF & Auto-Advance Resilience**: Fixed zombie playback at EOF where trailing decoder buffers prevented `is_empty` from flipping; added `stop_at_end()` to preserve finished position (`4:24 / 4:24`) and reset UI button to Play (`▶`). Resuming an ended track rewinds to 0:00.
@@ -50,6 +50,9 @@ Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses
     - **Hardware Audio Release (`_stopStreamAudio`)**: Thoroughly pauses, resets `currentTime = 0`, strips the `src` attribute, and calls `load()` to release decoder buffers from the hardware sink, and terminates Android foreground notifications.
     - **Touch Delegation & Event Pinning**: Removed duplicate inline `onclick` and redundant `touchend` handlers, eliminating mobile double-trigger races. All audio event listeners (`timeupdate`, `ended`, `error`, etc.) are instance-pinned against `window._auralisStreamAudio !== audio`.
     - **Live Phone Verified**: Tested with rapid-fire 3-stream bursts (<100ms) on physical Android 15 phone (`DA59V4KNJRAIHIBI`). Monitored via CDP: `Max Concurrent Playing Audios: 1`, zero audio overlap, seamless handoff to local tracks.
+22. **Library Filter Streamlining & Clean v2.7.3 Release**:
+    - **Removed Confusing 'Downloaded only' Toggle**: Stripped the redundant offline toggle from the library filter bar, eliminating UI clutter on devices where all library files are local.
+    - **v2.8.0 Stream Bookmarking Roadmap**: Prepared architecture for hybrid cloud/offline libraries where streamable YouTube tracks (`stream://youtube/<id>`) can be bookmarked into playlists and library without downloading physical audio files, restoring 'Downloaded only' as a true offline mode.
 
 ---
 

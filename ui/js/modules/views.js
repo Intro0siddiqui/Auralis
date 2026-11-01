@@ -83,18 +83,10 @@ export const viewMethods = {
 
     bindLibraryFilterControls() {
         const sortSelect = document.querySelector('.page-library select[name="sort_by"]');
-        const downloadedCheckbox = document.querySelector('.page-library input[name="downloaded_only"]');
 
         if (sortSelect && !sortSelect.dataset.bound) {
             sortSelect.dataset.bound = 'true';
             sortSelect.addEventListener('change', () => {
-                this.renderLibraryTracks();
-            });
-        }
-
-        if (downloadedCheckbox && !downloadedCheckbox.dataset.bound) {
-            downloadedCheckbox.dataset.bound = 'true';
-            downloadedCheckbox.addEventListener('change', () => {
                 this.renderLibraryTracks();
             });
         }
@@ -105,25 +97,19 @@ export const viewMethods = {
         if (!trackList) return;
 
         const sortSelect = document.querySelector('.page-library select[name="sort_by"]');
-        const downloadedCheckbox = document.querySelector('.page-library input[name="downloaded_only"]');
-
         const sortBy = sortSelect ? sortSelect.value : 'date_added';
-        const downloadedOnly = downloadedCheckbox ? downloadedCheckbox.checked : false;
 
         try {
             const html = await this.invoke('get_library_tracks_html', {
                 sortBy,
-                downloadedOnly,
+                downloadedOnly: false,
                 sort_by: sortBy,
-                downloaded_only: downloadedOnly,
+                downloaded_only: false,
             });
             const list = document.querySelector('.page-library .track-list');
             if (list && html) {
                 list.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
-        if (window.Auralis?.player?.highlightActiveTrack) {
-            window.Auralis.player.highlightActiveTrack();
-        }
                 if (window.Auralis?.player?.highlightActiveTrack) {
                     window.Auralis.player.highlightActiveTrack();
                 }
