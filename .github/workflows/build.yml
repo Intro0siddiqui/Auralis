@@ -395,6 +395,7 @@ jobs:
           if [ -d "icons/android" ] && [ -d "$RES_DIR" ]; then
             echo "Copying custom Auralis mipmap icons to $RES_DIR"
             cp -r icons/android/* "$RES_DIR/"
+            rm -f "$RES_DIR/drawable/ic_launcher_background.xml" "$RES_DIR/drawable-v24/ic_launcher_foreground.xml"
             echo "Custom launcher icons applied successfully!"
           fi
 
@@ -409,6 +410,9 @@ jobs:
             sed -i '/<manifest[^>]*>/a \    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />' "$MANIFEST"
             sed -i 's|<application|<application android:requestLegacyExternalStorage="true"|' "$MANIFEST"
             sed -i 's|android:usesCleartextTraffic="\${usesCleartextTraffic}"|android:usesCleartextTraffic="true"|' "$MANIFEST"
+            if ! grep -q 'android:roundIcon' "$MANIFEST"; then
+              sed -i 's|android:icon="@mipmap/ic_launcher"|android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round"|' "$MANIFEST"
+            fi
             sed -i '/<\/application>/i \        <service android:name=".MediaPlaybackService" android:foregroundServiceType="mediaPlayback" android:exported="false"/>' "$MANIFEST"
             echo "Updated AndroidManifest.xml:"
             cat "$MANIFEST"

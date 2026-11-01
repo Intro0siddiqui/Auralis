@@ -241,7 +241,7 @@ describe('Android Storage Adapter', () => {
         assert.equal(valueReset, true);
     });
 
-    test('triggerFolderScan initiates scanLibrary and clicks folder input', async () => {
+    test('triggerFolderScan initiates scanLibrary and does not hijack folder input', async () => {
         let scanned = false;
         let folderClicked = false;
         const folderElem = {
@@ -272,7 +272,7 @@ describe('Android Storage Adapter', () => {
 
         await androidStorageAdapter.triggerFolderScan(mockCtx);
         assert.equal(scanned, true);
-        assert.equal(folderClicked, true);
+        assert.equal(folderClicked, false);
     });
 
     test('handleFolderScan ignores input when no files selected', async () => {
