@@ -756,6 +756,27 @@ export const downloadMethods = {
         await this.performYouTubeSearch(q.value.trim(), this.getDownloadOptions(form || searchForm));
     },
 
+    _stopStreamAudio() {
+        if (window._auralisStreamAudio) {
+            const a = window._auralisStreamAudio;
+            window._auralisStreamAudio = null;
+            window._auralisStreamVideoId = null;
+            try {
+                a.pause();
+                a.currentTime = 0;
+                a.removeAttribute('src');
+                a.load();
+            } catch (_) {}
+        }
+        try {
+            if (typeof this?.invoke === 'function') {
+                this.invoke('stop_stream_notification').catch(() => {});
+            } else if (window.Auralis?.bridge?.invoke) {
+                window.Auralis.bridge.invoke('stop_stream_notification').catch(() => {});
+            }
+        } catch (_) {}
+    },
+
     _bindSearchBridgeMethods() {
         if (typeof window !== 'undefined') {
             window.Auralis = window.Auralis || {};
@@ -763,9 +784,11 @@ export const downloadMethods = {
             if (target) {
                 target.streamYouTubeSearchResult = this.streamYouTubeSearchResult.bind(this);
                 target.downloadSearchResult = this.downloadSearchResult.bind(this);
+                target._stopStreamAudio = this._stopStreamAudio.bind(this);
             }
             window.Auralis.streamYouTubeSearchResult = this.streamYouTubeSearchResult.bind(this);
             window.Auralis.downloadSearchResult = this.downloadSearchResult.bind(this);
+            window.Auralis._stopStreamAudio = this._stopStreamAudio.bind(this);
         }
     },
 
@@ -832,15 +855,15 @@ export const downloadMethods = {
                         <div class="track-row-artwork" style="width: 44px; height: 44px; border-radius: var(--radius-sm); overflow: hidden; flex-shrink: 0; background: var(--glass-weak); display: flex; align-items: center; justify-content: center;">
                             ${thumbContent}
                         </div>
-                        <div class="track-row-info" style="flex: 1; min-width: 0;" data-action="stream-search-result" data-index="${i}" onclick="window.Auralis.bridge.streamYouTubeSearchResult(${i})">
+                        <div class="track-row-info" style="flex: 1; min-width: 0;">
                             <div class="track-row-title" style="font-weight: var(--font-medium); font-size: var(--text-sm); color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(r.title)}</div>
                             <div class="track-row-subtitle" style="font-size: var(--text-xs); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(subtitleText)}</div>
                         </div>
                         <div class="track-row-actions" style="display: flex; align-items: center; gap: var(--space-2); opacity: 1; flex-shrink: 0;">
-                            <button type="button" class="btn btn-ghost btn-icon play-yt-btn" title="Stream Now" aria-label="Stream Now" data-action="stream-search-result" data-index="${i}" onclick="event.stopPropagation(); window.Auralis.bridge.streamYouTubeSearchResult(${i})" style="touch-action: manipulation; width: 44px; height: 44px; min-width: 44px; min-height: 44px; border-radius: var(--radius-full); padding: 0; display: inline-flex; align-items: center; justify-content: center;">
+                            <button type="button" class="btn btn-ghost btn-icon play-yt-btn" title="Stream Now" aria-label="Stream Now" data-action="stream-search-result" data-index="${i}" style="touch-action: manipulation; width: 44px; height: 44px; min-width: 44px; min-height: 44px; border-radius: var(--radius-full); padding: 0; display: inline-flex; align-items: center; justify-content: center;">
                                 <i data-lucide="play"></i>
                             </button>
-                            <button type="button" class="btn btn-primary btn-icon neu download-yt-btn" title="Download Audio" aria-label="Download Audio" data-action="download-search-result" data-index="${i}" data-video-id="${this.escapeHtml(r.id)}" data-video-url="${this.escapeHtml(r.url)}" data-title="${this.escapeHtml(r.title)}" onclick="event.stopPropagation(); window.Auralis.bridge.downloadSearchResult(${i})" style="touch-action: manipulation; width: 44px; height: 44px; min-width: 44px; min-height: 44px; border-radius: var(--radius-full); padding: 0; display: inline-flex; align-items: center; justify-content: center;">
+                            <button type="button" class="btn btn-primary btn-icon neu download-yt-btn" title="Download Audio" aria-label="Download Audio" data-action="download-search-result" data-index="${i}" data-video-id="${this.escapeHtml(r.id)}" data-video-url="${this.escapeHtml(r.url)}" data-title="${this.escapeHtml(r.title)}" style="touch-action: manipulation; width: 44px; height: 44px; min-width: 44px; min-height: 44px; border-radius: var(--radius-full); padding: 0; display: inline-flex; align-items: center; justify-content: center;">
                                 <i data-lucide="download"></i>
                             </button>
                         </div>
@@ -865,17 +888,16 @@ export const downloadMethods = {
                         this.downloadSearchResult(idx, fallbackItem);
                         return;
                     }
-                    const streamBtn = e.target.closest && e.target.closest('[data-action="stream-search-result"], .play-yt-btn');
-                    if (streamBtn) {
+                    const row = e.target.closest && e.target.closest('.track-row[data-search-index]');
+                    if (row) {
                         e.preventDefault();
                         e.stopPropagation();
-                        const idx = parseInt(streamBtn.dataset.index, 10);
+                        const idx = parseInt(row.dataset.searchIndex, 10);
                         this.streamYouTubeSearchResult(idx);
                         return;
                     }
                 };
                 resultsEl.addEventListener('click', handleAction);
-                resultsEl.addEventListener('touchend', handleAction, { passive: false });
             }
         } catch (err) {
             if (spinnerEl) spinnerEl.style.display = 'none';
@@ -898,7 +920,7 @@ export const downloadMethods = {
         if (!item) return;
 
         // If this same stream item is already loaded, toggle play/pause
-        if (window._auralisStreamAudio && window.Auralis?.player?.currentTrack?.title === item.title) {
+        if (window._auralisStreamAudio && (window._auralisStreamVideoId === item.id || window.Auralis?.player?.currentTrack?.title === item.title)) {
             if (window._auralisStreamAudio.paused) {
                 try {
                     await window._auralisStreamAudio.play();
@@ -911,19 +933,17 @@ export const downloadMethods = {
             return;
         }
 
-        // Stop and clear any existing stream audio element
-        if (window._auralisStreamAudio) {
-            try {
-                window._auralisStreamAudio.pause();
-                window._auralisStreamAudio.removeAttribute('src');
-                window._auralisStreamAudio.load();
-            } catch (_) {}
-            window._auralisStreamAudio = null;
+        // If a request for this exact item is already resolving, prevent duplicate race
+        if (window.__auralisStreamInFlight === item.id) {
+            return;
         }
 
-        const rows = document.querySelectorAll('#youtube-search-results .track-row');
-        const row = rows[index];
-        const playBtn = row ? row.querySelector('.play-yt-btn') : null;
+        // Generate a new monotonic request ID to invalidate all previous in-flight requests
+        const currentReqId = (window.__auralisStreamRequestId = (window.__auralisStreamRequestId || 0) + 1);
+        window.__auralisStreamInFlight = item.id;
+
+        // Unconditionally silence, stop, and teardown any existing stream audio immediately
+        this._stopStreamAudio();
 
         // Pause any backend Rust playback
         if (window.Auralis?.player) {
@@ -931,15 +951,28 @@ export const downloadMethods = {
         }
         await this.invoke('pause').catch(() => {});
 
+        // Stale check after Rust pause
+        if (window.__auralisStreamRequestId !== currentReqId) return;
+
+        // Reset all play icons across search results
+        document.querySelectorAll('#youtube-search-results .play-yt-btn').forEach(btn => {
+            btn.innerHTML = '<i data-lucide="play"></i>';
+        });
+
+        // Set spinner on the selected row
+        const row = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"]`);
+        const playBtn = row ? row.querySelector('.play-yt-btn') : null;
+        if (playBtn) {
+            playBtn.innerHTML = '<i data-lucide="loader-2" class="spin"></i>';
+            if (window.lucide) window.lucide.createIcons();
+        }
+
         // Check if track is already in local library
         const existingTrack = (this.tracks || []).find(t => t.title === item.title);
         if (existingTrack) {
-            if (playBtn) {
-                playBtn.innerHTML = '<i data-lucide="loader-2" class="spin"></i>';
-                if (window.lucide) window.lucide.createIcons();
-            }
             try {
                 await window.Auralis.bridge.playTrack(existingTrack.id);
+                if (window.__auralisStreamRequestId !== currentReqId) return;
                 if (playBtn) {
                     playBtn.innerHTML = '<i data-lucide="pause"></i>';
                     if (window.lucide) window.lucide.createIcons();
@@ -949,11 +982,6 @@ export const downloadMethods = {
             } catch (err) {
                 console.warn('Could not play existing track from library, re-fetching:', err);
             }
-        }
-
-        if (playBtn) {
-            playBtn.innerHTML = '<i data-lucide="loader-2" class="spin"></i>';
-            if (window.lucide) window.lucide.createIcons();
         }
 
         this.showToast(`Connecting stream for “${this.escapeHtml(item.title)}”…`, 'info');
@@ -966,6 +994,13 @@ export const downloadMethods = {
                 orderedClients: opts.orderedClients || ['VISIONOS', 'ANDROID', 'IOS'],
             };
             const resolved = await window.AuralisYouTube.resolve(item.url, streamOpts);
+
+            // Stale check after YouTube resolve
+            if (window.__auralisStreamRequestId !== currentReqId) {
+                console.log(`[Stream] Request ${currentReqId} superseded after resolve`);
+                return;
+            }
+
             if (!resolved || resolved.kind !== 'track' || !resolved.stream_url) {
                 throw new Error('Could not resolve playable stream URL');
             }
@@ -976,8 +1011,19 @@ export const downloadMethods = {
                 headers: resolved.headers || {},
             });
 
+            // Stale check after proxy registration
+            if (window.__auralisStreamRequestId !== currentReqId) {
+                console.log(`[Stream] Request ${currentReqId} superseded after proxy registration`);
+                return;
+            }
+
+            // Unconditionally ensure no audio is running before creating new element
+            this._stopStreamAudio();
+            if (window.__auralisStreamRequestId !== currentReqId) return;
+
             const audio = new Audio();
             window._auralisStreamAudio = audio;
+            window._auralisStreamVideoId = item.id;
             audio.preload = 'auto';
             audio.src = proxyUrl;
 
@@ -1005,6 +1051,7 @@ export const downloadMethods = {
             }
 
             audio.addEventListener('loadedmetadata', () => {
+                if (window._auralisStreamAudio !== audio || window.__auralisStreamRequestId !== currentReqId) return;
                 if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
                     trackObj.duration_secs = Math.round(audio.duration);
                     if (window.Auralis?.player) {
@@ -1015,6 +1062,7 @@ export const downloadMethods = {
             });
 
             audio.addEventListener('timeupdate', () => {
+                if (window._auralisStreamAudio !== audio || window.__auralisStreamRequestId !== currentReqId) return;
                 if (window.Auralis?.player && !window.Auralis.player.isSeeking) {
                     window.Auralis.player.progress = audio.currentTime;
                     if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
@@ -1026,12 +1074,14 @@ export const downloadMethods = {
             });
 
             audio.addEventListener('play', () => {
+                if (window._auralisStreamAudio !== audio || window.__auralisStreamRequestId !== currentReqId) return;
                 if (window.Auralis?.player) {
                     window.Auralis.player.isPlaying = true;
                     window.Auralis.player.updatePlayButton();
                 }
-                if (playBtn) {
-                    playBtn.innerHTML = '<i data-lucide="pause"></i>';
+                const activeBtn = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
+                if (activeBtn) {
+                    activeBtn.innerHTML = '<i data-lucide="pause"></i>';
                     if (window.lucide) window.lucide.createIcons();
                 }
                 this.invoke('update_stream_notification', {
@@ -1045,12 +1095,14 @@ export const downloadMethods = {
             });
 
             audio.addEventListener('pause', () => {
+                if (window._auralisStreamAudio !== audio || window.__auralisStreamRequestId !== currentReqId) return;
                 if (window.Auralis?.player) {
                     window.Auralis.player.isPlaying = false;
                     window.Auralis.player.updatePlayButton();
                 }
-                if (playBtn) {
-                    playBtn.innerHTML = '<i data-lucide="play"></i>';
+                const activeBtn = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
+                if (activeBtn) {
+                    activeBtn.innerHTML = '<i data-lucide="play"></i>';
                     if (window.lucide) window.lucide.createIcons();
                 }
                 this.invoke('update_stream_notification', {
@@ -1064,49 +1116,74 @@ export const downloadMethods = {
             });
 
             audio.addEventListener('ended', () => {
+                if (window._auralisStreamAudio !== audio || window.__auralisStreamRequestId !== currentReqId) return;
                 if (window.Auralis?.player) {
                     window.Auralis.player.isPlaying = false;
                     window.Auralis.player.progress = window.Auralis.player.duration || (audio.duration && isFinite(audio.duration) ? audio.duration : 0);
                     window.Auralis.player.updatePlayButton();
                     window.Auralis.player.updateProgressUI();
                 }
-                if (playBtn) {
-                    playBtn.innerHTML = '<i data-lucide="play"></i>';
+                const activeBtn = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
+                if (activeBtn) {
+                    activeBtn.innerHTML = '<i data-lucide="play"></i>';
                     if (window.lucide) window.lucide.createIcons();
                 }
                 this.invoke('stop_stream_notification').catch(() => {});
             });
 
             audio.addEventListener('error', (e) => {
+                if (window._auralisStreamAudio !== audio || window.__auralisStreamRequestId !== currentReqId) return;
                 console.error('Direct audio stream error:', e);
                 this.showToast('Direct stream playback error', 'error', 6000);
                 if (window.Auralis?.player) {
                     window.Auralis.player.isPlaying = false;
                     window.Auralis.player.updatePlayButton();
                 }
-                if (playBtn) {
-                    playBtn.innerHTML = '<i data-lucide="play"></i>';
+                const activeBtn = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
+                if (activeBtn) {
+                    activeBtn.innerHTML = '<i data-lucide="play"></i>';
                     if (window.lucide) window.lucide.createIcons();
                 }
                 this.invoke('stop_stream_notification').catch(() => {});
             });
 
+            if (window.__auralisStreamRequestId !== currentReqId) {
+                this._stopStreamAudio();
+                return;
+            }
+
             await audio.play();
+
+            if (window.__auralisStreamRequestId !== currentReqId) {
+                this._stopStreamAudio();
+                return;
+            }
+
             document.querySelectorAll('#youtube-search-results .play-yt-btn').forEach(btn => {
                 btn.innerHTML = '<i data-lucide="play"></i>';
             });
-            if (playBtn) {
-                playBtn.innerHTML = '<i data-lucide="pause"></i>';
+            const activeBtn = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
+            if (activeBtn) {
+                activeBtn.innerHTML = '<i data-lucide="pause"></i>';
                 if (window.lucide) window.lucide.createIcons();
             }
             this.showToast(`Streaming “${this.escapeHtml(trackObj.title)}”`, 'success');
         } catch (err) {
+            if (window.__auralisStreamRequestId !== currentReqId) {
+                // Superseded by a newer stream request; ignore error from canceled attempt
+                return;
+            }
             const m = err && err.message ? err.message : String(err);
             console.error('DIAGNOSTIC streamYouTubeSearchResult failed', { item, error: m, stack: err && err.stack });
             this.showToast(`Stream failed: ${m}`, 'error', 6000);
-            if (playBtn) {
-                playBtn.innerHTML = '<i data-lucide="play"></i>';
+            const activeBtn = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
+            if (activeBtn) {
+                activeBtn.innerHTML = '<i data-lucide="play"></i>';
                 if (window.lucide) window.lucide.createIcons();
+            }
+        } finally {
+            if (window.__auralisStreamInFlight === item.id) {
+                window.__auralisStreamInFlight = null;
             }
         }
     },

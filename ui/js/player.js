@@ -48,9 +48,12 @@ class PlayerController {
         });
 
         window.Auralis.bridge.on('playback:track', (payload) => {
+            window.__auralisStreamRequestId = (window.__auralisStreamRequestId || 0) + 1;
+            window.__auralisStreamInFlight = null;
             if (window._auralisStreamAudio) {
                 try {
                     window._auralisStreamAudio.pause();
+                    window._auralisStreamAudio.currentTime = 0;
                     window._auralisStreamAudio.removeAttribute('src');
                     window._auralisStreamAudio.load();
                 } catch (_) {}
@@ -902,6 +905,17 @@ class PlayerController {
     }
 
     async next() {
+        if (window._auralisStreamAudio) {
+            window.__auralisStreamRequestId = (window.__auralisStreamRequestId || 0) + 1;
+            window.__auralisStreamInFlight = null;
+            try {
+                window._auralisStreamAudio.pause();
+                window._auralisStreamAudio.currentTime = 0;
+                window._auralisStreamAudio.removeAttribute('src');
+                window._auralisStreamAudio.load();
+            } catch (_) {}
+            window._auralisStreamAudio = null;
+        }
         if (!window.Auralis || !window.Auralis.bridge) return;
         try {
             const res = await window.Auralis.bridge.invoke('next_track');
@@ -927,6 +941,17 @@ class PlayerController {
     }
 
     async previous() {
+        if (window._auralisStreamAudio) {
+            window.__auralisStreamRequestId = (window.__auralisStreamRequestId || 0) + 1;
+            window.__auralisStreamInFlight = null;
+            try {
+                window._auralisStreamAudio.pause();
+                window._auralisStreamAudio.currentTime = 0;
+                window._auralisStreamAudio.removeAttribute('src');
+                window._auralisStreamAudio.load();
+            } catch (_) {}
+            window._auralisStreamAudio = null;
+        }
         if (!window.Auralis || !window.Auralis.bridge) return;
         try {
             const res = await window.Auralis.bridge.invoke('previous_track');

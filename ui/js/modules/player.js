@@ -19,6 +19,26 @@ export const playerMethods = {
 
     async playTrack(trackId, queueIds = null) {
         if (!trackId) return;
+
+        // Cancel and stop any active or in-flight YouTube stream
+        window.__auralisStreamRequestId = (window.__auralisStreamRequestId || 0) + 1;
+        window.__auralisStreamInFlight = null;
+        if (typeof this._stopStreamAudio === 'function') {
+            this._stopStreamAudio();
+        } else if (window.Auralis?._stopStreamAudio) {
+            window.Auralis._stopStreamAudio();
+        } else if (window.Auralis?.bridge?._stopStreamAudio) {
+            window.Auralis.bridge._stopStreamAudio();
+        } else if (window._auralisStreamAudio) {
+            try {
+                window._auralisStreamAudio.pause();
+                window._auralisStreamAudio.currentTime = 0;
+                window._auralisStreamAudio.removeAttribute('src');
+                window._auralisStreamAudio.load();
+            } catch (_) {}
+            window._auralisStreamAudio = null;
+        }
+
         let track = (this.tracks && this.tracks.find(t => String(t.id) === String(trackId)));
 
         // Optimistic DOM extraction if track is not in memory (fixes Bug 3 artwork & title latency)
