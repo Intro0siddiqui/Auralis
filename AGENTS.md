@@ -44,6 +44,12 @@ Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses
     - **Settings Listener Exception & Theme Switching Hardened**: Guarded `window.AuralisYouTube.setCredentials` with `typeof ... === 'function'`, preventing a TypeError that blocked settings click listeners and verifying live light/dark theme DOM switching.
     - **URL Artwork Query Parameter Stripping**: Stripped query parameters (`?sqp=...`) from image paths before file extension evaluation and canonicalization in `media_data_url`, preventing unsupported image extension rejections on streaming album art.
     - **Form Event Guard & Lucide Icon Normalization**: Hardened `handleSearchFormSubmit` against null event objects and normalized Lucide icon tags (`cast`, `square-play`) across the UI shell.
+21. **YouTube Stream Cancellation, Monotonic Token Invalidation & Zero-Overlap Concurrency (v2.7.2)**:
+    - **Root Cause & Asynchronous Race Condition Solved**: In rapid-click or mobile double-tap scenarios, asynchronous InnerTube resolution (1–3s) left `window._auralisStreamAudio` null while in flight. Successive requests created new `Audio` instances without pausing the previous element, causing multiple streams to decode and audibly overlap through the hardware speakers simultaneously.
+    - **Monotonic Request Token (`__auralisStreamRequestId`)**: Stamped every stream request with an incrementing integer, checking for supersession at every async boundary (after Rust playback pause, after YouTube URL resolution, after loopback proxy registration, and immediately before `audio.play()`). Stale requests are immediately aborted before touching the DOM or creating an audio element.
+    - **Hardware Audio Release (`_stopStreamAudio`)**: Thoroughly pauses, resets `currentTime = 0`, strips the `src` attribute, and calls `load()` to release decoder buffers from the hardware sink, and terminates Android foreground notifications.
+    - **Touch Delegation & Event Pinning**: Removed duplicate inline `onclick` and redundant `touchend` handlers, eliminating mobile double-trigger races. All audio event listeners (`timeupdate`, `ended`, `error`, etc.) are instance-pinned against `window._auralisStreamAudio !== audio`.
+    - **Live Phone Verified**: Tested with rapid-fire 3-stream bursts (<100ms) on physical Android 15 phone (`DA59V4KNJRAIHIBI`). Monitored via CDP: `Max Concurrent Playing Audios: 1`, zero audio overlap, seamless handoff to local tracks.
 
 ---
 
