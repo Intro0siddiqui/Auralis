@@ -8,9 +8,9 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development — v2.7.4 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
+**Current State: Active Development — v2.7.5 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
 
-**Recent Major Breakthroughs (v2.7.1–v2.7.4)**:
+**Recent Major Breakthroughs (v2.7.1–v2.7.5)**:
 1. **Playback EOF & Auto-Advance Resilience**: Fixed zombie playback at EOF where trailing decoder buffers prevented `is_empty` from flipping; added `stop_at_end()` to preserve finished position (`4:24 / 4:24`) and reset UI button to Play (`▶`). Resuming an ended track rewinds to 0:00.
 2. **Stream Replay & Library Fallback Isolation**: Streamed audio rewinds to 0:00 on finish; tapping resume re-triggers the stream instead of falling back to library track 0 ("Яд").
 3. **Desktop Frameless Mode (`"decorations": false`)**: Removed light GTK3 client-side decoration header bar on Linux tiling window managers (River, Sway, etc.) for a clean, edge-to-edge dark obsidian window.
@@ -55,6 +55,10 @@ Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses
     - **v2.8.0 Stream Bookmarking Roadmap**: Prepared architecture for hybrid cloud/offline libraries where streamable YouTube tracks (`stream://youtube/<id>`) can be bookmarked into playlists and library without downloading physical audio files, restoring 'Downloaded only' as a true offline mode.
 23. **Settings Logo Asset Path Resolution (v2.7.4)**:
     - **Asset Bundle Path Normalization**: Fixed broken image placeholder in the "About Auralis" Settings card where `<img src="/icons/128x128.png">` looked for unbundled root icons; updated to `icons/auralis.png` matching `nav.html` and `index.html` to guarantee authentic logo rendering on all platforms.
+24. **Android MediaStore Permission Lifecycle & Scanner Picker Decoupling (v2.7.5)**:
+    - **Window Focus Lifecycle (`onWindowFocusChanged`)**: On Android 14/15 (Realme UI / ColorOS), permission requests dispatched in `onCreate()` before layout stabilization are silently dropped if the window does not yet have focus (`hasWindowFocus() == false`). Implemented `hasPromptedPermissions` in `onWindowFocusChanged` ensuring permission dialogs (`READ_MEDIA_AUDIO`, `POST_NOTIFICATIONS`) appear reliably once the app window is focused.
+    - **Scanner Picker Decoupling**: Decoupled "Scan Storage" from the SAF document picker. Previously, `triggerFolderScan()` in `android.js` executed `scanLibrary()` and immediately called `folderInput.click() / triggerAudioImport()`, violently ejecting the user into Android's `PickActivity`. "Scan Storage" now purely runs MediaStore scanning, while "Import Audio" handles manual document picking.
+    - **Proactive Permission Guard**: Added proactive `request_notification_permission` invocation inside `androidStorageAdapter.scanLibrary()` prior to invoking Rust's `scan_library_paths`, guaranteeing that MediaStore queries never execute silently with denied permissions. Verified all 410 tracks indexed and playable on physical phone.
 
 ---
 

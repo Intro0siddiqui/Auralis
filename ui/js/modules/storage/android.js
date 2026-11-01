@@ -125,6 +125,11 @@ export const androidStorageAdapter = {
      */
     async scanLibrary(ctx, paths = null) {
         const bridge = ctx || (typeof window !== 'undefined' && window.Auralis && window.Auralis.bridge);
+        // Proactively request/verify Android runtime permissions (READ_MEDIA_AUDIO & POST_NOTIFICATIONS)
+        try {
+            await bridge?.invoke?.('request_notification_permission');
+        } catch (_) {}
+
         bridge?.appendScanLog?.('🚀 Initiating Android MediaStore & storage scan...');
         bridge?.showToast?.('Scanning storage for audio tracks...', 'info');
         bridge?.updateScanProgressUI?.({
@@ -180,28 +185,12 @@ export const androidStorageAdapter = {
     },
 
     /**
-     * Trigger Android folder scan (MediaStore/sandboxed scan + SAF folder picker).
+     * Trigger Android storage scan (MediaStore + sandboxed app music folders).
      */
     async triggerFolderScan(ctx) {
         const bridge = ctx || (typeof window !== 'undefined' && window.Auralis && window.Auralis.bridge);
-        bridge?.appendScanLog?.('📂 Requesting music storage scan (Android MediaStore + SAF)...');
-
-        // 1. Run the system MediaStore & sandboxed storage scan directly
-        await this.scanLibrary(bridge);
-
-        // 2. Also offer file picker if user wanted manual folder/file selection via SAF
-        this.ensureFileInput(bridge);
-        const folderInput = typeof document !== 'undefined' ? document.getElementById('global-folder-scan-input') : null;
-        if (folderInput) {
-            try {
-                folderInput.value = '';
-                folderInput.click();
-            } catch (_) {
-                await this.triggerAudioImport(bridge);
-            }
-        } else {
-            await this.triggerAudioImport(bridge);
-        }
+        bridge?.appendScanLog?.('📂 Requesting music storage scan (Android MediaStore)...');
+        return await this.scanLibrary(bridge);
     },
 
     /**

@@ -138,6 +138,16 @@ class MainActivity : TauriActivity() {
         return null
     }
 
+    private var hasPromptedPermissions = false
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && !hasPromptedPermissions) {
+            hasPromptedPermissions = true
+            checkAndRequestPermissions()
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         currentActivityRef = WeakReference(this)
