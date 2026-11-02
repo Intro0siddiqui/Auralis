@@ -60,3 +60,4 @@ env.sh
 run-emulator.sh
 *.png
 
+*.idsig

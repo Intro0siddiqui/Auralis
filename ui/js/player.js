@@ -711,9 +711,37 @@ class PlayerController {
                 if (window._auralisStreamAudio.ended || (window._auralisStreamAudio.duration && window._auralisStreamAudio.currentTime >= window._auralisStreamAudio.duration - 0.5)) {
                     window._auralisStreamAudio.currentTime = 0;
                 }
+                if (this.repeatMode === 'one') {
+                    window._auralisStreamAudio.loop = true;
+                }
                 await window._auralisStreamAudio.play();
+                return;
             } catch (e) {
                 console.warn('Stream resume failed:', e);
+            }
+        }
+        // If current track is an online stream, recover stream without calling Rust resume
+        if (this.currentTrack && (String(this.currentTrack.id).startsWith('stream_') || this.currentTrack.file_path === 'stream://online')) {
+            if (window._auralisLastStreamParams && window._auralisLastStreamParams.proxyUrl) {
+                try {
+                    const audio = new Audio();
+                    window._auralisStreamAudio = audio;
+                    audio.preload = 'auto';
+                    audio.src = window._auralisLastStreamParams.proxyUrl;
+                    if (this.repeatMode === 'one') audio.loop = true;
+                    if (this.progress > 0) audio.currentTime = this.progress;
+                    await audio.play();
+                    this.isPlaying = true;
+                    this.updatePlayButton();
+                    return;
+                } catch (err) {
+                    console.error('Stream reconnection failed:', err);
+                }
+            }
+            this.isPlaying = false;
+            this.updatePlayButton();
+            if (window.Auralis && window.Auralis.bridge) {
+                window.Auralis.bridge.showToast('Stream interrupted — tap track in search to restart', 'info', 4000);
             }
             return;
         }
@@ -1139,6 +1167,9 @@ class PlayerController {
         const prev = this.repeatMode;
         this.repeatMode = modes[(idx + 1) % modes.length];
         this.updateShuffleRepeatUI();
+        if (window._auralisStreamAudio) {
+            window._auralisStreamAudio.loop = (this.repeatMode === 'one');
+        }
         if (window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.invoke('set_repeat_mode', { mode: this.repeatMode }).catch((err)=>{
                 const msg = String(err || 'repeat failed');
@@ -1146,6 +1177,9 @@ class PlayerController {
                 window.Auralis.bridge.showToast(`Repeat failed: ${msg}`, 'error', 5000);
                 this.repeatMode = prev;
                 this.updateShuffleRepeatUI();
+                if (window._auralisStreamAudio) {
+                    window._auralisStreamAudio.loop = (this.repeatMode === 'one');
+                }
             });
         }
     }

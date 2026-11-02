@@ -1024,8 +1024,12 @@ export const downloadMethods = {
             const audio = new Audio();
             window._auralisStreamAudio = audio;
             window._auralisStreamVideoId = item.id;
+            window._auralisLastStreamParams = { item, index, proxyUrl };
             audio.preload = 'auto';
             audio.src = proxyUrl;
+            if (window.Auralis?.player?.repeatMode === 'one') {
+                audio.loop = true;
+            }
 
             const trackObj = {
                 id: 'stream_' + (item.id || Date.now()),
@@ -1117,6 +1121,12 @@ export const downloadMethods = {
 
             audio.addEventListener('ended', () => {
                 if (window._auralisStreamAudio !== audio || window.__auralisStreamRequestId !== currentReqId) return;
+                const repeatMode = window.Auralis?.player?.repeatMode || 'off';
+                if (repeatMode === 'one') {
+                    audio.currentTime = 0;
+                    audio.play().catch(() => {});
+                    return;
+                }
                 if (window.Auralis?.player) {
                     window.Auralis.player.isPlaying = false;
                     window.Auralis.player.progress = window.Auralis.player.duration || (audio.duration && isFinite(audio.duration) ? audio.duration : 0);

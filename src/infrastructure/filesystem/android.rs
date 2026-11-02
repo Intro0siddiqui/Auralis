@@ -526,6 +526,13 @@ impl AndroidScanner {
                 continue;
             }
 
+            // Skip public mirror downloads in Download/Auralis to prevent duplicate entries
+            let path_norm = path_str.replace('\\', "/");
+            if path_norm.contains("/Download/Auralis/") || path_norm.contains("/Downloads/Auralis/") {
+                debug!(path = %path_str, "Skipping public MediaStore Auralis download mirror to prevent duplicates");
+                continue;
+            }
+
             let mut duration_secs = (raw.duration_ms / 1000) as u32;
 
             // If duration is 0, attempt a fallback probe only if file is directly accessible
@@ -700,6 +707,41 @@ impl AndroidScanner {
                     tracks_updated: summary.tracks_updated,
                     error_count: summary.errors.len(),
                 });
+            }
+        }
+
+        // Clean up:
+        // 1. Any duplicate tracks pointing to public Auralis download mirrors (/Download/Auralis/)
+        // 2. Any tracks whose physical files no longer exist on disk (excluding sync:// and stream://)
+        if let Ok(all_tracks) = track_repo.find_all(TrackFilter::default()).await {
+            let mut ids_to_remove: Vec<uuid::Uuid> = Vec::new();
+            for track in &all_tracks {
+                let track_path_norm = track.file_path.replace('\\', "/");
+                if track_path_norm.contains("/Download/Auralis/")
+                    || track_path_norm.contains("/Downloads/Auralis/")
+                {
+                    info!(
+                        path = %track.file_path,
+                        "Pruning duplicate/legacy public Auralis download track from library"
+                    );
+                    ids_to_remove.push(track.id);
+                    continue;
+                }
+                if !track.file_path.starts_with("sync://") && !track.file_path.starts_with("stream://") {
+                    let pb = PathBuf::from(&track.file_path);
+                    if !pb.exists() {
+                        info!(
+                            path = %track.file_path,
+                            "Pruning missing track file from library"
+                        );
+                        ids_to_remove.push(track.id);
+                    }
+                }
+            }
+
+            if !ids_to_remove.is_empty() {
+                summary.tracks_removed += ids_to_remove.len() as u32;
+                let _ = track_repo.delete_many(ids_to_remove).await;
             }
         }
 
