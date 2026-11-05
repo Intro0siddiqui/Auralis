@@ -13,6 +13,9 @@ echo "    Working directory: $(pwd)"
 # Check for required tools
 command -v cargo >/dev/null || { echo "ERROR: cargo not installed"; exit 1; }
 
+# Cache guard check
+"$(dirname "$0")/cache_guard.sh" || true
+
 # Optional: install tauri-cli if not present
 if ! command -v cargo-tauri >/dev/null; then
     echo "==> tauri-cli not found, installing..."

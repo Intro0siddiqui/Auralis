@@ -3,7 +3,9 @@
   "version": "2.7.8",
   "private": true,
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "cache:check": "bash scripts/cache_guard.sh --check",
+    "cache:clean": "bash scripts/cache_guard.sh --force"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0"

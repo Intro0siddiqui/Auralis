@@ -32,6 +32,9 @@ if rustup target list --installed 2>/dev/null | grep -q "x86_64-unknown-linux-gn
     echo "    linux x86_64 target: OK"
 fi
 
+# --- Cache Guard Check ----------------------------------------------------
+"$ROOT/scripts/cache_guard.sh" || true
+
 # --- Build Rust backend ----------------------------------------------------
 echo "==> Compiling Rust backend (this may take a few minutes on first run)"
 cargo build $PROFILE_FLAG
@@ -61,3 +64,6 @@ echo
 echo "✓ Build complete"
 echo "  Distribution: $DIST_DIR"
 ls -la "$DIST_DIR" 2>/dev/null || true
+
+# Post-build cache sanity check
+"$ROOT/scripts/cache_guard.sh" || true

@@ -10,6 +10,9 @@ cd "$(dirname "$0")/.."
 echo "==> Auralis v2 — Tests"
 echo "    Working directory: $(pwd)"
 
+# Cache guard check
+"$(dirname "$0")/cache_guard.sh" || true
+
 # Format check
 echo "==> Checking formatting (cargo fmt --check)"
 if cargo fmt --all -- --check; then
