@@ -474,6 +474,7 @@ async fn replay_current(player: &AudioPlayer) {
     let queue = player.get_queue().await;
     let target = replay_index(&queue, &track, outgoing);
     player.set_current_index(target).await;
+    player.reset_output_stream();
     if player.play_track(track).await.is_err() {
         player.set_current_index(outgoing).await;
     }
@@ -512,6 +513,9 @@ fn dispatch(command: &str) {
             }
             "pause" => {
                 let _ = player.pause().await;
+            }
+            "reset_sink" => {
+                player.reset_output_stream();
             }
             "next" => {
                 let _ = player.next().await;

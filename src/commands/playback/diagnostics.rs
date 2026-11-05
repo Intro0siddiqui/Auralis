@@ -444,6 +444,11 @@ pub async fn replay_on_fresh_sink(
         pos_before = pos_before.as_secs_f64(),
         "Rebuilding the sink for resume instead of un-pausing it"
     );
+    // Explicitly reset the cached output stream so a fresh hardware sink is opened.
+    // If the previous sink died from a Bluetooth disconnection, phone call routing
+    // takeover, or device change, opening a fresh sink ensures the audio output routes
+    // to the currently active hardware device.
+    player.reset_output_stream();
     if let Err(e) = player.play_track(track).await {
         return Err(e.to_string());
     }

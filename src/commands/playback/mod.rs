@@ -878,6 +878,18 @@ pub async fn resume(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<()
     }
 }
 
+/// Reset the audio output stream, dropping any cached hardware sink.
+///
+/// Dispatched when audio output routing changes (e.g. Bluetooth disconnect, phone call
+/// audio server takeover, or headphones unplugged) to guarantee that the next playback
+/// operation re-queries and establishes a clean hardware stream.
+#[tauri::command]
+pub async fn reset_audio_sink(player: State<'_, AudioPlayer>) -> Result<(), String> {
+    info!("Reset audio sink command received");
+    player.reset_output_stream();
+    Ok(())
+}
+
 /// Stop playback and clear the queue.
 #[tauri::command]
 pub async fn stop(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<(), String> {

@@ -151,6 +151,7 @@ impl AuralisApp {
                 commands::playback::pause,
                 commands::playback::resume,
                 commands::playback::stop,
+                commands::playback::reset_audio_sink,
                 commands::playback::next_track,
                 commands::playback::previous_track,
                 commands::playback::seek,

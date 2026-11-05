@@ -257,6 +257,18 @@ impl AudioPlayer {
         Err(PlayerError::InitError("audio output unavailable".into()))
     }
 
+    /// Drop the cached hardware output stream (`MixerDeviceSink`).
+    ///
+    /// Next time playback starts or a sink is established, `DeviceSinkBuilder::open_default_sink()`
+    /// will probe and open a fresh hardware stream on the currently active audio device.
+    /// Essential when Bluetooth disconnects, phone call audio server routing changes,
+    /// or USB audio is unplugged.
+    pub fn reset_output_stream(&self) {
+        info!("Resetting audio output stream (dropping cached hardware sink)");
+        let mut guard = self.output.lock().unwrap_or_else(|p| p.into_inner());
+        guard.stream = None;
+    }
+
     /// Start a bare file path, publishing the new duration only once playback is
     /// established. Prefer [`AudioPlayer::play_track`], which also publishes the
     /// track identity.
@@ -445,7 +457,16 @@ impl AudioPlayer {
     pub async fn play_track(&self, track: Track) -> Result<(), PlayerError> {
         info!(track_id = %track.id, title = %track.title, "Starting track playback");
         let library_duration = Duration::from_secs(track.duration_secs as u64);
-        let start = self.start_sink(&track.file_path, library_duration).await?;
+        let start = match self.start_sink(&track.file_path, library_duration).await {
+            Ok(s) => s,
+            Err(e) => {
+                // If opening/starting the sink failed (e.g. broken hardware stream from bluetooth
+                // disconnect or phone call audio routing takeover), reset the output stream and retry once.
+                warn!(error = %e, "Initial start_sink failed; resetting output stream and retrying");
+                self.reset_output_stream();
+                self.start_sink(&track.file_path, library_duration).await?
+            }
+        };
         self.commit_start(Some(track), &start).await;
         Ok(())
     }

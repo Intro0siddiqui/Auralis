@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.graphics.Bitmap
@@ -14,6 +16,8 @@ import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
 import android.util.Log
 import android.media.AudioAttributes
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaMetadata
@@ -320,6 +324,74 @@ class MediaPlaybackService : Service() {
     private var notificationManager: NotificationManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var pausedByFocusLoss: Boolean = false
+    private var isNoisyReceiverRegistered: Boolean = false
+
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                Log.i("AuralisMedia", "ACTION_AUDIO_BECOMING_NOISY: audio output disconnected (e.g. bluetooth/headphones), pausing")
+                pausedByFocusLoss = false
+                NativeBridge.command("pause")
+                NativeBridge.command("reset_sink")
+            }
+        }
+    }
+
+    private fun registerNoisyReceiver() {
+        if (!isNoisyReceiverRegistered) {
+            val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    registerReceiver(noisyReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    registerReceiver(noisyReceiver, filter)
+                }
+                isNoisyReceiverRegistered = true
+                Log.i("AuralisMedia", "noisyReceiver registered")
+            } catch (e: Throwable) {
+                Log.w("AuralisMedia", "Failed to register noisyReceiver: ${e.message}")
+            }
+        }
+    }
+
+    private fun unregisterNoisyReceiver() {
+        if (isNoisyReceiverRegistered) {
+            try {
+                unregisterReceiver(noisyReceiver)
+            } catch (_: Exception) {}
+            isNoisyReceiverRegistered = false
+        }
+    }
+
+    private var audioDeviceCallback: AudioDeviceCallback? = null
+
+    private fun setupAudioDeviceCallback() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && audioDeviceCallback == null) {
+            val callback = object : AudioDeviceCallback() {
+                override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                    for (dev in removedDevices ?: emptyArray()) {
+                        val type = dev.type
+                        if (type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                            type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                            type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                            type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                            type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                            type == AudioDeviceInfo.TYPE_USB_DEVICE
+                        ) {
+                            Log.i("AuralisMedia", "Audio output device removed (type=$type), resetting audio sink")
+                            NativeBridge.command("reset_sink")
+                        }
+                    }
+                }
+            }
+            try {
+                audioManager?.registerAudioDeviceCallback(callback, null)
+                audioDeviceCallback = callback
+            } catch (e: Throwable) {
+                Log.w("AuralisMedia", "Failed to register audioDeviceCallback: ${e.message}")
+            }
+        }
+    }
 
     /**
      * True only between a focus request that was actually GRANTED and losing it.
@@ -388,6 +460,8 @@ class MediaPlaybackService : Service() {
         isCurrentStream = isStream
 
         if (isPlaying) {
+            registerNoisyReceiver()
+            setupAudioDeviceCallback()
             if (isStream) {
                 // When streaming via WebView HTML5 <audio>, Chromium holds and manages
                 // its own AudioFocus via org.chromium.content.browser.AudioFocusDelegate.
@@ -404,7 +478,10 @@ class MediaPlaybackService : Service() {
             acquireWakeLock()
         } else {
             releaseWakeLock()
-            if (!isStream) {
+            unregisterNoisyReceiver()
+            // Do NOT abandon focus if paused due to transient focus loss (e.g. phone call),
+            // so Android can return AUDIOFOCUS_GAIN once the call/interruption ends!
+            if (!pausedByFocusLoss && !isStream) {
                 abandonAudioFocus()
             }
         }
@@ -443,6 +520,13 @@ class MediaPlaybackService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        unregisterNoisyReceiver()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            audioDeviceCallback?.let {
+                try { audioManager?.unregisterAudioDeviceCallback(it) } catch (_: Throwable) {}
+            }
+            audioDeviceCallback = null
+        }
         releaseWakeLock()
         abandonAudioFocus()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -492,7 +576,17 @@ class MediaPlaybackService : Service() {
                         return@setOnAudioFocusChangeListener
                     }
                     if (isCurrentStream) {
-                        Log.i("AuralisMedia", "focusChange: ignoring callback while streaming (handled by WebView)")
+                        Log.i("AuralisMedia", "focusChange: dispatching to stream (focusChange=$focusChange)")
+                        when (focusChange) {
+                            AudioManager.AUDIOFOCUS_LOSS,
+                            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                                NativeBridge.command("pause")
+                            }
+                            AudioManager.AUDIOFOCUS_GAIN -> {
+                                NativeBridge.command("play")
+                            }
+                        }
                         return@setOnAudioFocusChangeListener
                     }
                     when (focusChange) {
@@ -513,12 +607,16 @@ class MediaPlaybackService : Service() {
                                 pausedByFocusLoss = true
                                 Log.i("AuralisMedia", "pause-dispatch: audio-focus-loss")
                                 NativeBridge.command("pause")
+                                NativeBridge.command("reset_sink")
                             }
                         }
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                            // Duck rather than pause — keep playing at lower volume.
-                            // Rust/rodio volume ducking would require player affinity; for
-                            // minimal fix we simply avoid pausing (audio continues).
+                            // During phone call or notification duck: pause and reset sink rather than talk over
+                            hasAudioFocus = false
+                            pausedByFocusLoss = true
+                            Log.i("AuralisMedia", "pause-dispatch: audio-focus-loss-can-duck")
+                            NativeBridge.command("pause")
+                            NativeBridge.command("reset_sink")
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
                             hasAudioFocus = true
@@ -528,6 +626,7 @@ class MediaPlaybackService : Service() {
                             )
                             if (pausedByFocusLoss) {
                                 pausedByFocusLoss = false
+                                NativeBridge.command("reset_sink")
                                 NativeBridge.command("play")
                             }
                         }
@@ -551,13 +650,15 @@ class MediaPlaybackService : Service() {
                 { focusChange ->
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS,
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                             // Same guard as the O+ branch, for the same reason.
                             if (hasAudioFocus) {
                                 hasAudioFocus = false
                                 pausedByFocusLoss = true
                                 Log.i("AuralisMedia", "pause-dispatch: legacy-audio-focus-loss")
                                 NativeBridge.command("pause")
+                                NativeBridge.command("reset_sink")
                             } else {
                                 Log.i(
                                     "AuralisMedia",
@@ -565,13 +666,11 @@ class MediaPlaybackService : Service() {
                                 )
                             }
                         }
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                            // Duck — do not pause.
-                        }
                         AudioManager.AUDIOFOCUS_GAIN -> {
                             hasAudioFocus = true
                             if (pausedByFocusLoss) {
                                 pausedByFocusLoss = false
+                                NativeBridge.command("reset_sink")
                                 NativeBridge.command("play")
                             }
                         }
