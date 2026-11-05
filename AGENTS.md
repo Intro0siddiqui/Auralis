@@ -8,9 +8,9 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development — v2.7.6 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
+**Current State: Active Development — v2.7.8 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
 
-**Recent Major Breakthroughs (v2.7.1–v2.7.6)**:
+**Recent Major Breakthroughs (v2.7.1–v2.7.8)**:
 1. **Online Stream Repeat-1 & Interruption Resilience (v2.7.6)**: Bound `audio.loop` to `player.repeatMode === 'one'` and wired loop handling into the stream `ended` listener. Synchronized stream parameters in `_auralisLastStreamParams` and prevented `player.js:play()` from falling through to Rust's Rodio `resume` command on phone call audio focus loss, eliminating the "nothing to resume" dialog error.
 2. **Library Download Duplication & Orphan Pruning (v2.7.6)**: Excluded public `/Download/Auralis/` MediaStore mirror copies from Android library scanning so only the sandboxed primary download (with cover art) is indexed. Added automatic pruning in `scan_library_paths_with_progress` to purge duplicate mirror records and missing file references from SQLite.
 3. **Playback EOF & Auto-Advance Resilience**: Fixed zombie playback at EOF where trailing decoder buffers prevented `is_empty` from flipping; added `stop_at_end()` to preserve finished position (`4:24 / 4:24`) and reset UI button to Play (`▶`). Resuming an ended track rewinds to 0:00.
