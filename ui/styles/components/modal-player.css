@@ -209,3 +209,8 @@
     pointer-events: auto;
 }
 
+[data-theme="light"] .player-full-queue-drawer {
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 -12px 36px rgba(0, 0, 0, 0.12);
+}
+

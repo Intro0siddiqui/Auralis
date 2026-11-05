@@ -5,12 +5,12 @@
 
     <!-- Subnav Tabs: Library vs YouTube -->
     <div class="search-filter-chips library-subnav-chips" style="display: flex; gap: var(--space-2); margin-bottom: var(--space-4); overflow-x: auto; padding-bottom: 4px;">
-        <button type="button" class="chip active" id="search-tab-library" style="border-radius: var(--radius-full); padding: var(--space-1) var(--space-4); font-size: var(--text-xs); font-weight: var(--font-medium); border: 1px solid var(--glass-border); cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-1);">
-            <i data-lucide="library" style="width: 14px; height: 14px;"></i>
+        <button type="button" class="chip active" id="search-tab-library" style="border-radius: var(--radius-full); padding: 6px 16px; min-height: 32px; font-size: var(--text-xs); font-weight: var(--font-medium); border: 1px solid var(--glass-border); cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); touch-action: manipulation;">
+            <i data-lucide="library" style="width: 15px; height: 15px;"></i>
             Library
         </button>
-        <button type="button" class="chip" id="search-tab-youtube" style="border-radius: var(--radius-full); padding: var(--space-1) var(--space-4); font-size: var(--text-xs); font-weight: var(--font-medium); border: 1px solid var(--glass-border); cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-1);">
-            <i data-lucide="square-play" style="width: 14px; height: 14px;"></i>
+        <button type="button" class="chip" id="search-tab-youtube" style="border-radius: var(--radius-full); padding: 6px 16px; min-height: 32px; font-size: var(--text-xs); font-weight: var(--font-medium); border: 1px solid var(--glass-border); cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); touch-action: manipulation;">
+            <i data-lucide="square-play" style="width: 15px; height: 15px;"></i>
             YouTube
         </button>
     </div>
@@ -42,20 +42,28 @@
     <!-- Section 2: YouTube Online Search & Stream -->
     <div id="search-section-youtube" style="display: none;">
         <div class="card neu-glass" style="padding: var(--space-3); margin-bottom: var(--space-4); border-radius: var(--radius-lg);">
-            <form id="youtube-search-form" onsubmit="return false" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
+            <form id="youtube-search-form" class="youtube-search-form" onsubmit="return false" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
                 <input type="search" name="q" class="input" placeholder="Search YouTube songs, artists, albums…"
                        style="flex: 1; min-width: 200px;" autocomplete="off">
-                <button type="submit" class="btn btn-primary neu" id="youtube-search-btn">
+                <button type="submit" class="btn btn-primary neu youtube-search-btn" id="youtube-search-btn">
                     <i data-lucide="search"></i>
                     Search
                 </button>
             </form>
         </div>
 
-        <div id="youtube-search-spinner" style="display: none; text-align: center; padding: var(--space-6) var(--space-4);">
+        <div id="youtube-search-spinner" class="youtube-search-spinner" style="display: none; text-align: center; padding: var(--space-6) var(--space-4);">
             <i data-lucide="loader-2" class="spin" style="width: 28px; height: 28px; color: var(--accent);"></i>
             <p style="margin-top: var(--space-2); color: var(--text-3); font-size: var(--text-sm);">Searching YouTube…</p>
         </div>
-        <div id="youtube-search-results" class="track-list" style="display: none;"></div>
+        <div id="youtube-search-results" class="youtube-search-results track-list">
+            <div class="empty-state glass neu" style="padding: var(--space-8); text-align: center; border-radius: var(--radius-lg);">
+                <div class="empty-state-icon">
+                    <i data-lucide="square-play"></i>
+                </div>
+                <h2 class="empty-state-title">Search YouTube</h2>
+                <p class="empty-state-description">Search online songs, streams, and videos to play or download.</p>
+            </div>
+        </div>
     </div>
 </section>

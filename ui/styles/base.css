@@ -93,6 +93,16 @@ button, a, input, select, [data-tauri-drag-region] button {
     contain: layout paint style;
 }
 
+/* SPA View Panes */
+.view-pane {
+    display: none;
+    width: 100%;
+}
+
+.view-pane.active {
+    display: block;
+}
+
 /* Queue Panel */
 #queue-panel {
     position: fixed;

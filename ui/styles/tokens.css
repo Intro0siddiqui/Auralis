@@ -290,7 +290,9 @@
 
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.12);
-  --accent-hover: #38bdf8;
+  --accent: #0284c7;
+  --accent-hover: #0369a1;
+  --accent-glow: rgba(2, 132, 199, 0.25);
 }
 
 @media (prefers-color-scheme: light) {
@@ -341,7 +343,9 @@
 
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
     --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.12);
-    --accent-hover: #38bdf8;
+    --accent: #0284c7;
+    --accent-hover: #0369a1;
+    --accent-glow: rgba(2, 132, 199, 0.25);
   }
 }
 

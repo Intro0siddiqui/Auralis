@@ -12,6 +12,7 @@ import { downloadMethods } from './modules/downloads.js';
 import { syncMethods } from './modules/sync.js';
 import { uiMethods } from './modules/ui.js';
 import { copyText, copyWithToast } from './modules/clipboard.js';
+import { router } from './modules/router.js';
 
 // Compose all module methods onto Bridge prototype
 Object.assign(
@@ -31,6 +32,9 @@ Object.assign(
 window.Auralis = window.Auralis || {};
 window.Auralis.Bridge = Bridge;
 window.Auralis.bridge = new Bridge();
+window.Auralis.router = router;
+window.Auralis.bridge.navigateTo = (viewName) => router.navigate(viewName);
+Bridge.prototype.navigateTo = (viewName) => router.navigate(viewName);
 window.Auralis.assetUrl = (path) => window.Auralis.bridge.assetUrl(path);
 
 // Auto-initialize
@@ -39,18 +43,22 @@ function _wirePlayer() {
     if (p && typeof p.initBridgeListeners === 'function') p.initBridgeListeners();
     if (p && typeof p.hydrateState === 'function') p.hydrateState().catch(()=>{});
 }
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        window.Auralis.bridge.init();
-        _wirePlayer();
-        // Retry shortly for case where player.js loaded after this module
-        setTimeout(_wirePlayer, 300);
-    });
-} else {
+
+function _initApp() {
+    router.init();
     window.Auralis.bridge.init();
     _wirePlayer();
+    // Retry shortly for case where player.js loaded after this module
     setTimeout(_wirePlayer, 300);
 }
 
-export { Bridge };
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        _initApp();
+    });
+} else {
+    _initApp();
+}
+
+export { Bridge, router };
 export default window.Auralis.bridge;

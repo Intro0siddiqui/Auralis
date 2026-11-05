@@ -232,53 +232,117 @@ class PlayerController {
     bindVolume() {
         if (!this.volumeSlider) return;
 
+        let isDragging = false;
         const getPercent = (e) => {
             const rect = this.volumeSlider.getBoundingClientRect();
-            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-            return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            const clientX = e.clientX !== undefined ? e.clientX : (e.touches ? e.touches[0].clientX : 0);
+            return Math.max(0, Math.min(1, (clientX - rect.left) / (rect.width || 1)));
         };
 
-        const setVolume = (e) => {
+        const setVol = (e) => {
             this.setVolumeLevel(getPercent(e));
         };
 
-        let isDragging = false;
+        const onPointerDown = (e) => {
+            if (e.pointerId !== undefined && typeof this.volumeSlider.setPointerCapture === 'function') {
+                try { this.volumeSlider.setPointerCapture(e.pointerId); } catch (_) {}
+            }
+            isDragging = true;
+            setVol(e);
+        };
 
-        this.volumeSlider.addEventListener('mousedown', () => { isDragging = true; });
-        document.addEventListener('mousemove', (e) => { if (isDragging) setVolume(e); });
-        document.addEventListener('mouseup', () => { isDragging = false; });
+        const onPointerMove = (e) => {
+            if (isDragging) setVol(e);
+        };
 
-        this.volumeSlider.addEventListener('touchstart', () => { isDragging = true; }, { passive: true });
-        this.volumeSlider.addEventListener('touchmove', (e) => { if (isDragging) setVolume(e); }, { passive: true });
-        this.volumeSlider.addEventListener('touchend', () => { isDragging = false; });
+        const onPointerUp = (e) => {
+            if (isDragging) {
+                if (e.pointerId !== undefined && typeof this.volumeSlider.releasePointerCapture === 'function') {
+                    try { this.volumeSlider.releasePointerCapture(e.pointerId); } catch (_) {}
+                }
+                isDragging = false;
+            }
+        };
+
+        this.volumeSlider.addEventListener('pointerdown', onPointerDown);
+        this.volumeSlider.addEventListener('pointermove', onPointerMove);
+        this.volumeSlider.addEventListener('pointerup', onPointerUp);
+        this.volumeSlider.addEventListener('pointercancel', onPointerUp);
     }
 
     bindFullScreenPlayerListeners() {
-        document.body.addEventListener('htmx:afterSwap', (e) => {
-            const target = e && e.detail && e.detail.target;
-            const isPlayerSwap = target && (target.id === 'overlay-root' || (target.querySelector && target.querySelector('#player-full')) || target.id === 'player-full');
-            // Also re-sync bar when any view swaps
-            if (window.Auralis && window.Auralis.player) {
-                window.Auralis.player.hydrateState().catch(() => {});
-                this.highlightActiveTrack(this.currentTrack?.id, this.isPlaying);
-            }
-            if (isPlayerSwap || document.getElementById('player-full')) {
-                const fp = document.getElementById('player-full');
-                if (fp) fp.dataset.wired = '';
+        const wireModalIfPresent = () => {
+            const fp = typeof document !== 'undefined' && document.getElementById ? document.getElementById('player-full') : null;
+            if (fp) {
+                fp.dataset.wired = '';
                 this.wireFullScreenElements();
                 this.hydrateState().catch(() => {});
             }
-        });
+        };
 
-        // Also wire on explicit overlay click (player-bar hx-get target)
-        const playerBar = document.querySelector('.player-track[hx-get]');
-        if (playerBar) {
+        // Listen for router view/modal transitions
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener('view:enter', () => {
+                if (window.Auralis && window.Auralis.player) {
+                    window.Auralis.player.hydrateState().catch(() => {});
+                    this.highlightActiveTrack(this.currentTrack?.id, this.isPlaying);
+                }
+            });
+
+            const onModalOpened = (e) => {
+                const detail = e?.detail;
+                const modalName = typeof detail === 'string' ? detail : (detail?.name || detail?.modal || detail?.id);
+                if (!modalName || modalName === 'player-full' || (typeof document !== 'undefined' && document.getElementById && document.getElementById('player-full'))) {
+                    wireModalIfPresent();
+                }
+            };
+            window.addEventListener('modal:opened', onModalOpened);
+            window.addEventListener('modal:open', onModalOpened);
+            if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+                document.addEventListener('modal:opened', onModalOpened);
+                document.addEventListener('modal:open', onModalOpened);
+            }
+        }
+
+        // Also wire on player bar click
+        const playerBar = typeof document !== 'undefined' && document.querySelector ? document.querySelector('.player-track') : null;
+        if (playerBar && typeof playerBar.addEventListener === 'function') {
             playerBar.addEventListener('click', () => {
-                // Hydrate before HTMX fetches partial so metadata is ready when it swaps
                 this.hydrateState().catch(() => {});
+                setTimeout(wireModalIfPresent, 50);
             });
         }
         this.wireFullScreenElements();
+    }
+
+    async openFullScreenPlayer() {
+        if (window.Auralis?.router?.openModal) {
+            await window.Auralis.router.openModal('player-full');
+        } else {
+            const overlayRoot = document.getElementById('overlay-root');
+            if (overlayRoot) {
+                let html = '';
+                try {
+                    if (window.Auralis?.bridge?.invoke) {
+                        html = await window.Auralis.bridge.invoke('render_template', { name: 'player-full.html' });
+                    }
+                } catch (_) {}
+                if (!html) {
+                    try {
+                        const resp = await fetch('/partials/player-full.html');
+                        if (resp.ok) html = await resp.text();
+                    } catch (_) {}
+                }
+                if (html) {
+                    overlayRoot.innerHTML = html;
+                }
+            }
+        }
+        const fp = document.getElementById('player-full');
+        if (fp) fp.dataset.wired = '';
+        this.wireFullScreenElements();
+        this.hydrateState().catch(() => {});
+        if (window.lucide) window.lucide.createIcons();
     }
 
     wireFullScreenElements() {

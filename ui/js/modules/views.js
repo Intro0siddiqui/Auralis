@@ -3,20 +3,6 @@
  * Handles loading, rendering, filtering and UI state transitions for all app views.
  */
 
-import {
-    navGuard,
-    detectPage,
-    claimContentWrite,
-    isContentWriteCurrent,
-} from './nav_guard.js';
-
-// The generation guard must be listening before htmx can issue anything.
-// htmx processes the DOM on DOMContentLoaded; this module is a deferred
-// `type="module"` script, so it is evaluated first. Registering here rather than
-// from `bindHTMXEvents()` also puts these listeners ahead of the `afterSwap`
-// handler in `core.js`, which calls `refreshCurrentView()`.
-navGuard.install();
-
 let _lastPlayTriggerTime = 0;
 let _lastPlayTrackId = null;
 export function _safePlayTrack(trackId) {
@@ -36,16 +22,28 @@ try {
 } catch (_) {}
 
 export const viewMethods = {
-    refreshCurrentView() {
+    refreshCurrentView(viewName) {
         const content = document.getElementById('content');
         if (!content) return;
 
-        // One shared vocabulary for "which page is on screen", so this and the
-        // generation guard in nav_guard.js can never disagree — a disagreement
-        // between the two would itself be a second cause of the swap race.
-        // `null` (empty or unrecognised `#content`) falls through to 'home',
-        // which is exactly what the previous else-branch did.
-        const page = detectPage(content) || 'home';
+        const activePane = content.querySelector('.view-pane.active, .view-pane:not([style*="display: none"])');
+        let page = viewName
+            || (window.Auralis && window.Auralis.router && window.Auralis.router.currentView)
+            || (activePane && activePane.dataset.view)
+            || this.activeView;
+
+        if (!page) {
+            if (content.querySelector('.page-library, [data-view="library"]')) page = 'library';
+            else if (content.querySelector('.page-albums, [data-view="albums"]')) page = 'albums';
+            else if (content.querySelector('.page-artists, [data-view="artists"]')) page = 'artists';
+            else if (content.querySelector('.page-downloads, .page-download, [data-view="downloads"], [data-view="download"]')) page = 'downloads';
+            else if (content.querySelector('.page-search, [data-view="search"]')) page = 'search';
+            else if (content.querySelector('.page-settings, #settings-view, [data-view="settings"]')) page = 'settings';
+            else if (content.querySelector('.page-playlists, [data-view="playlists"]')) page = 'playlists';
+            else if (content.querySelector('.page-sync, [data-view="sync"]')) page = 'sync';
+            else page = 'home';
+        }
+        if (page === 'download') page = 'downloads';
         this.activeView = page;
         switch (page) {
             case 'library': this.loadLibraryView(); break;
@@ -62,27 +60,17 @@ export const viewMethods = {
 
     navigateToView(viewName) {
         if (!viewName) return;
-        const normalized = viewName.endsWith('.html') ? viewName : `${viewName}.html`;
-        const partialUrl = `/partials/${normalized}`;
-        const content = document.getElementById('content');
-        if (content && window.htmx) {
-            window.htmx.ajax('GET', partialUrl, { target: '#content', swap: 'innerHTML' });
-        }
+        return window.Auralis?.router?.navigate(viewName);
     },
 
     async loadLibraryView() {
-        const expected = 'library';
-        if (this.activeView !== expected) return;
-
-        const content = document.getElementById('content');
-        if (!content || !content.querySelector('.page-library')) return;
-
+        this.activeView = 'library';
         this.bindLibraryFilterControls();
         await this.renderLibraryTracks();
     },
 
     bindLibraryFilterControls() {
-        const sortSelect = document.querySelector('.page-library select[name="sort_by"]');
+        const sortSelect = document.querySelector('.page-library select[name="sort_by"], [data-view="library"] select[name="sort_by"]');
 
         if (sortSelect && !sortSelect.dataset.bound) {
             sortSelect.dataset.bound = 'true';
@@ -93,10 +81,10 @@ export const viewMethods = {
     },
 
     async renderLibraryTracks() {
-        const trackList = document.querySelector('.page-library .track-list');
+        const trackList = document.querySelector('.page-library .track-list, [data-view="library"] .track-list, .track-list');
         if (!trackList) return;
 
-        const sortSelect = document.querySelector('.page-library select[name="sort_by"]');
+        const sortSelect = document.querySelector('.page-library select[name="sort_by"], [data-view="library"] select[name="sort_by"]');
         const sortBy = sortSelect ? sortSelect.value : 'date_added';
 
         try {
@@ -129,21 +117,18 @@ export const viewMethods = {
     },
 
     async loadHomeView() {
-        const expected = 'home';
-        if (this.activeView !== expected) return;
+        this.activeView = 'home';
         try {
             const html = await this.invoke('get_home_shelves_html');
-            if (this.activeView !== expected) return;
-            const _content = document.getElementById('content');
-            if (_content && _content.firstElementChild && !_content.querySelector('.page-home')) return;
-            const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home');
+            if (this.activeView !== 'home') return;
+            const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
 
             if (container && html) {
                 container.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
-        if (window.Auralis?.player?.highlightActiveTrack) {
-            window.Auralis.player.highlightActiveTrack();
-        }
+                if (window.Auralis?.player?.highlightActiveTrack) {
+                    window.Auralis.player.highlightActiveTrack();
+                }
                 this._syncPlayerBar();
                 if (window.Auralis?.player?.highlightActiveTrack) {
                     window.Auralis.player.highlightActiveTrack();
@@ -155,21 +140,17 @@ export const viewMethods = {
     },
 
     async loadAlbumsView() {
-        const expected = 'albums';
-        if (this.activeView !== expected) return;
-
+        this.activeView = 'albums';
         try {
             const html = await this.invoke('get_albums_grid_html');
-            if (this.activeView !== expected) return;
-            const _content = document.getElementById('content');
-            if (!_content || !_content.querySelector('.page-albums')) return;
-            const grid = document.getElementById('albums-grid') || document.querySelector('.page-albums .grid');
+            if (this.activeView !== 'albums') return;
+            const grid = document.getElementById('albums-grid') || document.querySelector('.page-albums .grid, [data-view="albums"] .grid');
             if (grid && html) {
                 grid.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
-        if (window.Auralis?.player?.highlightActiveTrack) {
-            window.Auralis.player.highlightActiveTrack();
-        }
+                if (window.Auralis?.player?.highlightActiveTrack) {
+                    window.Auralis.player.highlightActiveTrack();
+                }
             }
         } catch (err) {
             console.error('Error loading albums:', err);
@@ -177,21 +158,17 @@ export const viewMethods = {
     },
 
     async loadArtistsView() {
-        const expected = 'artists';
-        if (this.activeView !== expected) return;
-
+        this.activeView = 'artists';
         try {
             const html = await this.invoke('get_artists_grid_html');
-            if (this.activeView !== expected) return;
-            const _content = document.getElementById('content');
-            if (!_content || !_content.querySelector('.page-artists')) return;
-            const grid = document.getElementById('artists-grid') || document.querySelector('.page-artists .grid');
+            if (this.activeView !== 'artists') return;
+            const grid = document.getElementById('artists-grid') || document.querySelector('.page-artists .grid, [data-view="artists"] .grid');
             if (grid && html) {
                 grid.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
-        if (window.Auralis?.player?.highlightActiveTrack) {
-            window.Auralis.player.highlightActiveTrack();
-        }
+                if (window.Auralis?.player?.highlightActiveTrack) {
+                    window.Auralis.player.highlightActiveTrack();
+                }
             }
         } catch (err) {
             console.error('Error loading artists:', err);
@@ -199,9 +176,8 @@ export const viewMethods = {
     },
 
     async loadPlaylistsView() {
-        const expected = 'playlists';
-        if (this.activeView !== expected) return;
-        const grid = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid');
+        this.activeView = 'playlists';
+        const grid = document.getElementById('playlists-grid') || document.querySelector('.page-playlists .grid, [data-view="playlists"] .grid');
         const detail = document.getElementById('playlist-detail');
         if (detail && detail.style.display !== 'block') {
             detail.style.display = 'none';
@@ -211,9 +187,7 @@ export const viewMethods = {
 
         try {
             const playlists = await this.invoke('get_playlists');
-            if (this.activeView !== expected) return;
-            const _content = document.getElementById('content');
-            if (!_content || !_content.querySelector('.page-playlists')) return;
+            if (this.activeView !== 'playlists') return;
             if (playlists && playlists.length > 0) {
                 grid.innerHTML = playlists.map(pl => {
                     const isSmart = Boolean(pl.is_smart);
@@ -1202,17 +1176,12 @@ export const viewMethods = {
             this.showToast('No artist information available', 'info');
             return;
         }
-        // Claims a generation so this write is ordered against the htmx swaps:
-        // these two methods set `#content`'s innerHTML directly and so bypass
-        // `hx-sync` entirely.
-        const gen = claimContentWrite();
         try {
             const html = await this.invoke('get_library_tracks_html', { artist: artistName });
-            if (!isContentWriteCurrent(gen)) return;
             const content = document.getElementById('content');
             if (content) {
                 content.innerHTML = `
-                    <section class="page-library">
+                    <section class="page-library" data-view="library">
                         <header class="section-header">
                             <div>
                                 <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
@@ -1225,9 +1194,9 @@ export const viewMethods = {
                     </section>
                 `;
                 if (window.lucide) window.lucide.createIcons();
-        if (window.Auralis?.player?.highlightActiveTrack) {
-            window.Auralis.player.highlightActiveTrack();
-        }
+                if (window.Auralis?.player?.highlightActiveTrack) {
+                    window.Auralis.player.highlightActiveTrack();
+                }
             }
         } catch (err) {
             console.error('Failed to filter by artist:', err);
@@ -1239,14 +1208,12 @@ export const viewMethods = {
             this.showToast('No album information available', 'info');
             return;
         }
-        const gen = claimContentWrite();
         try {
             const html = await this.invoke('get_library_tracks_html', { album: albumName });
-            if (!isContentWriteCurrent(gen)) return;
             const content = document.getElementById('content');
             if (content) {
                 content.innerHTML = `
-                    <section class="page-library">
+                    <section class="page-library" data-view="library">
                         <header class="section-header">
                             <div>
                                 <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
@@ -1259,9 +1226,9 @@ export const viewMethods = {
                     </section>
                 `;
                 if (window.lucide) window.lucide.createIcons();
-        if (window.Auralis?.player?.highlightActiveTrack) {
-            window.Auralis.player.highlightActiveTrack();
-        }
+                if (window.Auralis?.player?.highlightActiveTrack) {
+                    window.Auralis.player.highlightActiveTrack();
+                }
             }
         } catch (err) {
             console.error('Failed to filter by album:', err);

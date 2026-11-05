@@ -164,6 +164,8 @@
 
 .volume-slider-group input[type="range"] {
     flex: 1;
+    min-height: 36px;
+    cursor: pointer;
 }
 
 .volume-badge {

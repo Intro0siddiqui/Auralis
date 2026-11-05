@@ -28,6 +28,10 @@
     overflow-y: auto;
 }
 
+[data-theme="light"] .overlay {
+    background: rgba(240, 244, 248, 0.96);
+}
+
 
 /* Base Modal Dialog Shell */
 .modal--dialog {
@@ -63,7 +67,7 @@
     position: fixed;
     top: calc(var(--space-4) + env(safe-area-inset-top, 0px));
     right: var(--space-4);
-    z-index: 1000;
+    z-index: 2000;
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
@@ -275,6 +279,20 @@
     user-select: none;
 }
 
+[data-theme="light"] .context-menu {
+    background: rgba(255, 255, 255, 0.95);
+    border-color: rgba(15, 23, 42, 0.12);
+    box-shadow: 
+        0 12px 32px rgba(0, 0, 0, 0.12),
+        0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="light"] .context-menu-item:hover,
+[data-theme="light"] .context-menu-item:focus {
+    background: rgba(2, 132, 199, 0.08);
+    color: var(--accent);
+}
+
 @keyframes context-menu-pop {
     from {
         opacity: 0;
@@ -361,6 +379,10 @@
     justify-content: center;
     padding: var(--space-4);
     animation: modal-fade-in 180ms ease forwards;
+}
+
+[data-theme="light"] .modal-backdrop {
+    background: rgba(15, 23, 42, 0.42);
 }
 
 @keyframes modal-fade-in {

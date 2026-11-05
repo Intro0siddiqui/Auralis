@@ -335,7 +335,7 @@ pub async fn get_home_shelves_html(db: State<'_, Database>) -> Result<String, St
             <i data-lucide="folder-search"></i>
             Scan Storage
         </button>
-        <button type="button" class="btn btn-secondary neu" hx-get="/partials/download.html" hx-target="#content" hx-swap="innerHTML" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
+        <button type="button" class="btn btn-secondary neu" data-nav="download" style="cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-2); margin: 0;">
             <i data-lucide="download"></i>
             Download Audio
         </button>
@@ -419,7 +419,7 @@ pub async fn get_home_shelves_html(db: State<'_, Database>) -> Result<String, St
     html.push_str(
         r##"<section class="section-header">
     <h2 class="section-title">Recently Added</h2>
-    <a href="#" class="section-link" hx-get="/partials/library.html" hx-target="#content" hx-swap="innerHTML">See all</a>
+    <a href="#" class="section-link" data-nav="library" style="min-height: 28px; display: inline-flex; align-items: center; padding: 4px 8px;">See all</a>
 </section>
 
 <div class="shelf" id="recently-added-shelf">"##,

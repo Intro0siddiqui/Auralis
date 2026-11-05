@@ -147,25 +147,22 @@ cargo tauri dev
 
 ## Frontend architecture
 
-The UI is built on **HTMX 2.0** — no React, no Vue, no client-side framework bloat. The design system is **Soft Glass Audio** — a hybrid of glassmorphism (`.glass`, `.glass-weak`, `.glass-strong` with `backdrop-filter: blur()`) and neumorphism (`.neu`, `.neu-inset`, `.neu-glass` with dual box-shadows).
+The UI is built on **Modern Vanilla JS (ES Modules)** with a zero-dependency **ViewRouter** (`ui/js/modules/router.js`) — no React, no Vue, and zero client-side framework bloat. The design system is **Soft Glass Audio** — a hybrid of glassmorphism (`.glass`, `.glass-weak`, `.glass-strong` with `backdrop-filter: blur()`) and neumorphism (`.neu`, `.neu-inset`, `.neu-glass` with dual box-shadows).
 
-### Why HTMX over Compose?
-- **Zero JavaScript framework runtime** — the browser only loads ~30KB of HTMX
-- **Server-driven** — the Rust backend serves static HTML partials from `ui/partials/`
-- **Progressive enhancement** — the app degrades gracefully if JavaScript is disabled
-- **Same codebase for desktop and mobile** — no separate Compose-for-Android layer
+### Why Vanilla JS ViewRouter?
+- **Zero Framework Runtime** — pure browser-native ES Modules, zero external runtime weight.
+- **Persistent View Panes** — views are mounted in cached `.view-pane` containers, yielding instant 0ms tab transitions.
+- **Preserved Scroll & Form State** — switching views records and restores exact scroll positions and preserves form inputs without DOM thrashing.
+- **Native Android Hardware Back Support** — integrates directly with `window.history.pushState` and `popstate` for natural back navigation.
 
 ### How navigation works
 ```html
-<!-- index.html loads content via HTMX on page load -->
-<main id="content" class="content"
-      hx-get="/partials/home"
-      hx-trigger="load"
-      hx-swap="innerHTML">
-</main>
+<!-- Navigation triggers view routing via delegated data-nav -->
+<a href="#" data-nav="library">Library</a>
+<main id="content" class="content"></main>
 ```
 
-The Tauri command `commands::templates::render_template` reads the corresponding HTML file from `ui/partials/` and returns it as-is for HTMX to swap into the DOM. Smaller updates (now-playing, download progress) are handled via Tauri events in `js/bridge.js`.
+Navigation clicks are intercepted by `router.js`, which renders the target view pane into `#content` with 0ms delay. Dynamic updates (now-playing, download progress, library scan) are driven via Tauri events in `js/bridge.js`.
 
 ---
 

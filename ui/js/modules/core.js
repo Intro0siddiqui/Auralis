@@ -217,7 +217,10 @@ export const coreMethods = {
         this.initGlobalErrorHandlers();
         this.initKeyboardHandler();
         this.initBackDismissalHandler();
-        this.bindHTMXEvents();
+        if (window.Auralis && window.Auralis.router && typeof window.Auralis.router.init === 'function') {
+            window.Auralis.router.init();
+        }
+        this.bindViewEvents();
         this.ensureFileInput();
         this.refreshCurrentView();
     },
@@ -281,30 +284,26 @@ export const coreMethods = {
         }
     },
 
-    bindHTMXEvents() {
-        if (document.body && typeof document.body.addEventListener === 'function') {
-            document.body.addEventListener('htmx:afterSwap', (evt) => {
-                if (window.htmx && evt.target) {
-                    window.htmx.process(evt.target);
-                }
+    bindViewEvents() {
+        const handleViewEnter = (evt) => {
+            const detail = evt?.detail !== undefined ? evt.detail : evt;
+            const viewName = Array.isArray(detail) ? detail[0] : (detail?.view || detail?.viewName || detail?.name || (typeof detail === 'string' ? detail : null));
+            if (window.lucide) window.lucide.createIcons();
+            this.ensureFileInput();
+            this.refreshCurrentView(viewName);
+        };
+        window.addEventListener('view:enter', handleViewEnter);
+        document.addEventListener('view:enter', handleViewEnter);
+        if (typeof this.on === 'function') {
+            this.on('view:enter', (targetView) => {
                 if (window.lucide) window.lucide.createIcons();
                 this.ensureFileInput();
-                this.refreshCurrentView();
-            });
-            document.body.addEventListener('htmx:restored', (evt) => {
-                if (window.htmx && (evt.target || document.body)) {
-                    window.htmx.process(evt.target || document.body);
-                }
-                if (window.lucide) window.lucide.createIcons();
-                this.ensureFileInput();
-                this.refreshCurrentView();
+                this.refreshCurrentView(targetView);
             });
         }
-        // BF-cache restore when returning from external Files app (Android SAF) — htmx:afterSwap does not fire
+
+        // BF-cache restore when returning from external Files app (Android SAF)
         window.addEventListener('pageshow', (e) => {
-            if (window.htmx) {
-                window.htmx.process(document.body);
-            }
             if (e.persisted) {
                 if (window.lucide) window.lucide.createIcons();
                 this.ensureFileInput();
@@ -312,8 +311,8 @@ export const coreMethods = {
             }
         });
         document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible' && document.querySelector('.page-downloads')) {
-                // Re-ensure Download handlers after Files app returns without firing htmx events
+            if (document.visibilityState === 'visible' && document.querySelector('.page-downloads, [data-view="downloads"], [data-view="download"]')) {
+                // Re-ensure Download handlers after Files app returns
                 this.loadDownloadView();
             }
         });
@@ -325,7 +324,7 @@ export const coreMethods = {
                 e.preventDefault();
                 e.stopPropagation();
                 document.dispatchEvent(new CustomEvent('auralis:submit:download', { detail: { form: t } }));
-            } else if (t.id === 'youtube-search-form') {
+            } else if (t.id === 'youtube-search-form' || t.id === 'download-youtube-search-form' || (t.classList && t.classList.contains('youtube-search-form'))) {
                 e.preventDefault();
                 e.stopPropagation();
                 document.dispatchEvent(new CustomEvent('auralis:submit:search', { detail: { form: t } }));
@@ -423,6 +422,11 @@ export const coreMethods = {
             };
             document.addEventListener('click', handleGlobalActionDelegate);
         }
+    },
+
+    bindHTMXEvents() {
+        // Deprecated alias for backward compatibility
+        return this.bindViewEvents();
     },
 
     dismissOpenOverlays() {

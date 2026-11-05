@@ -123,3 +123,35 @@
     height: 20px;
 }
 
+/* Filter & Subnav Chips */
+.chip {
+    border-radius: var(--radius-full);
+    padding: 6px 16px;
+    min-height: 32px;
+    font-size: var(--text-xs);
+    font-weight: var(--font-medium);
+    border: 1px solid var(--glass-border);
+    background: var(--glass-base);
+    color: var(--text-2);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    touch-action: manipulation;
+    transition: all var(--transition-fast);
+}
+
+.chip:hover {
+    background: var(--glass-strong);
+    color: var(--text-1);
+    border-color: var(--glass-border-strong);
+}
+
+.chip.active {
+    background: var(--accent) !important;
+    color: var(--bg-0) !important;
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 12px var(--accent-glow, rgba(110, 231, 255, 0.35));
+}
+
+

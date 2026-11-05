@@ -834,8 +834,8 @@ describe('YouTube Search & Streaming Integration', () => {
 
     it('ui/partials/download.html has sleek neu-glass search card with placeholder and spinner', () => {
         const html = fs.readFileSync(dlPath, 'utf8');
-        assert.ok(html.includes('id="youtube-search-results"'), 'must have #youtube-search-results container');
-        assert.ok(html.includes('id="youtube-search-spinner"'), 'must have #youtube-search-spinner');
+        assert.ok(html.includes('id="download-youtube-search-results"') || html.includes('id="youtube-search-results"'), 'must have youtube-search-results container');
+        assert.ok(html.includes('id="download-youtube-search-spinner"') || html.includes('id="youtube-search-spinner"'), 'must have youtube-search-spinner');
         assert.ok(html.includes('Search YouTube songs, artists, albums…'), 'must have specified placeholder');
         assert.ok(html.includes('card neu-glass'), 'must have card neu-glass glassmorphic styling');
         assert.ok(html.includes('data-lucide="search"'), 'must have search icon');
@@ -1912,25 +1912,17 @@ describe('YouTube Search & Streaming Integration', () => {
     });
 });
 
-describe('HTMX #content navigation race (Download Audio bounced back to Home)', () => {
-    // htmx's request queue is keyed per *owning element*, so the initial
-    // `GET /partials/home.html` (owned by <main id="content">) and a nav click
-    // (owned by the <a>/<button>) are not serialized against each other: both
-    // run in parallel and whichever response lands last wins, so a stale home
-    // response can clobber the freshly swapped download page. `hx-sync` puts
-    // every writer of #content on one shared key with the `replace` strategy,
-    // so a new navigation aborts whatever is already in flight. Nothing else
-    // (no transition:true, no hx-boost) may reintroduce the race.
+describe('Vanilla JS Router Navigation Architecture (HTMX Removed)', () => {
+    // Navigation is managed by ViewRouter (ui/js/modules/router.js) instead of HTMX.
+    // Navigation items declare `data-nav="<view>"` and are handled via event delegation.
+    // All legacy HTMX attributes (hx-get, hx-target="#content", hx-sync, hx-boost)
+    // are purged to prevent unexpected asynchronous network-style DOM swaps.
     const uiDir = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../../ui');
 
-    // Blank out comments while preserving newlines so line numbers stay exact.
     function stripComments(html) {
         return html.replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, ' '));
     }
 
-    // Parse per opening tag, honouring quoted attribute values so a `>` inside
-    // style="..." can never split a tag in half. Doctype/comments/closing tags
-    // do not match, so each hit is exactly one element.
     function extractTags(html) {
         const src = stripComments(html);
         const tagRe = /<([a-zA-Z][^\s/>]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
@@ -1951,7 +1943,7 @@ describe('HTMX #content navigation race (Download Audio bounced back to Home)', 
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
             const full = path.join(dir, entry.name);
             if (entry.isDirectory()) {
-                if (entry.name === 'vendor') continue; // third-party assets
+                if (entry.name === 'vendor') continue;
                 out.push(...collectHtml(full));
             } else if (entry.name.endsWith('.html')) {
                 out.push(full);
@@ -1961,70 +1953,49 @@ describe('HTMX #content navigation race (Download Audio bounced back to Home)', 
     }
 
     const htmlFiles = collectHtml(uiDir);
+    const DATA_NAV_RE = /data-nav\s*=\s*["'][a-zA-Z0-9_-]+["']/;
     const TARGET_RE = /hx-target\s*=\s*["']\s*#content\s*["']/;
     const SYNC_RE = /hx-sync\s*=\s*["']\s*#content\s*:\s*replace\s*["']/;
 
-    it('scans the expected navigation markup (guards against a vacuous test)', () => {
+    it('scans the expected navigation markup (verifies data-nav attributes exist)', () => {
         for (const rel of ['index.html', 'partials/nav.html', 'partials/home.html']) {
             const full = path.join(uiDir, rel);
             assert.ok(fs.existsSync(full), `expected ${rel} to exist`);
-            const hits = extractTags(fs.readFileSync(full, 'utf8')).filter((t) => TARGET_RE.test(t.attrs));
-            assert.ok(hits.length > 0, `expected ${rel} to contain at least one hx-target="#content" element`);
+            const hits = extractTags(fs.readFileSync(full, 'utf8')).filter((t) => DATA_NAV_RE.test(t.attrs));
+            assert.ok(hits.length > 0, `expected ${rel} to contain at least one data-nav="..." element`);
         }
     });
 
-    it('every element targeting #content also carries hx-sync="#content:replace"', () => {
+    it('all legacy HTMX navigation attributes (hx-target="#content", hx-sync) are removed', () => {
         const problems = [];
-        let checked = 0;
-
         for (const file of htmlFiles) {
             const rel = path.relative(uiDir, file);
             for (const tag of extractTags(fs.readFileSync(file, 'utf8'))) {
-                if (!TARGET_RE.test(tag.attrs)) continue;
-                checked += 1;
-                if (!SYNC_RE.test(tag.attrs)) {
-                    problems.push(
-                        `${rel}:${tag.line} <${tag.name}> has hx-target="#content" but no ` +
-                        `hx-sync="#content:replace" — without a shared sync key its request runs ` +
-                        `in parallel with the #content initial load and a late response overwrites it`
-                    );
+                if (TARGET_RE.test(tag.attrs)) {
+                    problems.push(`${rel}:${tag.line} <${tag.name}> still carries hx-target="#content"`);
+                }
+                if (SYNC_RE.test(tag.attrs)) {
+                    problems.push(`${rel}:${tag.line} <${tag.name}> still carries hx-sync`);
                 }
             }
         }
-
-        assert.ok(checked > 0, 'the scan found no hx-target="#content" elements at all — the parser is broken');
-        assert.equal(
-            problems.length,
-            0,
-            `every element that swaps #content must declare hx-sync="#content:replace":\n  - ${problems.join('\n  - ')}`
-        );
+        assert.equal(problems.length, 0, `legacy HTMX attributes found:\n  - ${problems.join('\n  - ')}`);
     });
 
-    it('the initial #content load is itself serialized against later navigation', () => {
-        // <main id="content"> has no hx-target (it swaps itself), so it needs the
-        // attribute even though the generic check above cannot see it.
+    it('the initial #content main container is clean and unencumbered by hx-get', () => {
         const rel = 'index.html';
         const tags = extractTags(fs.readFileSync(path.join(uiDir, rel), 'utf8'));
         const main = tags.find((t) => /id\s*=\s*["']\s*content\s*["']/.test(t.attrs));
         assert.ok(main, `${rel} must still contain <main id="content">`);
-        assert.ok(
-            /hx-get\s*=\s*["']\s*\/partials\/home\.html\s*["']/.test(main.attrs),
-            `${rel}:${main.line} the initial load must still fetch /partials/home.html`
-        );
-        assert.ok(
-            SYNC_RE.test(main.attrs),
-            `${rel}:${main.line} <main id="content"> owns the initial request and must declare ` +
-            `hx-sync="#content:replace", otherwise a nav click cannot abort it and the stale home ` +
-            `response overwrites the page the user just opened`
-        );
+        assert.ok(!/hx-get/.test(main.attrs), `${rel}:${main.line} main#content must not have hx-get`);
+        assert.ok(!SYNC_RE.test(main.attrs), `${rel}:${main.line} main#content must not have hx-sync`);
     });
 
-    it('navigation does not reintroduce the race via view transitions or boosting', () => {
+    it('navigation does not reintroduce races via view transitions or boosting', () => {
         const problems = [];
         for (const file of htmlFiles) {
             const rel = path.relative(uiDir, file);
             for (const tag of extractTags(fs.readFileSync(file, 'utf8'))) {
-                if (!TARGET_RE.test(tag.attrs)) continue;
                 if (/(?:^|\s)transition\s*:\s*true/.test(tag.attrs)) {
                     problems.push(`${rel}:${tag.line} <${tag.name}> sets transition:true`);
                 }
@@ -2036,7 +2007,7 @@ describe('HTMX #content navigation race (Download Audio bounced back to Home)', 
         assert.equal(
             problems.length,
             0,
-            `transition:true / hx-boost caused superimposed views previously — keep them off #content:\n  - ${problems.join('\n  - ')}`
+            `transition:true / hx-boost must not be present:\n  - ${problems.join('\n  - ')}`
         );
     });
 });

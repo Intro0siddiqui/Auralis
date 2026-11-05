@@ -317,5 +317,14 @@ export const playerMethods = {
         } catch (err) {
             console.warn('request_notification_permission failed:', err);
         }
+    },
+
+    async openFullScreenPlayer() {
+        if (window.Auralis?.player && typeof window.Auralis.player.openFullScreenPlayer === 'function') {
+            return await window.Auralis.player.openFullScreenPlayer();
+        }
+        if (window.AuralisPlayer && typeof window.AuralisPlayer.openFullScreenPlayer === 'function') {
+            return await window.AuralisPlayer.openFullScreenPlayer();
+        }
     }
 };

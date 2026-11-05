@@ -414,11 +414,15 @@ export const syncMethods = {
 };
 
 if (typeof document !== 'undefined') {
-    document.addEventListener('htmx:beforeSwap', () => {
+    const closeScannerIfLeaving = () => {
         if (isScanning && window.Auralis && window.Auralis.bridge && typeof window.Auralis.bridge.closeQrScanner === 'function') {
             window.Auralis.bridge.closeQrScanner();
         }
-    });
+    };
+    window.addEventListener('view:leave', closeScannerIfLeaving);
+    window.addEventListener('view:enter', closeScannerIfLeaving);
+    document.addEventListener('view:leave', closeScannerIfLeaving);
+    document.addEventListener('view:enter', closeScannerIfLeaving);
 
     // Delegated click handler — immune to CSP inline event handler restrictions
     document.addEventListener('click', (e) => {

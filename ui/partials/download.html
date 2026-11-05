@@ -9,19 +9,19 @@
             <i data-lucide="square-play" style="color: var(--accent); width: 22px; height: 22px;"></i>
             <h3 style="font-size: var(--text-base); font-weight: var(--font-semibold); margin: 0; color: var(--text-1);">Search & Download</h3>
         </div>
-        <form id="youtube-search-form" onsubmit="return false" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
+        <form id="download-youtube-search-form" class="youtube-search-form" onsubmit="return false" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
             <input type="text" name="q" class="input" placeholder="Search YouTube songs, artists, albums…"
                    style="flex: 1; min-width: 200px;" autocomplete="off">
-            <button type="submit" class="btn btn-primary neu" id="youtube-search-btn">
+            <button type="submit" class="btn btn-primary neu youtube-search-btn" id="download-youtube-search-btn">
                 <i data-lucide="search"></i>
                 Search
             </button>
         </form>
-        <div id="youtube-search-spinner" style="display: none; text-align: center; padding: var(--space-6) var(--space-4);">
+        <div id="download-youtube-search-spinner" class="youtube-search-spinner" style="display: none; text-align: center; padding: var(--space-6) var(--space-4);">
             <i data-lucide="loader-2" class="spin" style="width: 28px; height: 28px; color: var(--accent);"></i>
             <p style="margin-top: var(--space-2); color: var(--text-3); font-size: var(--text-sm);">Searching YouTube…</p>
         </div>
-        <div id="youtube-search-results" class="track-list" style="display: none; margin-top: var(--space-3);"></div>
+        <div id="download-youtube-search-results" class="youtube-search-results track-list" style="display: none; margin-top: var(--space-3);"></div>
     </div>
 
     <!-- Paste URL -->

@@ -748,12 +748,16 @@ export const downloadMethods = {
             e.preventDefault();
             e.stopPropagation();
         }
-        searchForm = searchForm || document.getElementById('youtube-search-form');
+        searchForm = searchForm
+            || (e && e.detail && e.detail.form)
+            || (document.querySelector('.view-pane.active') ? document.querySelector('.view-pane.active').querySelector('.youtube-search-form') : null)
+            || document.getElementById('youtube-search-form')
+            || document.getElementById('download-youtube-search-form');
         if (!searchForm) return;
         const q = searchForm.querySelector('input[name="q"]');
         if (!q || !q.value.trim()) return;
         const form = document.getElementById('download-form');
-        await this.performYouTubeSearch(q.value.trim(), this.getDownloadOptions(form || searchForm));
+        await this.performYouTubeSearch(q.value.trim(), this.getDownloadOptions(form || searchForm), searchForm);
     },
 
     _stopStreamAudio() {
@@ -801,14 +805,17 @@ export const downloadMethods = {
         await this.ensureSettings();
     },
 
-    async performYouTubeSearch(query, opts) {
+    async performYouTubeSearch(query, opts, formEl) {
         if (!window.AuralisYouTube) {
             this.showToast('YouTube resolver unavailable', 'error');
             return;
         }
-        const resultsEl = document.getElementById('youtube-search-results');
-        const spinnerEl = document.getElementById('youtube-search-spinner');
-        const searchBtn = document.getElementById('youtube-search-btn');
+        const scope = (formEl && formEl.closest && formEl.closest('.view-pane, .page-downloads, .page-search'))
+            || document.querySelector('.view-pane.active')
+            || document;
+        const resultsEl = scope.querySelector('.youtube-search-results') || document.getElementById('youtube-search-results') || document.getElementById('download-youtube-search-results');
+        const spinnerEl = scope.querySelector('.youtube-search-spinner') || document.getElementById('youtube-search-spinner') || document.getElementById('download-youtube-search-spinner');
+        const searchBtn = scope.querySelector('.youtube-search-btn') || document.getElementById('youtube-search-btn') || document.getElementById('download-youtube-search-btn');
         if (!resultsEl) return;
 
         this.showToast('Searching YouTube…', 'info');
@@ -955,12 +962,12 @@ export const downloadMethods = {
         if (window.__auralisStreamRequestId !== currentReqId) return;
 
         // Reset all play icons across search results
-        document.querySelectorAll('#youtube-search-results .play-yt-btn').forEach(btn => {
+        document.querySelectorAll('.youtube-search-results .play-yt-btn, #youtube-search-results .play-yt-btn').forEach(btn => {
             btn.innerHTML = '<i data-lucide="play"></i>';
         });
 
         // Set spinner on the selected row
-        const row = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"]`);
+        const row = document.querySelector(`.youtube-search-results .track-row[data-search-index="${index}"], #youtube-search-results .track-row[data-search-index="${index}"]`);
         const playBtn = row ? row.querySelector('.play-yt-btn') : null;
         if (playBtn) {
             playBtn.innerHTML = '<i data-lucide="loader-2" class="spin"></i>';
@@ -1169,10 +1176,10 @@ export const downloadMethods = {
                 return;
             }
 
-            document.querySelectorAll('#youtube-search-results .play-yt-btn').forEach(btn => {
+            document.querySelectorAll('.youtube-search-results .play-yt-btn, #youtube-search-results .play-yt-btn').forEach(btn => {
                 btn.innerHTML = '<i data-lucide="play"></i>';
             });
-            const activeBtn = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
+            const activeBtn = document.querySelector(`.youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn, #youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
             if (activeBtn) {
                 activeBtn.innerHTML = '<i data-lucide="pause"></i>';
                 if (window.lucide) window.lucide.createIcons();
@@ -1186,7 +1193,7 @@ export const downloadMethods = {
             const m = err && err.message ? err.message : String(err);
             console.error('DIAGNOSTIC streamYouTubeSearchResult failed', { item, error: m, stack: err && err.stack });
             this.showToast(`Stream failed: ${m}`, 'error', 6000);
-            const activeBtn = document.querySelector(`#youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
+            const activeBtn = document.querySelector(`.youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn, #youtube-search-results .track-row[data-search-index="${index}"] .play-yt-btn`);
             if (activeBtn) {
                 activeBtn.innerHTML = '<i data-lucide="play"></i>';
                 if (window.lucide) window.lucide.createIcons();
@@ -1202,8 +1209,8 @@ export const downloadMethods = {
         const results = this._lastSearchResults || window.__auralisLastSearchResults || window.Auralis?.bridge?._lastSearchResults || [];
         let item = (typeof index === 'number' && !isNaN(index) && results[index]) ? results[index] : fallbackItem;
 
-        const rows = document.querySelectorAll('#youtube-search-results .track-row');
-        const row = (typeof index === 'number' && !isNaN(index)) ? rows[index] : (item?.id ? document.querySelector(`#youtube-search-results [data-video-id="${item.id}"]`) : null);
+        const rows = document.querySelectorAll('.youtube-search-results .track-row, #youtube-search-results .track-row');
+        const row = (typeof index === 'number' && !isNaN(index)) ? rows[index] : (item?.id ? document.querySelector(`.youtube-search-results [data-video-id="${item.id}"], #youtube-search-results [data-video-id="${item.id}"]`) : null);
         const dlBtn = row ? row.querySelector('.download-yt-btn') : null;
 
         if (!item && dlBtn) {

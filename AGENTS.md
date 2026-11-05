@@ -61,6 +61,19 @@ Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses
     - **Window Focus Lifecycle (`onWindowFocusChanged`)**: On Android 14/15 (Realme UI / ColorOS), permission requests dispatched in `onCreate()` before layout stabilization are silently dropped if the window does not yet have focus (`hasWindowFocus() == false`). Implemented `hasPromptedPermissions` in `onWindowFocusChanged` ensuring permission dialogs (`READ_MEDIA_AUDIO`, `POST_NOTIFICATIONS`) appear reliably once the app window is focused.
     - **Scanner Picker Decoupling**: Decoupled "Scan Storage" from the SAF document picker. Previously, `triggerFolderScan()` in `android.js` executed `scanLibrary()` and immediately called `folderInput.click() / triggerAudioImport()`, violently ejecting the user into Android's `PickActivity`. "Scan Storage" now purely runs MediaStore scanning, while "Import Audio" handles manual document picking.
     - **Proactive Permission Guard**: Added proactive `request_notification_permission` invocation inside `androidStorageAdapter.scanLibrary()` prior to invoking Rust's `scan_library_paths`, guaranteeing that MediaStore queries never execute silently with denied permissions. Verified all 410 tracks indexed and playable on physical phone.
+25. **Vanilla JS ViewRouter Migration: 100% HTMX Purge, 0ms View Panes & Android Back History (v2.7.7)**:
+    - **HTMX Fully Deprecated & Purged**: Removed `ui/vendor/htmx.min.js`, eliminated the brittle 300-line `nav_guard.js` generation counter, and permanently purged all `hx-*` attributes (`hx-get`, `hx-target`, `hx-swap`, `hx-sync`, `hx-boost`).
+    - **Zero-Dependency `ViewRouter` (`router.js`)**: Implemented persistent view-pane caching (`<div class="view-pane" id="view-${name}">`). Inactive views are hidden (`display: none`) while active views are rendered instantly with 0ms latency.
+    - **Preserved Scroll & Form State**: Switching views records and restores exact `scrollTop` and maintains form values, eliminating the frustrating scroll-to-top resets previously caused by HTMX DOM string replacements.
+    - **Native Android Back Button & History**: Integrated `window.history.pushState` with `popstate` and hardware back button listeners, enabling natural navigation backward through previously viewed panes without exiting the app.
+    - **Unified Event Delegation & Modal Management**: Bound a single top-level click listener handling `[data-nav]` and `[data-nav-modal]`, seamlessly wiring full-screen player and modal transitions without `MutationObserver` overhead. Verified 100% pass across all 232 Rust tests and 232 Node.js tests.
+26. **Automated Live UI/UX Audit & Design Hardening (v2.7.7)**:
+    - **Live WebView Auditor**: Implemented `scripts/ui_ux_auditor.js` and `dev_agent_server.js` connecting directly into the running WebView without interacting with the host Wayland window manager.
+    - **WCAG Light Theme Contrast**: Boosted light-theme `--accent` to `#0284c7` (Sky-600) and `--accent-hover` to `#0369a1` in `tokens.css`, fixing the 1.24:1 contrast failure and exceeding the 4.5:1 WCAG AA standard.
+    - **Light Theme Modal & Overlay Visibility**: Added light theme glass backgrounds for context menus (`rgba(255, 255, 255, 0.95)`), modal backdrops (`rgba(15, 23, 42, 0.42)`), and fullscreen player queues (`rgba(240, 244, 248, 0.96)`), eliminating dark-on-dark unreadability.
+    - **Mobile Queue Drawer & Safe-Area Insets**: Set mobile `#queue-panel` to full screen width with `z-index: var(--z-modal)` and added resilient `0px` safe-area fallbacks to all `calc(... env(safe-area-...))` rules in `responsive.css`.
+    - **Touch & Slider Ergonomics**: Added `@media (hover: none), (max-width: 1023px)` rule to keep track action buttons permanently visible on touch tablets, enhanced mini-player volume slider with PointerEvents and pointer capture, and enlarged Settings volume range target to `min-height: 36px`.
+    - **YouTube Search Empty State Symmetry**: Added symmetrical empty state to `#youtube-search-results`, eliminating the empty void when switching to YouTube search tab.
 
 ---
 
@@ -88,36 +101,36 @@ src/
 
 ### Frontend (Soft Glass Audio)
 
-The frontend lives in `ui/` and uses **HTMX 1.9** for SPA-like navigation (bundled locally, no CDN at runtime):
+The frontend lives in `ui/` and uses **Modern Vanilla JS (ES Modules)** with a zero-dependency **ViewRouter** (`ui/js/modules/router.js`):
 
 ```
 ui/
 ├── index.html          # App shell (sidebar + content + player bar + mobile nav)
 ├── styles/
 │   ├── tokens.css      # Design variables (--glass-*, --neu-*, --blur-*, --radius-*)
-│   ├── base.css        # CSS reset + app-shell grid layout
+│   ├── base.css        # CSS reset + app-shell grid layout + .view-pane states
 │   ├── components.css  # .glass, .glass-weak, .glass-strong, .neu, .neu-inset, .neu-glass, .card, .track-row
 │   └── responsive.css  # Mobile/tablet/desktop breakpoints + safe-area insets (notches/bars)
 ├── js/
-│   ├── bridge.js       # Module entry — composes js/modules/* onto Bridge.prototype, exposes window.Auralis.bridge
-│   ├── modules/        # ES modules: core, library, views, scan-ui, player, downloads, sync, ui (bridge methods) — views delegates `data-role="play-card"/"play-row"` `click+touchend` + `touch-action:manipulation`; player does `set_queue(track_ids,current_id)` before `play` + `hydrateState` + `#content`-scoped `_syncPlayerBar`
-│   ├── player.js       # PlayerController: progress bar, seeking, MediaSession API, hardware keys, keyboard shortcuts — `play()` is async: `currentTrack? resume : get_queue → playTrack : get_tracks limit1 → playTrack` (v2.5.10 fresh-start fix); `next()/previous()` async library fallback `get_tracks limit200` `(idx+1)%len` (v2.5.12 queue fix); `wireFullScreenElements` re-wires + `hydrateState` on `MutationObserver`/`htmx:afterSwap`/player-bar click (v2.5.12 modal hydration)
-│   └── youtube.js      # YouTubeResolver: vendored youtubei.js wrapper (getInfo/search/getPlaylist → resolved objects) — PO-token mint for all clients before `actions.execute`, unconditional `&pot=`, `UA/Referer/Origin` per `winningClient`, SABR legacy `formats[18]` fallback, `effectiveOrderedClients` + `retryClients` for 403 rotation
-├── vendor/             # Locally bundled third-party assets (htmx, lucide, youtubei.js esm + node shims)
+│   ├── bridge.js       # Module entry — composes js/modules/* onto Bridge.prototype, exposes window.Auralis.bridge & window.Auralis.router
+│   ├── modules/        # ES modules: router, core, library, views, scan-ui, player, downloads, sync, ui (bridge methods)
+│   ├── player.js       # PlayerController: progress bar, seeking, MediaSession API, hardware keys, keyboard shortcuts
+│   └── youtube.js      # YouTubeResolver: vendored youtubei.js wrapper (getInfo/search/getPlaylist → resolved objects)
+├── vendor/             # Locally bundled third-party assets (lucide, youtubei.js esm + node shims)
 
 **Playback events**: Rust emits `playback:state_changed` / `playback:track_changed` / `playback:queue_updated` / `playback:progress`; `js/modules/core.js` re-emits them to the frontend as `playback:state` / `playback:track` / `playback:queue` / `playback:progress`. The progress bar is **event-driven** (no fake timer) — `PlayerController` snaps optimistically on seek and is corrected by the 250ms progress events.
-├── partials/           # HTMX fragments served by the Rust backend
+├── partials/           # HTML view partials served by the Rust backend
 │   ├── nav.html, home.html, library.html, albums.html
 │   ├── artists.html, playlists.html, player-full.html
 │   ├── download.html, search.html, sync.html, settings.html
-└── icons/              # auralis.svg
+└── icons/              # auralis.png
 ```
 
 **Design language**: Glassmorphism (`.glass`, `.glass-weak`, `.glass-strong` with `backdrop-filter: blur()`) + Neumorphism (`.neu`, `.neu-inset`, `.neu-glass` with dual box-shadows).
 
-**How navigation works**: `index.html` loads `#content` via `hx-get="/partials/home"` on page load. Sidebar links use `hx-get="/partials/<view>" hx-target="#content" hx-swap="innerHTML"` (no `transition:true` — `document.startViewTransition` races caused superimposed `Download + Settings` `00:18` + spontaneous `Welcome` jumps `00:13`, removed v2.5.16 `nav.html:9-44` + `home.html` + `views.js:199`). Active pane is tracked by `views.js activeView` + `#content`-scoped guard `content.querySelector('.page-downloads, .page-settings, …')` (v2.5.16 strict → v2.5.17 precise: allows initial empty `#content` but aborts when `#content` already shows a different page, fixes `Download→Home` redirect) / Download form `preventDefault` + `htmx:restored/pageshow` rebind (v2.5.18).
+**How navigation works**: `index.html` loads `#content` via `router.init()`. Navigation links and buttons declare `data-nav="<view>"`. A delegated document click listener routes clicks through `router.navigate(viewName)`, toggling persistent `.view-pane` containers with 0ms delay, preserving scroll positions and form state. History pushes and popstate events map directly to Android hardware back button navigation. Modals are triggered via `[data-nav-modal]` or `openFullScreenPlayer()`.
 
-**The Rust backend serves these partials** via `commands/templates.rs` → `render_template(name)` which reads `ui/partials/{name}.html` and returns it as-is.
+**The Rust backend serves these partials** via `commands/templates.rs` → `render_template(name)` which reads `ui/partials/{name}.html` and returns it as-is (with fallback to client-side fetch).
 
 ### Key Conventions
 
