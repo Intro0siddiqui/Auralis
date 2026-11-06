@@ -45,8 +45,8 @@ function _wirePlayer() {
 }
 
 function _initApp() {
-    router.init();
     window.Auralis.bridge.init();
+    router.init();
     _wirePlayer();
     // Retry shortly for case where player.js loaded after this module
     setTimeout(_wirePlayer, 300);

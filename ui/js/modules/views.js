@@ -119,7 +119,13 @@ export const viewMethods = {
 
     async loadHomeView(force = false) {
         this.activeView = 'home';
-        const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
+        let container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
+        if (!container && window.Auralis?.router?.getOrCreateViewPane) {
+            try {
+                await window.Auralis.router.getOrCreateViewPane('home');
+            } catch (_) {}
+            container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
+        }
         const isPopulated = Boolean(container && container.children.length > 0 && container.dataset.populated === 'true');
 
         // Fast path: if home is already populated and not dirty or forced, reuse DOM instantly (0ms)
@@ -140,7 +146,13 @@ export const viewMethods = {
             try {
                 const html = await this.invoke('get_home_shelves_html');
                 if (this.activeView !== 'home') return;
-                const targetContainer = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
+                let targetContainer = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
+                if (!targetContainer && window.Auralis?.router?.getOrCreateViewPane) {
+                    try {
+                        await window.Auralis.router.getOrCreateViewPane('home');
+                    } catch (_) {}
+                    targetContainer = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
+                }
 
                 if (targetContainer && html) {
                     targetContainer.innerHTML = html;

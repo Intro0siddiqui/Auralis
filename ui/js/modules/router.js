@@ -157,11 +157,19 @@ export class ViewRouter {
         this.syncNavLinks(initialView);
         this._initialEntered = true;
 
-        // If initial view pane was already discovered in DOM, display it
+        // If initial view pane was already discovered in DOM, display it.
+        // Otherwise (cold boot on empty container), mount initial view pane.
         if (this.panes.has(initialView)) {
             const pane = this.panes.get(initialView);
             pane.style.display = '';
             pane.classList.add('active');
+        } else if (this.contentContainer) {
+            this.getOrCreateViewPane(initialView).then(pane => {
+                if (pane && this.currentView === initialView) {
+                    pane.style.display = '';
+                    pane.classList.add('active');
+                }
+            }).catch(() => {});
         }
 
         // Emit initial view:enter hook
