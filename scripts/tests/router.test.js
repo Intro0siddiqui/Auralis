@@ -525,6 +525,41 @@ describe('ViewRouter Unit Tests', () => {
                 assert.equal(p3.style.display, '');
             });
         });
+
+        it('eliminates out-of-order race conditions when fast switching between views', async () => {
+            await withRouterHarness(async ({ router, contentEl, navItem1, navItem2 }) => {
+                await router.init(contentEl);
+
+                // Register a slow view (takes 40ms) and a fast view (takes 5ms)
+                router.registerView('sync', async () => {
+                    await new Promise(r => setTimeout(r, 40));
+                    return '<div class="page-sync">Syncing Device</div>';
+                });
+                router.registerView('library', async () => {
+                    await new Promise(r => setTimeout(r, 5));
+                    return '<div class="page-library">Library Songs</div>';
+                });
+
+                // Simulate rapid switching: tap sync, then immediately tap library
+                const pSync = router.navigate('sync');
+                const pLibrary = router.navigate('library');
+
+                await Promise.all([pSync, pLibrary]);
+
+                const syncPane = contentEl.querySelector('#view-sync');
+                const libPane = contentEl.querySelector('#view-library');
+
+                assert.equal(router.currentView, 'library', 'currentView must be the latest navigated target (library)');
+                assert.ok(libPane, 'library pane must exist');
+                assert.equal(libPane.style.display, '', 'library pane must be visible');
+                assert.ok(libPane.classList.contains('active'), 'library pane must have active class');
+
+                if (syncPane) {
+                    assert.equal(syncPane.style.display, 'none', 'stale sync pane must be hidden');
+                    assert.ok(!syncPane.classList.contains('active'), 'stale sync pane must not be active');
+                }
+            });
+        });
     });
 
     describe('Scroll Position Preservation', () => {

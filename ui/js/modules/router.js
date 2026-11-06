@@ -22,6 +22,7 @@ export class ViewRouter {
         this._historyBound = false;
         this._delegationBound = false;
         this._initialEntered = false;
+        this._navId = 0;
     }
 
     /**
@@ -373,15 +374,41 @@ export class ViewRouter {
         }
 
         const targetView = this.normalizeViewName(viewName);
-        const previousView = this.currentView;
+        const navId = ++this._navId;
 
         // If navigating to already active view with existing displayed pane and not initial entrance
         if (targetView === this.currentView && this.panes.has(targetView) && !this._initialEntered) {
             const activePane = this.panes.get(targetView);
-            if (activePane && activePane.classList.contains('active')) {
+            if (activePane && activePane.classList.contains('active') && activePane.style.display !== 'none') {
+                this.syncNavLinks(targetView);
                 return true;
             }
         }
+
+        // Update active classes on desktop sidebar and mobile navigation immediately for responsive tap feedback
+        this.syncNavLinks(targetView);
+
+        // Resolve or create target view pane (may involve async template fetch or custom loader)
+        let targetPane = null;
+        try {
+            targetPane = await this.getOrCreateViewPane(targetView, params);
+        } catch (err) {
+            console.error(`[ViewRouter] Failed to navigate to '${targetView}':`, err);
+            // If this navigation was not superseded, restore nav links to current view
+            if (navId === this._navId && this.currentView) {
+                this.syncNavLinks(this.currentView);
+            }
+            return false;
+        }
+
+        // Drop stale navigation if superseded by a newer tap while awaiting pane resolution
+        if (navId !== this._navId) {
+            return false;
+        }
+
+        const previousView = this.currentView;
+        const wasInitial = (targetView === this.currentView && this._initialEntered);
+        this._initialEntered = false;
 
         // If leaving a view, record its scroll position and emit view:leave
         if (previousView && previousView !== targetView) {
@@ -396,23 +423,13 @@ export class ViewRouter {
             }
         }
 
-        const wasInitial = (targetView === this.currentView && this._initialEntered);
-        this._initialEntered = false;
+        // Re-check token after emitting view:leave in case a listener triggered navigation
+        if (navId !== this._navId) {
+            return false;
+        }
 
         this.previousView = previousView;
         this.currentView = targetView;
-
-        // Update active classes on desktop sidebar and mobile navigation immediately
-        this.syncNavLinks(targetView);
-
-        // Resolve or create target view pane
-        let targetPane = null;
-        try {
-            targetPane = await this.getOrCreateViewPane(targetView, params);
-        } catch (err) {
-            console.error(`[ViewRouter] Failed to navigate to '${targetView}':`, err);
-            return false;
-        }
 
         // Ensure all other view panes in contentContainer are hidden
         if (this.contentContainer) {
@@ -437,6 +454,9 @@ export class ViewRouter {
                 }
             }
         }
+
+        // Guarantee nav links match the final committed view
+        this.syncNavLinks(targetView);
 
         // Update bridge state & sync player bar with Rust playback state without wiping view DOM
         if (typeof window !== 'undefined' && window.Auralis && window.Auralis.bridge) {
