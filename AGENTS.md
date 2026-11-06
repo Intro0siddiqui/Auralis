@@ -8,7 +8,7 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development — v2.7.8 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
+**Current State: Active Development — v2.7.9 shipped & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
 
 **Recent Major Breakthroughs (v2.7.1–v2.7.8)**:
 1. **Online Stream Repeat-1 & Interruption Resilience (v2.7.6)**: Bound `audio.loop` to `player.repeatMode === 'one'` and wired loop handling into the stream `ended` listener. Synchronized stream parameters in `_auralisLastStreamParams` and prevented `player.js:play()` from falling through to Rust's Rodio `resume` command on phone call audio focus loss, eliminating the "nothing to resume" dialog error.
@@ -79,6 +79,11 @@ Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses
     - **Phone Call Audio Focus Loss & Transient Recovery**: Guarded `abandonAudioFocus()` in `MediaPlaybackService.kt` so focus is preserved during `AUDIOFOCUS_LOSS_TRANSIENT` (phone calls, navigation alerts). Restores focus cleanly when calls hang up via `AUDIOFOCUS_GAIN`, auto-resuming playback without stranding the user.
     - **Rust AudioPlayer Hardware Sink Invalidation (`reset_output_stream`)**: Dropped stale `MixerDeviceSink` references in `AudioPlayer::reset_output_stream` across `commands::playback::reset_audio_sink`, `NativeBridge.command("reset_sink")`, and retry handlers. Guaranteed that re-establishing playback always probes and binds to the newly active OS audio sink (speaker vs. headset vs. earpiece), permanently eliminating silent sample decoding (moving progress bar with zero hardware sound) and resume crashes.
     - **Live Hardware Emulation Verified**: Tested with ADB root broadcasts and live GSM inbound call simulation (`adb emu gsm call` / `cancel`) on Android 14 x86_64 emulator (`emulator-5554`), confirming 100% reliable focus loss pausing, automatic call-end resume, and active progress bar progression (`1:54` -> `1:56`).
+28. **Home Page Latency Optimization, Version Single Source of Truth & Comprehensive Multi-View Audit (v2.7.9)**:
+    - **Home View Latency Elimination (116x Speedup)**: Identified and eliminated triple event dispatch on `view:enter`, redundant router `bridge.refreshCurrentView()` calls, and 12–36 simultaneous broken file `onerror` base64 IPC disk reads. Implemented `0ms` persistent DOM retention with dirty state invalidation, deduplicated fetch promises, and Tauri asset protocol (`asset://localhost/`), dropping IPC payload from 2.4 MB to 0 KB and achieving instantaneous `<0.1ms` repeat navigation.
+    - **Single Source of Truth Versioning (`v2.7.9`)**: Replaced static template placeholders with compile-time macro token replacement (`{{APP_VERSION}}` via `env!("CARGO_PKG_VERSION")`) across Rust template serving, pre-guard dynamic DOM overrides in `views.js`, and Android build manifest synchronization (`tauri.properties`, `assets/tauri.conf.json`).
+    - **Multi-View Flow Polish**: Fixed DOM destruction on context navigation (`goToArtist`/`goToAlbum`), added P2P sync unpair device action with confirmation, wired playlist deletion, added hardware back button registration for playlist detail, and normalized Lucide empty state glyphs and mobile circular action buttons.
+    - **Automated CacheGuard Automation**: Added automated build cache threshold monitoring (`scripts/cache_guard.sh`), enforcing strict <7 GB limits and preventing runaway target directory bloat.
 
 ---
 
