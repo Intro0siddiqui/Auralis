@@ -83,10 +83,13 @@ export const syncMethods = {
                                     <div style="font-size: var(--text-xs); color: var(--text-3); font-family: monospace;">${d.peer_id ? (d.peer_id.slice(0, 16) + '...') : (d.ip_address || 'P2P Peer')} · Status: ${d.status || 'paired'}</div>
                                 </div>
                             </div>
-                            <div style="display: flex; gap: var(--space-2);">
-                                <button class="btn btn-primary btn-sm neu" onclick="window.Auralis.bridge.syncWithDevice('${d.id}')">
+                            <div style="display: flex; gap: var(--space-2); align-items: center;">
+                                <button type="button" class="btn btn-primary btn-sm neu" onclick="window.Auralis.bridge.syncWithDevice('${d.id}')">
                                     <i data-lucide="refresh-cw"></i>
                                     Sync
+                                </button>
+                                <button type="button" class="btn btn-ghost btn-icon btn-sm" title="Unpair Device" data-action="unpair-device" data-device-id="${d.id}" style="color: var(--danger, #ef4444); width: 32px; height: 32px;">
+                                    <i data-lucide="trash-2"></i>
                                 </button>
                             </div>
                         </div>
@@ -410,6 +413,18 @@ export const syncMethods = {
         } catch (err) {
             this.showToast(`Sync failed: ${err}`, 'error');
         }
+    },
+
+    async unpairDevice(deviceId) {
+        if (!deviceId) return;
+        if (!confirm('Are you sure you want to unpair this device?')) return;
+        try {
+            await this.invoke('unpair_device', { id: deviceId });
+            this.showToast('Device unpaired', 'info');
+            this.loadSyncView();
+        } catch (err) {
+            this.showToast(`Failed to unpair device: ${err}`, 'error');
+        }
     }
 };
 
@@ -462,6 +477,11 @@ if (typeof document !== 'undefined') {
             e.preventDefault();
             e.stopPropagation();
             bridge.syncNow();
+        } else if (action === 'unpair-device') {
+            e.preventDefault();
+            e.stopPropagation();
+            const devId = actionEl.getAttribute('data-device-id');
+            if (devId) bridge.unpairDevice(devId);
         }
     });
 }

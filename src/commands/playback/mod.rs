@@ -817,26 +817,22 @@ pub async fn resume(app: AppHandle, player: State<'_, AudioPlayer>) -> Result<()
         ResumeStrategy::FreshSinkReplay => {
             replay_on_fresh_sink(&player, track.as_ref(), pos_before, &mut report).await
         }
-        ResumeStrategy::AlreadyPlaying => {
-            player.resume().await.map_err(|e| e.to_string())
-        }
-        ResumeStrategy::Unpause => {
-            match player.resume().await {
-                Ok(()) => Ok(()),
-                Err(unpause_err) => {
-                    if let Some(t) = track.as_ref() {
-                        info!(
-                            unpause_error = %unpause_err,
-                            track = %t.title,
-                            "Sink unpause failed; falling back to replay on fresh sink"
-                        );
-                        replay_on_fresh_sink(&player, Some(t), pos_before, &mut report).await
-                    } else {
-                        Err(unpause_err.to_string())
-                    }
+        ResumeStrategy::AlreadyPlaying => player.resume().await.map_err(|e| e.to_string()),
+        ResumeStrategy::Unpause => match player.resume().await {
+            Ok(()) => Ok(()),
+            Err(unpause_err) => {
+                if let Some(t) = track.as_ref() {
+                    info!(
+                        unpause_error = %unpause_err,
+                        track = %t.title,
+                        "Sink unpause failed; falling back to replay on fresh sink"
+                    );
+                    replay_on_fresh_sink(&player, Some(t), pos_before, &mut report).await
+                } else {
+                    Err(unpause_err.to_string())
                 }
             }
-        }
+        },
     };
 
     match outcome {

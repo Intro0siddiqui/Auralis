@@ -438,24 +438,13 @@ export class ViewRouter {
             }
         }
 
-        // Update bridge state & trigger view lifecycle refresh (only on fresh mounts or explicit refresh)
+        // Update bridge state & sync player bar with Rust playback state without wiping view DOM
         if (typeof window !== 'undefined' && window.Auralis && window.Auralis.bridge) {
             window.Auralis.bridge.activeView = (targetView === 'download' ? 'downloads' : targetView);
-            // Re-sync player bar with Rust playback state without wiping view DOM
             if (typeof window.Auralis.bridge._syncPlayerBar === 'function') {
                 try {
                     window.Auralis.bridge._syncPlayerBar();
                 } catch (_) {}
-            }
-            // Only trigger dynamic view data refresh if freshly mounted or explicitly requested
-            const needsInitialLoad = !targetPane || !targetPane.dataset.populated || params.refresh;
-            if (needsInitialLoad && typeof window.Auralis.bridge.refreshCurrentView === 'function') {
-                try {
-                    if (targetPane) targetPane.dataset.populated = 'true';
-                    window.Auralis.bridge.refreshCurrentView();
-                } catch (e) {
-                    console.warn('[ViewRouter] Bridge refreshCurrentView error:', e);
-                }
             }
         }
 
@@ -489,7 +478,7 @@ export class ViewRouter {
         const target = this.normalizeViewName(viewName);
         const alt = (target === 'downloads') ? 'download' : (target === 'download' ? 'downloads' : null);
 
-        const links = document.querySelectorAll('.nav-item, .mobile-nav-item');
+        const links = document.querySelectorAll('.nav-item, .mobile-nav-item, .library-subnav [data-nav]');
         for (const item of links) {
             const navTarget = item.dataset?.nav
                 || item.getAttribute('data-nav')
@@ -499,7 +488,12 @@ export class ViewRouter {
             if (navTarget) {
                 const normNav = this.normalizeViewName(navTarget);
                 const isActive = Boolean(normNav === target || (alt && normNav === alt));
-                item.classList.toggle('active', isActive);
+                if (item.classList.contains('btn')) {
+                    item.classList.toggle('btn-primary', isActive);
+                    item.classList.toggle('btn-secondary', !isActive);
+                } else {
+                    item.classList.toggle('active', isActive);
+                }
             }
         }
     }
@@ -543,6 +537,21 @@ export class ViewRouter {
             console.error(`[ViewRouter] Failed to open modal '${modalName}':`, err);
             return false;
         }
+    }
+
+    /**
+     * Close modal dialog or overlay partial in #overlay-root.
+     * @param {string} [modalName]
+     * @returns {boolean}
+     */
+    closeModal(modalName = 'player-full') {
+        if (typeof document === 'undefined') return false;
+        const overlayRoot = document.getElementById('overlay-root');
+        if (overlayRoot) {
+            overlayRoot.innerHTML = '';
+        }
+        this.emit('modal:close', modalName);
+        return true;
     }
 
     /**
@@ -623,6 +632,10 @@ export class ViewRouter {
             }
             const queueDrawer = document.getElementById('player-full-queue-drawer');
             if (queueDrawer && queueDrawer.classList.contains('open')) {
+                return;
+            }
+            const playlistDetail = document.getElementById('playlist-detail');
+            if (playlistDetail && playlistDetail.style.display !== 'none' && playlistDetail.children.length > 0) {
                 return;
             }
 

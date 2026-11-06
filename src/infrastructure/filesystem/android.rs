@@ -528,7 +528,8 @@ impl AndroidScanner {
 
             // Skip public mirror downloads in Download/Auralis to prevent duplicate entries
             let path_norm = path_str.replace('\\', "/");
-            if path_norm.contains("/Download/Auralis/") || path_norm.contains("/Downloads/Auralis/") {
+            if path_norm.contains("/Download/Auralis/") || path_norm.contains("/Downloads/Auralis/")
+            {
                 debug!(path = %path_str, "Skipping public MediaStore Auralis download mirror to prevent duplicates");
                 continue;
             }
@@ -727,7 +728,9 @@ impl AndroidScanner {
                     ids_to_remove.push(track.id);
                     continue;
                 }
-                if !track.file_path.starts_with("sync://") && !track.file_path.starts_with("stream://") {
+                if !track.file_path.starts_with("sync://")
+                    && !track.file_path.starts_with("stream://")
+                {
                     let pb = PathBuf::from(&track.file_path);
                     if !pb.exists() {
                         info!(

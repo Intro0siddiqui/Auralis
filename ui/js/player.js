@@ -421,8 +421,12 @@ class PlayerController {
         if (fullClose) {
             fullClose.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const overlay = document.getElementById('overlay-root');
-                if (overlay) overlay.innerHTML = '';
+                if (window.Auralis?.router?.closeModal) {
+                    window.Auralis.router.closeModal('player-full');
+                } else {
+                    const overlay = document.getElementById('overlay-root');
+                    if (overlay) overlay.innerHTML = '';
+                }
             });
         }
     }

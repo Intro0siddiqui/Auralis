@@ -29,13 +29,39 @@ fn test_html_escape_hardening() {
 }
 
 #[test]
+fn test_to_asset_url() {
+    assert_eq!(to_asset_url(""), "");
+    assert_eq!(
+        to_asset_url("https://example.com/art.jpg"),
+        "https://example.com/art.jpg"
+    );
+    assert_eq!(
+        to_asset_url("data:image/jpeg;base64,abc"),
+        "data:image/jpeg;base64,abc"
+    );
+    #[cfg(any(target_os = "windows", target_os = "android"))]
+    assert_eq!(
+        to_asset_url("/path/to/art.jpg"),
+        "http://asset.localhost/%2Fpath%2Fto%2Fart.jpg"
+    );
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    assert_eq!(
+        to_asset_url("/path/to/art.jpg"),
+        "asset://localhost/%2Fpath%2Fto%2Fart.jpg"
+    );
+}
+
+#[test]
 fn test_render_art_tag() {
     let empty_tag = render_art_tag(None, "Album", "disc-3");
     assert_eq!(empty_tag, r#"<i data-lucide="disc-3"></i>"#);
 
     let img_tag = render_art_tag(Some("/path/to/art.jpg"), "My Album", "disc-3");
-    assert!(img_tag.contains(r#"src="&#x2F;path&#x2F;to&#x2F;art.jpg""#));
+    let expected_asset = html_escape(&to_asset_url("/path/to/art.jpg"));
+    assert!(img_tag.contains(&format!(r#"src="{expected_asset}""#)));
     assert!(img_tag.contains(r#"alt="My Album""#));
+    assert!(img_tag.contains(r#"data-art-path="&#x2F;path&#x2F;to&#x2F;art.jpg""#));
+    assert!(img_tag.contains("loading=\"lazy\""));
     assert!(img_tag.contains("embedArt"));
 }
 

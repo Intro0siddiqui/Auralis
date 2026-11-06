@@ -271,6 +271,7 @@ export const playerMethods = {
 
         try {
             await this.invoke('set_track_favorite', { id: trackId, favorite: nextFav });
+            this._homeDirty = true;
             this.showToast(nextFav ? 'Added to Liked Songs' : 'Removed from Liked Songs', 'info');
         } catch (err) {
             console.error('Failed to update track favorite:', err);

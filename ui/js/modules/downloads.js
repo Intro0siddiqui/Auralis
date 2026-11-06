@@ -1257,7 +1257,9 @@ export const downloadMethods = {
             if (result) {
                 this.showToast(`Download queued: “${resolved.title || item.title}”`, 'success');
                 if (dlBtn) {
-                    dlBtn.innerHTML = '<i data-lucide="check"></i> Added';
+                    dlBtn.innerHTML = '<i data-lucide="check"></i>';
+                    dlBtn.setAttribute('title', 'Added to Downloads');
+                    dlBtn.setAttribute('aria-label', 'Added to Downloads');
                     dlBtn.classList.remove('btn-primary');
                     dlBtn.classList.add('btn-secondary');
                     dlBtn.disabled = true;
@@ -1266,7 +1268,8 @@ export const downloadMethods = {
             } else {
                 if (dlBtn) {
                     dlBtn.disabled = false;
-                    dlBtn.innerHTML = '<i data-lucide="download"></i> Download';
+                    dlBtn.innerHTML = '<i data-lucide="download"></i>';
+                    dlBtn.setAttribute('title', 'Download');
                     if (window.lucide) window.lucide.createIcons();
                 }
             }
@@ -1276,7 +1279,8 @@ export const downloadMethods = {
             this.showToast(`Download failed: ${m}`, 'error', 6000);
             if (dlBtn) {
                 dlBtn.disabled = false;
-                dlBtn.innerHTML = '<i data-lucide="download"></i> Download';
+                dlBtn.innerHTML = '<i data-lucide="download"></i>';
+                dlBtn.setAttribute('title', 'Download');
                 if (window.lucide) window.lucide.createIcons();
             }
         }
@@ -1442,6 +1446,8 @@ export const downloadMethods = {
 
         let row = list.querySelector(`[data-download-id="${progress.id}"]`);
         if (!row) {
+            const emptyState = list.querySelector('.empty-state');
+            if (emptyState) emptyState.style.display = 'none';
             row = document.createElement('div');
             row.className = 'track-row neu-glass';
             row.dataset.downloadId = progress.id;

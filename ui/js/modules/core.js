@@ -207,7 +207,8 @@ export const coreMethods = {
                     const added = (event.payload && event.payload.tracks_added) || 0;
                     const updated = (event.payload && event.payload.tracks_updated) || 0;
                     this.showToast(`Library scan complete: ${added} added, ${updated} updated`, 'success');
-                    this.refreshCurrentView();
+                    this._homeDirty = true;
+                    this.refreshCurrentView(null, { refresh: true });
                 });
             }
         } catch (e) {
@@ -285,20 +286,27 @@ export const coreMethods = {
     },
 
     bindViewEvents() {
-        const handleViewEnter = (evt) => {
-            const detail = evt?.detail !== undefined ? evt.detail : evt;
-            const viewName = Array.isArray(detail) ? detail[0] : (detail?.view || detail?.viewName || detail?.name || (typeof detail === 'string' ? detail : null));
+        if (this._viewEventsBound) return;
+        this._viewEventsBound = true;
+
+        const handleViewEnter = (targetView, params) => {
+            const viewName = (targetView && typeof targetView === 'object')
+                ? (targetView.view || targetView.name || (Array.isArray(targetView) ? targetView[0] : null))
+                : targetView;
             if (window.lucide) window.lucide.createIcons();
             this.ensureFileInput();
-            this.refreshCurrentView(viewName);
+            this.refreshCurrentView(viewName, params);
         };
-        window.addEventListener('view:enter', handleViewEnter);
-        document.addEventListener('view:enter', handleViewEnter);
+
+        // Single canonical listener attached to bridge event emitter
         if (typeof this.on === 'function') {
-            this.on('view:enter', (targetView) => {
-                if (window.lucide) window.lucide.createIcons();
-                this.ensureFileInput();
-                this.refreshCurrentView(targetView);
+            this.on('view:enter', (targetView, params) => {
+                handleViewEnter(targetView, params);
+            });
+        } else if (typeof window !== 'undefined') {
+            window.addEventListener('view:enter', (evt) => {
+                const detail = evt?.detail !== undefined ? evt.detail : evt;
+                handleViewEnter(detail);
             });
         }
 

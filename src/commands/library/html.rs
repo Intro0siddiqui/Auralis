@@ -30,17 +30,70 @@ pub(crate) fn format_time(secs: u32) -> String {
     format!("{m}:{s:02}")
 }
 
+/// Convert a local file path or web URL to an asset protocol URL for the webview.
+///
+/// On Linux/macOS, Tauri serves local scoped assets via the `asset://` URI scheme:
+/// `asset://localhost/{percent_encoded_path}`.
+/// On Windows and Android, Chromium requires an HTTP scheme on the asset subdomain:
+/// `http://asset.localhost/{percent_encoded_path}`.
+/// Remote URLs (`http://`, `https://`) and data/blob URIs are returned as-is.
+pub(crate) fn to_asset_url(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("data:")
+        || trimmed.starts_with("blob:")
+        || trimmed.starts_with("asset:")
+    {
+        return trimmed.to_string();
+    }
+
+    // Percent-encode path characters matching JS encodeURIComponent
+    let encoded: String = trimmed
+        .bytes()
+        .map(|b| match b {
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => (b as char).to_string(),
+            other => format!("%{:02X}", other),
+        })
+        .collect();
+
+    #[cfg(any(target_os = "windows", target_os = "android"))]
+    {
+        format!("http://asset.localhost/{encoded}")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    {
+        format!("asset://localhost/{encoded}")
+    }
+}
+
 /// Render cover artwork image tag with fallback to Lucide icon.
 pub(crate) fn render_art_tag(art_path: Option<&str>, alt_text: &str, icon_name: &str) -> String {
     match art_path {
         Some(path) if !path.trim().is_empty() => {
             let safe_alt = html_escape(alt_text);
             let safe_path = html_escape(path);
+            let asset_url = to_asset_url(path);
+            let safe_src = html_escape(&asset_url);
             let json_path =
                 serde_json::to_string(path).unwrap_or_else(|_| format!("\"{}\"", safe_path));
             let safe_json_path = html_escape(&json_path);
             format!(
-                r#"<img src="{safe_path}" alt="{safe_alt}" data-art-path="{safe_path}" onerror="if(!this.dataset.fb){{this.dataset.fb='1';window.Auralis&amp;&amp;window.Auralis.bridge&amp;&amp;window.Auralis.bridge.embedArt(this,{safe_json_path})}}">"#
+                r#"<img src="{safe_src}" alt="{safe_alt}" data-art-path="{safe_path}" loading="lazy" decoding="async" onerror="if(!this.dataset.fb){{this.dataset.fb='1';window.Auralis&amp;&amp;window.Auralis.bridge&amp;&amp;window.Auralis.bridge.embedArt(this,{safe_json_path})}}">"#
             )
         }
         _ => format!(r#"<i data-lucide="{icon_name}"></i>"#),
@@ -534,7 +587,7 @@ pub async fn get_search_results_html(
     <h2 class="empty-state-title">No matching tracks in library</h2>
     <p class="empty-state-description">No local audio matches “{escaped_q}”.</p>
     <button type="button" class="btn btn-primary neu" style="margin-top: var(--space-4);" onclick="if(window.Auralis&&window.Auralis.bridge&&typeof window.Auralis.bridge.switchToYouTubeSearch==='function'){{window.Auralis.bridge.switchToYouTubeSearch('{escaped_q}');}}">
-        <i data-lucide="youtube"></i>
+        <i data-lucide="square-play"></i>
         Search YouTube for “{escaped_q}”
     </button>
 </div>"#

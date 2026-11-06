@@ -20,7 +20,12 @@ fn settings_repo(db: &Database) -> Arc<dyn SettingsRepository> {
 /// Get the application version.
 #[tauri::command]
 pub async fn get_app_version(app: tauri::AppHandle) -> Result<String, String> {
-    Ok(app.package_info().version.to_string())
+    let ver = app.package_info().version.to_string();
+    if ver.is_empty() || ver == "0.0.0" {
+        Ok(env!("CARGO_PKG_VERSION").to_string())
+    } else {
+        Ok(ver)
+    }
 }
 
 /// Get the current settings.

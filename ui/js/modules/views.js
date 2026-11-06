@@ -22,7 +22,7 @@ try {
 } catch (_) {}
 
 export const viewMethods = {
-    refreshCurrentView(viewName) {
+    refreshCurrentView(viewName, params = {}) {
         const content = document.getElementById('content');
         if (!content) return;
 
@@ -45,6 +45,7 @@ export const viewMethods = {
         }
         if (page === 'download') page = 'downloads';
         this.activeView = page;
+        const force = Boolean(params && (params.refresh || params.force));
         switch (page) {
             case 'library': this.loadLibraryView(); break;
             case 'albums': this.loadAlbumsView(); break;
@@ -54,7 +55,7 @@ export const viewMethods = {
             case 'settings': this.loadSettingsView(); break;
             case 'playlists': this.loadPlaylistsView(); break;
             case 'sync': this.loadSyncView(); break;
-            default: this.loadHomeView(); break;
+            default: this.loadHomeView(force); break;
         }
     },
 
@@ -116,27 +117,52 @@ export const viewMethods = {
         } catch (_) {}
     },
 
-    async loadHomeView() {
+    async loadHomeView(force = false) {
         this.activeView = 'home';
-        try {
-            const html = await this.invoke('get_home_shelves_html');
-            if (this.activeView !== 'home') return;
-            const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
+        const container = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
+        const isPopulated = Boolean(container && container.children.length > 0 && container.dataset.populated === 'true');
 
-            if (container && html) {
-                container.innerHTML = html;
-                if (window.lucide) window.lucide.createIcons();
-                if (window.Auralis?.player?.highlightActiveTrack) {
-                    window.Auralis.player.highlightActiveTrack();
-                }
-                this._syncPlayerBar();
-                if (window.Auralis?.player?.highlightActiveTrack) {
-                    window.Auralis.player.highlightActiveTrack();
-                }
+        // Fast path: if home is already populated and not dirty or forced, reuse DOM instantly (0ms)
+        if (isPopulated && !this._homeDirty && !force) {
+            if (window.Auralis?.player?.highlightActiveTrack) {
+                window.Auralis.player.highlightActiveTrack();
             }
-        } catch (err) {
-            console.error('Error loading home view:', err);
+            this._syncPlayerBar();
+            return;
         }
+
+        // Deduplicate concurrent in-flight fetches
+        if (this._homeFetchPromise) {
+            return this._homeFetchPromise;
+        }
+
+        this._homeFetchPromise = (async () => {
+            try {
+                const html = await this.invoke('get_home_shelves_html');
+                if (this.activeView !== 'home') return;
+                const targetContainer = document.getElementById('home-dynamic-content') || document.querySelector('.page-home, [data-view="home"]');
+
+                if (targetContainer && html) {
+                    targetContainer.innerHTML = html;
+                    targetContainer.dataset.populated = 'true';
+                    const homePane = document.getElementById('view-home');
+                    if (homePane) homePane.dataset.populated = 'true';
+                    this._homeDirty = false;
+
+                    if (window.lucide) window.lucide.createIcons();
+                    if (window.Auralis?.player?.highlightActiveTrack) {
+                        window.Auralis.player.highlightActiveTrack();
+                    }
+                    this._syncPlayerBar();
+                }
+            } catch (err) {
+                console.error('Error loading home view:', err);
+            } finally {
+                this._homeFetchPromise = null;
+            }
+        })();
+
+        return this._homeFetchPromise;
     },
 
     async loadAlbumsView() {
@@ -275,12 +301,19 @@ export const viewMethods = {
                             <i data-lucide="arrow-left"></i>
                             Back to Playlists
                         </button>
-                        ${tracks && tracks.length > 0 ? `
-                            <button class="btn btn-primary btn-sm neu" id="playlist-play-all-btn">
-                                <i data-lucide="play"></i>
-                                Play All (${tracks.length})
-                            </button>
-                        ` : ''}
+                        <div style="display: flex; gap: var(--space-2); align-items: center;">
+                            ${!isSmart ? `
+                                <button type="button" class="btn btn-ghost btn-sm" id="playlist-delete-btn" style="color: var(--danger, #ef4444); display: inline-flex; align-items: center; gap: 4px;">
+                                    <i data-lucide="trash-2"></i> Delete
+                                </button>
+                            ` : ''}
+                            ${tracks && tracks.length > 0 ? `
+                                <button class="btn btn-primary btn-sm neu" id="playlist-play-all-btn">
+                                    <i data-lucide="play"></i>
+                                    Play All (${tracks.length})
+                                </button>
+                            ` : ''}
+                        </div>
                     </div>
                     <div class="card neu-glass" style="margin-bottom: var(--space-4); padding: var(--space-4);">
                         <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-1);">
@@ -310,6 +343,18 @@ export const viewMethods = {
                 detailEl.querySelector('#playlist-play-all-btn')?.addEventListener('click', () => {
                     if (tracks && tracks.length > 0) {
                         window.Auralis.bridge.playTrack(tracks[0].id, tracks.map(t => String(t.id)));
+                    }
+                });
+
+                detailEl.querySelector('#playlist-delete-btn')?.addEventListener('click', async () => {
+                    if (!confirm(`Delete playlist "${playlist.name}"?`)) return;
+                    try {
+                        await this.invoke('delete_playlist', { id: playlist.id });
+                        this.showToast('Playlist deleted', 'info');
+                        this.closePlaylistDetail();
+                        this.loadPlaylistsView();
+                    } catch (err) {
+                        this.showToast(`Failed to delete playlist: ${err}`, 'error');
                     }
                 });
                 if (window.lucide) window.lucide.createIcons();
@@ -522,6 +567,16 @@ export const viewMethods = {
     async loadSettingsView() {
         const settingsView = document.querySelector('.page-settings, #settings-view');
         if (!settingsView) return;
+
+        // Immediately populate compiled/runtime app version before any early returns or network waits
+        try {
+            const versionEl = settingsView.querySelector('#settings-app-version');
+            if (versionEl) {
+                this.invoke('get_app_version').then(ver => {
+                    if (ver && versionEl) versionEl.textContent = ver;
+                }).catch(() => {});
+            }
+        } catch (_) {}
 
         try {
             const settings = await this.invoke('get_settings');
@@ -1177,14 +1232,17 @@ export const viewMethods = {
             return;
         }
         try {
+            if (window.Auralis?.router?.navigate) {
+                await window.Auralis.router.navigate('library');
+            }
             const html = await this.invoke('get_library_tracks_html', { artist: artistName });
-            const content = document.getElementById('content');
-            if (content) {
-                content.innerHTML = `
+            const libraryPane = document.getElementById('view-library') || document.querySelector('.view-pane[data-view="library"]') || document.getElementById('content');
+            if (libraryPane) {
+                libraryPane.innerHTML = `
                     <section class="page-library" data-view="library">
                         <header class="section-header">
                             <div>
-                                <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
+                                <button type="button" class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
                                     <i data-lucide="arrow-left"></i> All Tracks
                                 </button>
                                 <h2 class="section-title">Artist: ${this.escapeHtml(artistName)}</h2>
@@ -1209,14 +1267,17 @@ export const viewMethods = {
             return;
         }
         try {
+            if (window.Auralis?.router?.navigate) {
+                await window.Auralis.router.navigate('library');
+            }
             const html = await this.invoke('get_library_tracks_html', { album: albumName });
-            const content = document.getElementById('content');
-            if (content) {
-                content.innerHTML = `
+            const libraryPane = document.getElementById('view-library') || document.querySelector('.view-pane[data-view="library"]') || document.getElementById('content');
+            if (libraryPane) {
+                libraryPane.innerHTML = `
                     <section class="page-library" data-view="library">
                         <header class="section-header">
                             <div>
-                                <button class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
+                                <button type="button" class="btn btn-secondary btn-sm neu" onclick="window.Auralis.bridge.loadLibraryView()" style="margin-bottom: var(--space-2);">
                                     <i data-lucide="arrow-left"></i> All Tracks
                                 </button>
                                 <h2 class="section-title">Album: ${this.escapeHtml(albumName)}</h2>
@@ -1245,9 +1306,10 @@ export const viewMethods = {
         try {
             await this.invoke('delete_tracks', { ids: trackIds });
             this.showToast('Track deleted from library', 'info');
+            this._homeDirty = true;
             const idSet = new Set(trackIds.map(String));
             this.tracks = this.tracks.filter(t => !idSet.has(String(t.id)));
-            this.refreshCurrentView();
+            this.refreshCurrentView(null, { refresh: true });
         } catch (err) {
             console.error('Failed to delete tracks:', err);
             this.showToast(`Failed to delete track: ${err}`, 'error');

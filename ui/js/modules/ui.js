@@ -134,6 +134,13 @@ export const uiMethods = {
             imgEl.src = path;
             return;
         }
+        // Fast path: if not already converted to an asset URL, try assetUrl first
+        const asset = this.assetUrl(path);
+        if (asset && asset !== path && imgEl.src !== asset && !imgEl.dataset.triedAsset) {
+            imgEl.dataset.triedAsset = '1';
+            imgEl.src = asset;
+            return;
+        }
         try {
             const dataUri = await this.invoke('media_data_url', { path });
             if (dataUri) {

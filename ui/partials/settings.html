@@ -94,6 +94,16 @@
                     </div>
                     <div class="toggle active" role="switch" name="use_system_downloads" data-name="use_system_downloads" aria-checked="true" aria-label="Save to system Downloads"></div>
                 </div>
+                <div class="settings-item" style="padding-top: var(--space-3); border-top: 1px solid var(--glass-border); display: flex; align-items: center; justify-content: space-between;">
+                    <div class="settings-info">
+                        <div class="settings-label">Scan Media Storage</div>
+                        <div class="settings-description">Rescan local device storage to index newly added music files.</div>
+                    </div>
+                    <button type="button" class="btn btn-secondary neu btn-sm" data-action="trigger-folder-scan" onclick="window.Auralis.bridge.triggerFolderScan()" style="display: inline-flex; align-items: center; gap: var(--space-2);">
+                        <i data-lucide="folder-search" style="width: 14px; height: 14px;"></i>
+                        <span>Scan Now</span>
+                    </button>
+                </div>
                 <div class="settings-item">
                     <div class="settings-info">
                         <div class="settings-label">YouTube Cookie</div>
@@ -163,7 +173,7 @@
                 </div>
                 <div class="about-meta">
                     <div class="about-title">Auralis Music Player</div>
-                    <div class="about-subtitle">Version 2.7.6 &bull; 16KB Page Aligned &bull; Native Pure-Rust Audio Core</div>
+                    <div class="about-subtitle">Version <span id="settings-app-version">{{APP_VERSION}}</span> &bull; 16KB Page Aligned &bull; Native Pure-Rust Audio Core</div>
                 </div>
             </div>
         </section>

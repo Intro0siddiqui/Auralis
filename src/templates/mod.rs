@@ -63,6 +63,12 @@ fn partial_cache() -> &'static HashMap<String, String> {
                 }
             }
         }
+        // 3. Interpolate application version token across all templates
+        let pkg_version = env!("CARGO_PKG_VERSION");
+        for val in map.values_mut() {
+            *val = val.replace("{{APP_VERSION}}", pkg_version);
+        }
+
         map
     })
 }
