@@ -71,7 +71,7 @@ export const viewMethods = {
     },
 
     bindLibraryFilterControls() {
-        const sortSelect = document.querySelector('.page-library select[name="sort_by"], [data-view="library"] select[name="sort_by"]');
+        const sortSelect = document.querySelector('#view-library select[name="sort_by"], .page-library select[name="sort_by"], [data-view="library"] select[name="sort_by"]');
 
         if (sortSelect && !sortSelect.dataset.bound) {
             sortSelect.dataset.bound = 'true';
@@ -82,10 +82,10 @@ export const viewMethods = {
     },
 
     async renderLibraryTracks() {
-        const trackList = document.querySelector('.page-library .track-list, [data-view="library"] .track-list, .track-list');
+        const trackList = document.querySelector('#view-library .track-list, .page-library .track-list, [data-view="library"] .track-list');
         if (!trackList) return;
 
-        const sortSelect = document.querySelector('.page-library select[name="sort_by"], [data-view="library"] select[name="sort_by"]');
+        const sortSelect = document.querySelector('#view-library select[name="sort_by"], .page-library select[name="sort_by"], [data-view="library"] select[name="sort_by"]');
         const sortBy = sortSelect ? sortSelect.value : 'date_added';
 
         try {
@@ -95,9 +95,8 @@ export const viewMethods = {
                 sort_by: sortBy,
                 downloaded_only: false,
             });
-            const list = document.querySelector('.page-library .track-list');
-            if (list && html) {
-                list.innerHTML = html;
+            if (trackList && html) {
+                trackList.innerHTML = html;
                 if (window.lucide) window.lucide.createIcons();
                 if (window.Auralis?.player?.highlightActiveTrack) {
                     window.Auralis.player.highlightActiveTrack();

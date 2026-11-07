@@ -362,7 +362,7 @@ impl DesktopScanner {
     /// offloaded via `tokio::task::spawn_blocking` so the async executor is
     /// not stalled. Shares the same mtime+size incremental check as
     /// `AndroidScanner::process_file` (see `file_mtime_size` helper).
-    async fn process_file(
+    pub(crate) async fn process_file(
         &self,
         path: &Path,
         track_repo: &Arc<dyn TrackRepository>,

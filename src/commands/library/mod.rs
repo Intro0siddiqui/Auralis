@@ -221,8 +221,8 @@ pub async fn scan_library_paths(
 
     #[cfg(target_os = "android")]
     {
-        let scan_paths: Vec<std::path::PathBuf> = match paths {
-            Some(p) => p.into_iter().map(std::path::PathBuf::from).collect(),
+        let (scan_paths, is_targeted): (Vec<std::path::PathBuf>, bool) = match paths {
+            Some(p) => (p.into_iter().map(std::path::PathBuf::from).collect(), true),
             None => {
                 let mut default_paths = Vec::new();
                 if let Ok(app_dir) = app.path().app_data_dir() {
@@ -238,13 +238,13 @@ pub async fn scan_library_paths(
                 // Note: MediaStore Download/Auralis copy is for Files visibility only;
                 // library scan stays sandboxed to avoid duplicate entries (internal + public).
                 // `test-android-e2e` verifies the public copy separately via `ls`/`content query`.
-                default_paths
+                (default_paths, false)
             }
         };
 
         emit_scan_start_logs(
             &app,
-            "Android library scan (MediaStore + sandboxed)",
+            if is_targeted { "Android targeted scan (sandboxed only)" } else { "Android library scan (MediaStore + sandboxed)" },
             "Path",
             &scan_paths,
         );
@@ -255,6 +255,7 @@ pub async fn scan_library_paths(
                 &scan_paths,
                 repo,
                 Some(create_scan_progress_callback(&app)),
+                !is_targeted,
             )
             .await
             .map_err(|e| {

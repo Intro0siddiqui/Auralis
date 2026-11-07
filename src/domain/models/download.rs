@@ -141,6 +141,10 @@ pub struct DownloadProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_error: Option<String>,
 
+    /// Associated library track ID (set once ingested into SQLite)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<Uuid>,
+
     /// The file is durable and this job is still doing work that can only
     /// improve it: cover art, tags, the copy in `Download/Auralis/`.
     ///
@@ -198,6 +202,7 @@ impl DownloadProgress {
             error: None,
             publish_error: None,
             post_commit: false,
+            track_id: None,
             started_at: now,
             updated_at: now,
             completed_at: None,

@@ -174,7 +174,7 @@ impl AndroidScanner {
     /// Mirrors `DesktopScanner::process_file` incremental logic (mtime + size)
     /// so re-scans of the sandbox skip unchanged files. All blocking I/O
     /// (`metadata` + `lofty`) is offloaded via `spawn_blocking`.
-    async fn process_file(
+    pub(crate) async fn process_file(
         &self,
         path: &Path,
         track_repo: &Arc<dyn TrackRepository>,
@@ -497,6 +497,7 @@ impl AndroidScanner {
         sandboxed_dirs: &[PathBuf],
         track_repo: Arc<dyn TrackRepository>,
         mut progress_callback: Option<F>,
+        include_mediastore: bool,
     ) -> Result<ScanSummary, ScannerError>
     where
         F: FnMut(ScanProgress) + Send + 'static,
@@ -505,6 +506,10 @@ impl AndroidScanner {
         let mut summary = self
             .scan_sandboxed_dir(sandboxed_dirs, track_repo.clone(), None::<fn(ScanProgress)>)
             .await?;
+
+        if !include_mediastore {
+            return Ok(summary);
+        }
 
         // 2. Query system-wide MediaStore audio
         let media_store_tracks = query_system_mediastore_audio();

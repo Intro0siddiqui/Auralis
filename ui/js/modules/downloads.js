@@ -1547,6 +1547,26 @@ export const downloadMethods = {
             ? `<div style="margin-top:6px;font-size:11px;line-height:1.45;color:var(--text-3);font-family:monospace;word-break:break-word;user-select:text">${reportText ? `clients: ${this.escapeHtml(reportText)}${selInfo ? `<br>picked: itag=${this.escapeHtml(String(selInfo.itag))} ${this.escapeHtml(String(selInfo.ext))}${selInfo.audioOnly ? ' audio-only' : ' MUXED video+audio'}${selInfo.legacyProgressive ? ' — legacy progressive (SABR)' : ''}` : ''}` : ''}
                    <button type="button" class="btn btn-secondary btn-sm" data-action="copy-client-report" title="Copy how every InnerTube client answered (SABR / 403 / format counts) AND the PO-token mint steps">Copy report</button></div>`
             : '';
+        const trackId = progress.track_id || row.dataset.trackId || '';
+        if (!isFailed && progress.status === 'completed' && trackId) {
+            row.dataset.trackId = trackId;
+            row.dataset.role = 'play-row';
+            row.style.cursor = 'pointer';
+            row.style.touchAction = 'manipulation';
+        }
+
+        const actionRight = (!isFailed && progress.status === 'completed')
+            ? (trackId
+                ? `<div class="track-row-actions" style="display:flex;align-items:center;gap:var(--space-2);flex-shrink:0;">
+                     <button type="button" class="btn btn-primary btn-icon btn-sm play-track-btn" data-role="play-btn" data-track-id="${this.escapeHtml(trackId)}" title="Play Track" style="width:36px;height:36px;border-radius:var(--radius-full);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-sm);touch-action:manipulation;">
+                       <i data-lucide="play" style="width:16px;height:16px;fill:currentColor"></i>
+                     </button>
+                   </div>`
+                : `<div style="font-size:12px;color:var(--accent);font-weight:600;flex-shrink:0;display:flex;align-items:center;gap:4px;">
+                     <i data-lucide="check" style="width:16px;height:16px;"></i> Ready
+                   </div>`)
+            : pctBar;
+
         row.innerHTML = `
             <div class="track-row-info" style="min-width:0;flex:1">
                 <div class="track-row-title" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${this.escapeHtml(progress.title || progress.url || 'Downloading...')}</div>
@@ -1555,8 +1575,11 @@ export const downloadMethods = {
                 ${clientBlock}
                 ${mintLine}
             </div>
-            ${pctBar}
+            ${actionRight}
         `;
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+            try { window.lucide.createIcons(); } catch (_) {}
+        }
     }
 };
 

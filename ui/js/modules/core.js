@@ -99,7 +99,18 @@ export const coreMethods = {
                     const p = event.payload;
                     if (!p || p.status === 'completed') {
                         this.showToast(`Download complete: ${(p && p.title) || 'Audio track'}`, 'success');
-                        this.scanLibrary();
+                        this._homeDirty = true;
+                        const homeDynamic = document.getElementById('home-dynamic-content');
+                        if (homeDynamic) homeDynamic.dataset.populated = 'false';
+                        if (typeof this.renderLibraryTracks === 'function') {
+                            this.renderLibraryTracks().catch(() => {});
+                        }
+                        if (p && typeof this.updateDownloadProgressUI === 'function') {
+                            try { this.updateDownloadProgressUI(p); } catch (_) {}
+                        }
+                        if (typeof this.refreshCurrentView === 'function') {
+                            this.refreshCurrentView(null, { refresh: true });
+                        }
                     } else if (p && p.status === 'failed') {
                         const rawErr = this.extractErrorMessage(p, 'Stream error');
                         // Auto-retry (403 client rotation / truncated-stream re-resolve):
