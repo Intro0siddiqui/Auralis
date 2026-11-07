@@ -545,6 +545,7 @@ class PlayerController {
         const fullProgress = document.getElementById('player-full-progress');
         if (!fullProgress) return;
 
+        const fullHandle = document.getElementById('player-full-progress-handle');
         let isSeeking = false;
         const getPercent = (e) => {
             const rect = fullProgress.getBoundingClientRect();
@@ -558,6 +559,7 @@ class PlayerController {
             }
             isSeeking = true;
             this.isSeeking = true;
+            if (fullHandle) fullHandle.classList.add('seeking');
             const pct = getPercent(e);
             this.progress = pct * (this.duration || 0);
             this.updateProgressUI();
@@ -578,6 +580,7 @@ class PlayerController {
                 if (e.pointerId !== undefined && typeof fullProgress.releasePointerCapture === 'function') {
                     try { fullProgress.releasePointerCapture(e.pointerId); } catch (_) {}
                 }
+                if (fullHandle) fullHandle.classList.remove('seeking');
                 isSeeking = false;
                 this.isSeeking = false;
                 this.commitSeek();
