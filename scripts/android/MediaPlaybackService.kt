@@ -607,16 +607,14 @@ class MediaPlaybackService : Service() {
                                 pausedByFocusLoss = true
                                 Log.i("AuralisMedia", "pause-dispatch: audio-focus-loss")
                                 NativeBridge.command("pause")
-                                NativeBridge.command("reset_sink")
                             }
                         }
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                            // During phone call or notification duck: pause and reset sink rather than talk over
+                            // During other audio interruption: pause rather than talk over
                             hasAudioFocus = false
                             pausedByFocusLoss = true
                             Log.i("AuralisMedia", "pause-dispatch: audio-focus-loss-can-duck")
                             NativeBridge.command("pause")
-                            NativeBridge.command("reset_sink")
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
                             hasAudioFocus = true
@@ -626,7 +624,6 @@ class MediaPlaybackService : Service() {
                             )
                             if (pausedByFocusLoss) {
                                 pausedByFocusLoss = false
-                                NativeBridge.command("reset_sink")
                                 NativeBridge.command("play")
                             }
                         }
@@ -658,7 +655,6 @@ class MediaPlaybackService : Service() {
                                 pausedByFocusLoss = true
                                 Log.i("AuralisMedia", "pause-dispatch: legacy-audio-focus-loss")
                                 NativeBridge.command("pause")
-                                NativeBridge.command("reset_sink")
                             } else {
                                 Log.i(
                                     "AuralisMedia",
@@ -670,7 +666,6 @@ class MediaPlaybackService : Service() {
                             hasAudioFocus = true
                             if (pausedByFocusLoss) {
                                 pausedByFocusLoss = false
-                                NativeBridge.command("reset_sink")
                                 NativeBridge.command("play")
                             }
                         }

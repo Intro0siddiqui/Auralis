@@ -99,6 +99,10 @@ pub struct AudioPlayer {
     /// rather than seek the live one. Read-and-cleared by the caller via
     /// [`AudioPlayer::take_seek_rebuilt_sink`].
     last_seek_rebuilt_sink: Arc<AtomicBool>,
+    /// Whether the hardware audio output stream was dropped (e.g. bluetooth disconnect).
+    /// When true, resume() must rebuild the sink at the current position rather than
+    /// resuming an orphaned rodio player.
+    output_invalidated: Arc<AtomicBool>,
     /// Test-only observer, called with the queue index in effect at the moment a
     /// start is attempted. `next` / `previous` have to move the index *before*
     /// starting so the commit's duration repair lands on the incoming track (see
@@ -223,6 +227,7 @@ impl AudioPlayer {
             last_pause_at: Arc::new(std::sync::Mutex::new(None)),
             last_seek_at: Arc::new(std::sync::Mutex::new(None)),
             last_seek_rebuilt_sink: Arc::new(AtomicBool::new(false)),
+            output_invalidated: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             start_observer: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -267,6 +272,7 @@ impl AudioPlayer {
         info!("Resetting audio output stream (dropping cached hardware sink)");
         let mut guard = self.output.lock().unwrap_or_else(|p| p.into_inner());
         guard.stream = None;
+        self.output_invalidated.store(true, Ordering::SeqCst);
     }
 
     /// Start a bare file path, publishing the new duration only once playback is
@@ -610,6 +616,15 @@ impl AudioPlayer {
     /// caller replays the track instead.
     pub async fn resume(&self) -> Result<(), PlayerError> {
         debug!("Resuming playback");
+        if self.output_invalidated.swap(false, Ordering::SeqCst) {
+            info!("Hardware audio output stream was dropped; rebuilding sink at current position");
+            if let Some(track) = self.current_track.read().await.clone() {
+                let pos = self.current_position().await;
+                self.seek_fallback(&track, pos, false).await?;
+                *self.play_anchor.write().await = Some(Instant::now());
+                return Ok(());
+            }
+        }
         // Read the anchor before taking the sink guard so no lock guard is held
         // across an `.await`.
         let anchor_some = self.play_anchor.read().await.is_some();
