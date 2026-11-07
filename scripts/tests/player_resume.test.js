@@ -391,4 +391,23 @@ describe('source guards: the fix must not be silently reverted', () => {
             'resume() must check that the sink still has audio queued'
         );
     });
+
+    it('fullscreen controls use idempotent .onclick handlers without stacked listeners', () => {
+        assert.ok(
+            playerJsSrc.includes('fullPlay.onclick ='),
+            'wireFullScreenPlayButton must assign fullPlay.onclick to prevent stacked click listeners'
+        );
+        assert.ok(
+            !playerJsSrc.includes("if (fp) fp.dataset.wired = '';"),
+            'openFullScreenPlayer must not clear dataset.wired to avoid re-wiring on every modal open'
+        );
+        assert.ok(
+            playerJsSrc.includes('this._togglingPlay'),
+            'togglePlay must guard against rapid double-clicks and re-entrancy'
+        );
+        assert.ok(
+            playerJsSrc.includes('this.resumeInFlight = false;') && playerJsSrc.includes('pause() {'),
+            'pause must reset resumeInFlight so player state never gets stranded'
+        );
+    });
 });

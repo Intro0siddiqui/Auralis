@@ -158,28 +158,28 @@ class PlayerController {
 
     bindControls() {
         if (this.playBtn) {
-            this.playBtn.addEventListener('click', () => this.togglePlay());
+            this.playBtn.onclick = () => this.togglePlay();
         }
         if (this.prevBtn) {
-            this.prevBtn.addEventListener('click', () => this.previous());
+            this.prevBtn.onclick = () => this.previous();
         }
         if (this.nextBtn) {
-            this.nextBtn.addEventListener('click', () => this.next());
+            this.nextBtn.onclick = () => this.next();
         }
         if (this.shuffleBtn) {
-            this.shuffleBtn.addEventListener('click', () => this.toggleShuffle());
+            this.shuffleBtn.onclick = () => this.toggleShuffle();
         }
         if (this.repeatBtn) {
-            this.repeatBtn.addEventListener('click', () => this.cycleRepeat());
+            this.repeatBtn.onclick = () => this.cycleRepeat();
         }
         if (this.likeBtn) {
-            this.likeBtn.addEventListener('click', () => this.toggleLike());
+            this.likeBtn.onclick = () => this.toggleLike();
         }
         if (this.volumeBtn) {
-            this.volumeBtn.addEventListener('click', () => this.toggleMute());
+            this.volumeBtn.onclick = () => this.toggleMute();
         }
         if (this.queueBtn) {
-            this.queueBtn.addEventListener('click', () => this.toggleQueue());
+            this.queueBtn.onclick = () => this.toggleQueue();
         }
     }
 
@@ -274,7 +274,6 @@ class PlayerController {
         const wireModalIfPresent = () => {
             const fp = typeof document !== 'undefined' && document.getElementById ? document.getElementById('player-full') : null;
             if (fp) {
-                fp.dataset.wired = '';
                 this.wireFullScreenElements();
                 this.hydrateState().catch(() => {});
             }
@@ -298,20 +297,8 @@ class PlayerController {
             };
             window.addEventListener('modal:opened', onModalOpened);
             window.addEventListener('modal:open', onModalOpened);
-            if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-                document.addEventListener('modal:opened', onModalOpened);
-                document.addEventListener('modal:open', onModalOpened);
-            }
         }
 
-        // Also wire on player bar click
-        const playerBar = typeof document !== 'undefined' && document.querySelector ? document.querySelector('.player-track') : null;
-        if (playerBar && typeof playerBar.addEventListener === 'function') {
-            playerBar.addEventListener('click', () => {
-                this.hydrateState().catch(() => {});
-                setTimeout(wireModalIfPresent, 50);
-            });
-        }
         this.wireFullScreenElements();
     }
 
@@ -338,8 +325,6 @@ class PlayerController {
                 }
             }
         }
-        const fp = document.getElementById('player-full');
-        if (fp) fp.dataset.wired = '';
         this.wireFullScreenElements();
         this.hydrateState().catch(() => {});
         if (window.lucide) window.lucide.createIcons();
@@ -388,10 +373,10 @@ class PlayerController {
     wireFullScreenQueueButton() {
         const fullQueueBtn = document.getElementById('player-full-queue-btn');
         if (fullQueueBtn) {
-            fullQueueBtn.addEventListener('click', (e) => {
+            fullQueueBtn.onclick = (e) => {
                 e.stopPropagation();
                 this.toggleFullScreenQueue();
-            });
+            };
         }
     }
 
@@ -419,7 +404,7 @@ class PlayerController {
     wireFullScreenCloseButton() {
         const fullClose = document.getElementById('player-full-close') || document.querySelector('.player-full-close');
         if (fullClose) {
-            fullClose.addEventListener('click', (e) => {
+            fullClose.onclick = (e) => {
                 e.stopPropagation();
                 if (window.Auralis?.router?.closeModal) {
                     window.Auralis.router.closeModal('player-full');
@@ -427,61 +412,61 @@ class PlayerController {
                     const overlay = document.getElementById('overlay-root');
                     if (overlay) overlay.innerHTML = '';
                 }
-            });
+            };
         }
     }
 
     wireFullScreenPlayButton() {
         const fullPlay = document.getElementById('player-full-play');
         if (fullPlay) {
-            fullPlay.addEventListener('click', (e) => {
+            fullPlay.onclick = (e) => {
                 e.stopPropagation();
                 this.togglePlay();
-            });
+            };
         }
     }
 
     wireFullScreenNavButtons() {
         const fullPrev = document.getElementById('player-full-prev');
         if (fullPrev) {
-            fullPrev.addEventListener('click', (e) => {
+            fullPrev.onclick = (e) => {
                 e.stopPropagation();
                 this.previous();
-            });
+            };
         }
         const fullNext = document.getElementById('player-full-next');
         if (fullNext) {
-            fullNext.addEventListener('click', (e) => {
+            fullNext.onclick = (e) => {
                 e.stopPropagation();
                 this.next();
-            });
+            };
         }
     }
 
     wireFullScreenModeButtons() {
         const fullShuffle = document.getElementById('player-full-shuffle');
         if (fullShuffle) {
-            fullShuffle.addEventListener('click', (e) => {
+            fullShuffle.onclick = (e) => {
                 e.stopPropagation();
                 this.toggleShuffle();
-            });
+            };
         }
         const fullRepeat = document.getElementById('player-full-repeat');
         if (fullRepeat) {
-            fullRepeat.addEventListener('click', (e) => {
+            fullRepeat.onclick = (e) => {
                 e.stopPropagation();
                 this.cycleRepeat();
-            });
+            };
         }
     }
 
     wireFullScreenLikeButton() {
         const fullLike = document.getElementById('player-full-like');
         if (fullLike) {
-            fullLike.addEventListener('click', (e) => {
+            fullLike.onclick = (e) => {
                 e.stopPropagation();
                 this.toggleLike();
-            });
+            };
         }
     }
 
@@ -766,7 +751,10 @@ class PlayerController {
         // Only togglePlay() is guarded. pause() itself is deliberately NOT:
         // the notification and MediaSession buttons call it directly, and a
         // real stop request must never be swallowed.
-        if (this.resumeInFlight) return;
+        if (this._togglingPlay || this.resumeInFlight) return;
+        this._togglingPlay = true;
+        setTimeout(() => { this._togglingPlay = false; }, 250);
+
         if (this.isPlaying) {
             this.pause();
         } else {
@@ -984,6 +972,7 @@ class PlayerController {
         // A pause cancels any pending "did the resume start?" check — the user
         // just said stop, so its timeout must not replay the track afterwards.
         this.settleResumeWatch(false);
+        this.resumeInFlight = false;
         this.isPlaying = false;
         this.updatePlayButton();
         if (window._auralisStreamAudio) {
