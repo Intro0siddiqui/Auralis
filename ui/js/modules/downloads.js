@@ -1577,7 +1577,7 @@ export const downloadMethods = {
             </div>
             ${actionRight}
         `;
-        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+        if (typeof window !== 'undefined' && window.lucide && typeof window.lucide.createIcons === 'function') {
             try { window.lucide.createIcons(); } catch (_) {}
         }
     }

@@ -151,20 +151,27 @@ pub(crate) fn spawn_download_progress_emitter(
                             warn!(download_id = %emit_id, "DIAGNOSTIC download_completed_failed id={} host={} title={} error={:?} downloaded={}/{:?} url={}", emit_id, host, progress.title, progress.error, progress.downloaded_bytes, progress.total_bytes, progress.url);
                         } else {
                             info!(download_id = %emit_id, status = %progress.status, "Emitting download:completed — ingesting directly into library");
-                            if let Some(db) = app_handle.try_state::<crate::infrastructure::database::Database>() {
+                            if let Some(db) =
+                                app_handle.try_state::<crate::infrastructure::database::Database>()
+                            {
                                 let repo: std::sync::Arc<dyn crate::domain::repositories::TrackRepository> = std::sync::Arc::new(
                                     crate::infrastructure::database::repositories::SqliteTrackRepository::new(std::sync::Arc::new(
                                         db.inner().clone(),
                                     )),
                                 );
                                 #[cfg(target_os = "android")]
-                                let scanner = crate::infrastructure::filesystem::AndroidScanner::new();
+                                let scanner =
+                                    crate::infrastructure::filesystem::AndroidScanner::new();
                                 #[cfg(not(target_os = "android"))]
                                 let scanner = crate::infrastructure::filesystem::DesktopScanner::default_audio();
 
                                 let mut candidates = Vec::new();
                                 if let Ok(app_dir) = app_handle.path().app_data_dir() {
-                                    if let Some(file_name) = progress.output_path.as_ref().and_then(|p| std::path::Path::new(p).file_name()) {
+                                    if let Some(file_name) = progress
+                                        .output_path
+                                        .as_ref()
+                                        .and_then(|p| std::path::Path::new(p).file_name())
+                                    {
                                         candidates.push(app_dir.join("downloads").join(file_name));
                                     }
                                 }
@@ -175,7 +182,9 @@ pub(crate) fn spawn_download_progress_emitter(
                                 for p in candidates {
                                     if p.exists() {
                                         if let Ok(_) = scanner.process_file(&p, &repo).await {
-                                            if let Ok(Some(track)) = repo.find_by_path(&p.to_string_lossy()).await {
+                                            if let Ok(Some(track)) =
+                                                repo.find_by_path(&p.to_string_lossy()).await
+                                            {
                                                 progress.track_id = Some(track.id);
                                                 info!(track_id = %track.id, path = %p.display(), "Immediate download ingestion succeeded");
                                                 break;

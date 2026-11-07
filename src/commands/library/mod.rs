@@ -244,7 +244,11 @@ pub async fn scan_library_paths(
 
         emit_scan_start_logs(
             &app,
-            if is_targeted { "Android targeted scan (sandboxed only)" } else { "Android library scan (MediaStore + sandboxed)" },
+            if is_targeted {
+                "Android targeted scan (sandboxed only)"
+            } else {
+                "Android library scan (MediaStore + sandboxed)"
+            },
             "Path",
             &scan_paths,
         );
