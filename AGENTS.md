@@ -8,9 +8,9 @@ This guide describes the architecture, conventions, and implementation roadmap f
 
 Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses HTMX for the frontend (no JS framework), static HTML partials for server-side rendering, SQLite for persistence, and a streaming downloader that fetches a resolved audio URL via `reqwest`. URL resolution (YouTube, etc.) is performed in the frontend by `youtube.js` (`ui/js/youtube.js`), so no `yt-dlp` / `ffmpeg` / `rusty_ytdl` sidecars are required.
 
-**Current State: Active Development — v2.7.10 released & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
+**Current State: Active Development — v2.7.11 released & verified** — Core architecture is in place and all core features are working end-to-end on both desktop and Android devices.
 
-**Recent Major Breakthroughs (v2.7.1–v2.7.10)**:
+**Recent Major Breakthroughs (v2.7.1–v2.7.11)**:
 1. **Online Stream Repeat-1 & Interruption Resilience (v2.7.6)**: Bound `audio.loop` to `player.repeatMode === 'one'` and wired loop handling into the stream `ended` listener. Synchronized stream parameters in `_auralisLastStreamParams` and prevented `player.js:play()` from falling through to Rust's Rodio `resume` command on phone call audio focus loss, eliminating the "nothing to resume" dialog error.
 2. **Library Download Duplication & Orphan Pruning (v2.7.6)**: Excluded public `/Download/Auralis/` MediaStore mirror copies from Android library scanning so only the sandboxed primary download (with cover art) is indexed. Added automatic pruning in `scan_library_paths_with_progress` to purge duplicate mirror records and missing file references from SQLite.
 3. **Playback EOF & Auto-Advance Resilience**: Fixed zombie playback at EOF where trailing decoder buffers prevented `is_empty` from flipping; added `stop_at_end()` to preserve finished position (`4:24 / 4:24`) and reset UI button to Play (`▶`). Resuming an ended track rewinds to 0:00.
@@ -87,6 +87,9 @@ Auralis v2 is a Tauri-based desktop/mobile music player written in Rust. It uses
 29. **Cold-Boot Home Pane Mount & Rapid-Switch Navigation Race Invalidation (v2.7.10)**:
     - **Cold Boot Empty Home Screen Fix**: Resolved DOM void where initial `#content` container started empty; `router.init()` now explicitly calls `getOrCreateViewPane('home')` to mount the initial view pane, and `views.js:loadHomeView` ensures pane existence before populating shelves HTML. Verified 614ms cold boot directly rendering 12 recent songs on physical Android 15 phone.
     - **Monotonic Navigation Token (`this._navId`)**: Stamped every `router.navigate` transition with an incrementing integer token, immediately discarding stale in-flight view resolutions across rapid page switching (<50ms) and preventing out-of-order nav/pane desynchronization.
+30. **Scrubber Handle Symmetrical Centering & Fullscreen Pause Button Bounce Elimination (v2.7.11)**:
+    - **Scrubber Handle Symmetrical Centering**: Removed conflicting `.neu` transform (`translateZ(0)`) from `#player-full-progress-handle` and enforced `transform: translate(-50%, -50%) !important`, achieving exact `matrix(1, 0, 0, 1, -7, -7)` dead-centering on the seek line across both vertical and horizontal axes.
+    - **Pause Button Stacked Listener Bounce Elimination**: Eliminated duplicate wiring reset (`fp.dataset.wired = ''`) in `openFullScreenPlayer` and `wireModalIfPresent`. Converted fullscreen and mini-player button handlers to idempotent `.onclick = ...` assignments, added a re-entrancy / double-tap debounce in `togglePlay()`, and disarmed `resumeInFlight` on pause. Verified zero-bounce pause and smooth resume cycles directly on physical Android 15 phone (`DA59V4KNJRAIHIBI`).
 
 ---
 
