@@ -531,12 +531,20 @@ impl AndroidScanner {
                 continue;
             }
 
-            // Skip public mirror downloads in Download/Auralis to prevent duplicate entries
+            // Skip public mirror downloads in Download/Auralis ONLY if a sandboxed copy exists
             let path_norm = path_str.replace('\\', "/");
             if path_norm.contains("/Download/Auralis/") || path_norm.contains("/Downloads/Auralis/")
             {
-                debug!(path = %path_str, "Skipping public MediaStore Auralis download mirror to prevent duplicates");
-                continue;
+                let filename = path_buf.file_name();
+                let has_sandboxed_copy = filename
+                    .is_some_and(|fname| sandboxed_dirs.iter().any(|dir| dir.join(fname).exists()));
+                if has_sandboxed_copy {
+                    debug!(
+                        path = %path_str,
+                        "Skipping public MediaStore Auralis download mirror because sandboxed copy exists"
+                    );
+                    continue;
+                }
             }
 
             let mut duration_secs = (raw.duration_ms / 1000) as u32;
@@ -726,11 +734,28 @@ impl AndroidScanner {
                 if track_path_norm.contains("/Download/Auralis/")
                     || track_path_norm.contains("/Downloads/Auralis/")
                 {
-                    info!(
-                        path = %track.file_path,
-                        "Pruning duplicate/legacy public Auralis download track from library"
-                    );
-                    ids_to_remove.push(track.id);
+                    let pb = PathBuf::from(&track.file_path);
+                    let filename = pb.file_name();
+                    let has_sandboxed_copy = filename.is_some_and(|fname| {
+                        sandboxed_dirs.iter().any(|dir| dir.join(fname).exists())
+                    });
+                    if has_sandboxed_copy {
+                        info!(
+                            path = %track.file_path,
+                            "Pruning duplicate public Auralis download track from library (sandboxed copy exists)"
+                        );
+                        ids_to_remove.push(track.id);
+                        continue;
+                    }
+                    if !pb.exists() {
+                        info!(
+                            path = %track.file_path,
+                            "Pruning missing public Auralis download track from library"
+                        );
+                        ids_to_remove.push(track.id);
+                        continue;
+                    }
+                    // Sandboxed copy does not exist and physical public file exists: keep it!
                     continue;
                 }
                 if !track.file_path.starts_with("sync://")

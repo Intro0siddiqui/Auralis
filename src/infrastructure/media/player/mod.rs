@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use super::aac::AacSource;
 use super::opus::OpusSource;
 use crate::domain::models::{RepeatMode, Track};
 use rand::seq::{IndexedRandom, SliceRandom};
@@ -1221,10 +1222,11 @@ impl AudioPlayer {
     }
 }
 
-/// Unified audio source supporting standard Rodio decoders and Opus/WebM decoders.
+/// Unified audio source supporting standard Rodio decoders, AAC decoders, and Opus/WebM decoders.
 pub enum DecodedAudioSource {
     Rodio(Decoder<BufReader<File>>),
     Opus(Box<OpusSource>),
+    Aac(Box<AacSource>),
 }
 
 impl Iterator for DecodedAudioSource {
@@ -1235,6 +1237,7 @@ impl Iterator for DecodedAudioSource {
         match self {
             Self::Rodio(s) => s.next(),
             Self::Opus(s) => s.next(),
+            Self::Aac(s) => s.next(),
         }
     }
 }
@@ -1245,6 +1248,7 @@ impl Source for DecodedAudioSource {
         match self {
             Self::Rodio(s) => s.current_span_len(),
             Self::Opus(s) => s.current_span_len(),
+            Self::Aac(s) => s.current_span_len(),
         }
     }
 
@@ -1253,6 +1257,7 @@ impl Source for DecodedAudioSource {
         match self {
             Self::Rodio(s) => s.channels(),
             Self::Opus(s) => s.channels(),
+            Self::Aac(s) => s.channels(),
         }
     }
 
@@ -1261,6 +1266,7 @@ impl Source for DecodedAudioSource {
         match self {
             Self::Rodio(s) => s.sample_rate(),
             Self::Opus(s) => s.sample_rate(),
+            Self::Aac(s) => s.sample_rate(),
         }
     }
 
@@ -1269,6 +1275,7 @@ impl Source for DecodedAudioSource {
         match self {
             Self::Rodio(s) => s.total_duration(),
             Self::Opus(s) => s.total_duration(),
+            Self::Aac(s) => s.total_duration(),
         }
     }
 
@@ -1277,6 +1284,7 @@ impl Source for DecodedAudioSource {
         match self {
             Self::Rodio(s) => s.try_seek(pos),
             Self::Opus(s) => s.try_seek(pos),
+            Self::Aac(s) => s.try_seek(pos),
         }
     }
 }
@@ -1370,14 +1378,23 @@ impl DecoderStrategy for RodioHintedStrategy {
                     builder = builder.with_mime_type("audio/mp4");
                 }
 
-                match builder.build() {
-                    Ok(decoder) => return Ok(Some(DecodedAudioSource::Rodio(decoder))),
-                    Err(e) => {
+                let build_res =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| builder.build()));
+                match build_res {
+                    Ok(Ok(decoder)) => return Ok(Some(DecodedAudioSource::Rodio(decoder))),
+                    Ok(Err(e)) => {
                         warn!(
                             path = %ctx.path,
                             ext = %ctx.ext,
                             error = %e,
                             "Extension-hinted decoder build failed; attempting default Decoder::new"
+                        );
+                    }
+                    Err(_) => {
+                        warn!(
+                            path = %ctx.path,
+                            ext = %ctx.ext,
+                            "Extension-hinted decoder panicked during build; attempting default Decoder::new"
                         );
                     }
                 }
@@ -1407,8 +1424,29 @@ impl DecoderStrategy for RodioDefaultStrategy {
                 }
             }
 
-            if let Ok(decoder) = builder.build() {
+            let build_res =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| builder.build()));
+            if let Ok(Ok(decoder)) = build_res {
                 return Ok(Some(DecodedAudioSource::Rodio(decoder)));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Decoder strategy for AAC streams using pure-Rust `rusty_aac`
+/// (handles multichannel 5.1/7.1, fragmented MP4, and streams Symphonia rejects with "aac too complex").
+struct AacStrategy;
+
+impl DecoderStrategy for AacStrategy {
+    fn try_decode(
+        &self,
+        ctx: &mut DecoderContext,
+    ) -> Result<Option<DecodedAudioSource>, PlayerError> {
+        let _ = ctx.file.seek(SeekFrom::Start(0));
+        if let Ok(cloned_file) = ctx.file.try_clone() {
+            if let Ok(aac_src) = AacSource::new(cloned_file, ctx.path) {
+                return Ok(Some(DecodedAudioSource::Aac(Box::new(aac_src))));
             }
         }
         Ok(None)
@@ -1441,6 +1479,7 @@ fn create_decoder(mut file: File, path: &str) -> Result<DecodedAudioSource, Play
         &OpusContainerStrategy,
         &RodioHintedStrategy,
         &RodioDefaultStrategy,
+        &AacStrategy,
         &OpusFallbackStrategy,
     ];
 

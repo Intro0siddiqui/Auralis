@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "auralis"
-version = "2.7.12"
+version = "2.7.13"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -228,6 +228,7 @@ dependencies = [
  "rusqlite",
  "rustls",
  "rusty-opus",
+ "rusty_aac",
  "serde",
  "serde_json",
  "symphonia",
@@ -4898,6 +4899,12 @@ name = "rusty-opus"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa2cbb720cf9bed36712efbae9ffc89d8977bf51b05687b792c1f98a33add8e2"
+
+[[package]]
+name = "rusty_aac"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93388483e43ffd3bb3c347794a849edb204438258d8642b8449992a56433798a"
 
 [[package]]
 name = "ryu"

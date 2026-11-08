@@ -24,6 +24,27 @@ async fn seed_previous_state(player: &AudioPlayer) -> Track {
 }
 
 #[test]
+fn test_decode_kerosene() {
+    let p = "/tmp/kerosene.m4a";
+    if std::path::Path::new(p).exists() {
+        let f = std::fs::File::open(p).unwrap();
+        let decoder_res = super::create_decoder(f, p);
+        assert!(
+            decoder_res.is_ok(),
+            "create_decoder should succeed for kerosene.m4a: {:?}",
+            decoder_res.err()
+        );
+        let mut source = decoder_res.unwrap();
+        use rodio::Source;
+        assert_eq!(source.channels().get(), 2);
+        assert_eq!(source.sample_rate().get(), 48000);
+        let first_samples: Vec<f32> = source.by_ref().take(2048).collect();
+        assert_eq!(first_samples.len(), 2048);
+        eprintln!("Successfully decoded 2048 samples from kerosene.m4a!");
+    }
+}
+
+#[test]
 fn reconcile_never_shortens_a_known_duration() {
     // The real case: container says 4:26, rodio says 1:32.
     let db = Duration::from_secs(266);

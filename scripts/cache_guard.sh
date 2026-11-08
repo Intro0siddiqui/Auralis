@@ -67,11 +67,17 @@ if [ "$FORCE_CLEAN" -eq 1 ] || [ "$TOTAL_MB" -ge "$THRESHOLD_MB" ]; then
         echo "==> [CacheGuard] ALERT: Build cache ($(format_mb "$TOTAL_MB")) exceeded threshold of ${THRESHOLD_GB} GB!"
     fi
 
-    # 1. Preserve release binary if it exists
+    # 1. Preserve release binary and release APK if they exist
     BACKUP_BIN=""
     if [ -f "$TARGET_DIR/release/auralis" ]; then
         BACKUP_BIN="$(mktemp /tmp/auralis-release-XXXXXX)"
         cp "$TARGET_DIR/release/auralis" "$BACKUP_BIN"
+    fi
+    BACKUP_APK=""
+    APK_PATH="$ANDROID_BUILD_DIR/outputs/apk/universal/release/app-universal-release.apk"
+    if [ -f "$APK_PATH" ]; then
+        BACKUP_APK="$(mktemp /tmp/auralis-apk-XXXXXX.apk)"
+        cp "$APK_PATH" "$BACKUP_APK"
     fi
 
     # 2. Run cargo clean
@@ -84,12 +90,17 @@ if [ "$FORCE_CLEAN" -eq 1 ] || [ "$TOTAL_MB" -ge "$THRESHOLD_MB" ]; then
         rm -rf "$ANDROID_BUILD_DIR" "$ROOT/gen/android/build" 2>/dev/null || true
     fi
 
-    # 4. Restore preserved release binary
+    # 4. Restore preserved release binary and release APK
     if [ -n "$BACKUP_BIN" ] && [ -f "$BACKUP_BIN" ]; then
         mkdir -p "$TARGET_DIR/release"
         cp "$BACKUP_BIN" "$TARGET_DIR/release/auralis"
         chmod +x "$TARGET_DIR/release/auralis"
         rm -f "$BACKUP_BIN"
+    fi
+    if [ -n "$BACKUP_APK" ] && [ -f "$BACKUP_APK" ]; then
+        mkdir -p "$(dirname "$APK_PATH")"
+        cp "$BACKUP_APK" "$APK_PATH"
+        rm -f "$BACKUP_APK"
     fi
 
     NEW_TARGET_MB=$(get_size_mb "$TARGET_DIR")

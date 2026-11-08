@@ -2,6 +2,7 @@
 //!
 //! Handles audio playback and media downloading.
 
+pub mod aac;
 pub mod android_downloads;
 pub mod background_service;
 pub mod completeness;
@@ -13,6 +14,7 @@ pub mod range_topup;
 pub mod stream_proxy;
 pub mod tags;
 
+pub use aac::AacSource;
 pub use downloader::Downloader;
 pub use opus::{extract_opus_metadata, OpusSource};
 pub use player::AudioPlayer;
