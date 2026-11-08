@@ -599,7 +599,10 @@ impl AndroidScanner {
             // Incremental check: if track exists, duration > 0, has art, and size/mtime match, skip
             if let Some(existing_track) = existing.as_ref() {
                 let mtime_match = raw.date_modified.is_none() || existing_track.mtime == mtime;
-                let needs_art = existing_track.album_art_path.is_none();
+                let needs_art = existing_track
+                    .album_art_path
+                    .as_ref()
+                    .map_or(true, |p| !p.starts_with("data:") && !p.starts_with("http") && std::fs::File::open(p).is_err());
                 if !needs_art
                     && existing_track.duration_secs > 0
                     && existing_track.file_size == raw.size
@@ -678,12 +681,11 @@ impl AndroidScanner {
             if track.album_art_path.is_none() {
                 let p = path_buf.clone();
                 track.album_art_path = tokio::task::spawn_blocking(move || {
-                    MetadataExtractor::find_sidecar_art(&p).or_else(|| {
-                        lofty::read_from_path(&p)
-                            .ok()
-                            .as_ref()
-                            .and_then(MetadataExtractor::extract_and_cache_embedded_art)
-                    })
+                    lofty::read_from_path(&p)
+                        .ok()
+                        .as_ref()
+                        .and_then(MetadataExtractor::extract_and_cache_embedded_art)
+                        .or_else(|| MetadataExtractor::find_sidecar_art(&p))
                 })
                 .await
                 .unwrap_or(None);

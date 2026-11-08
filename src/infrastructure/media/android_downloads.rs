@@ -330,6 +330,19 @@ pub fn publish_to_downloads(src_path: &Path) -> Result<String, String> {
         match publish_inner(src_path, &display_name, mime) {
             Ok(public) => {
                 info!(src = %src_path.display(), public = %public, "Published to Download/Auralis via MediaStore");
+                // Also publish the cover-art sidecar if it exists
+                let sidecar = src_path.with_extension("jpg");
+                if sidecar.is_file() {
+                    let sidecar_name = sidecar
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !sidecar_name.is_empty() {
+                        if let Ok(sidecar_pub) = publish_inner(&sidecar, &sidecar_name, "image/jpeg") {
+                            info!(public = %sidecar_pub, "Published cover art sidecar to Download/Auralis via MediaStore");
+                        }
+                    }
+                }
                 Ok(public)
             }
             Err(e) => {

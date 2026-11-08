@@ -620,6 +620,11 @@ pub async fn media_data_url(app: tauri::AppHandle, path: String) -> Result<Strin
     if let Some(download) = dirs::download_dir() {
         roots.push(download);
     }
+    #[cfg(target_os = "android")]
+    {
+        roots.push(PathBuf::from("/storage/emulated/0"));
+        roots.push(PathBuf::from("/sdcard"));
+    }
 
     let mut canonical_roots = Vec::with_capacity(roots.len());
     for root in &roots {

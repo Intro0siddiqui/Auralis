@@ -1326,11 +1326,14 @@ impl Downloader {
         drop(_commit);
 
         // Save thumbnail sidecar if requested
-        if let Some(thumb) = &job.thumbnail {
+        let thumb_bytes = if let Some(thumb) = &job.thumbnail {
             Self::save_thumbnail(&client, thumb, &job.output_path).await;
-        }
+            tokio::fs::read(sidecar_path(&job.output_path)).await.ok()
+        } else {
+            None
+        };
 
-        // Write title/artist/album into the finished file so the library
+        // Write title/artist/album/cover into the finished file so the library
         // scanner reads real metadata instead of the sanitized filename /
         // "Unknown Artist". Sibling of `save_thumbnail`: both attach metadata
         // to the same committed file, both are non-fatal.
@@ -1350,6 +1353,7 @@ impl Downloader {
                 &tag_title,
                 tag_artist.as_deref(),
                 tag_album.as_deref(),
+                thumb_bytes.as_deref(),
             )
         })
         .await;

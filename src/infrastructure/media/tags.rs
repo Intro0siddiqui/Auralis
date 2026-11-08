@@ -50,7 +50,7 @@ use lofty::probe::Probe;
 use std::path::Path;
 use tracing::debug;
 
-/// Write `title` / `artist` / `album` into an already-downloaded audio file.
+/// Write `title` / `artist` / `album` and optional artwork into an already-downloaded audio file.
 ///
 /// * Only the fields that are non-empty are written; anything else is left
 ///   exactly as the downloader produced it (no genre/date/track is touched).
@@ -63,15 +63,17 @@ pub fn write_tags(
     title: &str,
     artist: Option<&str>,
     album: Option<&str>,
+    artwork_bytes: Option<&[u8]>,
 ) -> Result<(), String> {
     let title = title.trim();
     let artist = artist.map(|value| value.trim()).filter(|v| !v.is_empty());
     let album = album.map(|value| value.trim()).filter(|v| !v.is_empty());
+    let has_artwork = artwork_bytes.is_some_and(|b| !b.is_empty());
 
-    if title.is_empty() && artist.is_none() && album.is_none() {
+    if title.is_empty() && artist.is_none() && album.is_none() && !has_artwork {
         debug!(
             path = %audio_path.display(),
-            "Skipping tag write — no title, artist or album to write"
+            "Skipping tag write — no title, artist, album, or artwork to write"
         );
         return Ok(());
     }
@@ -132,6 +134,21 @@ pub fn write_tags(
         tag.set_album(album.to_string());
     }
 
+    if let Some(art) = artwork_bytes {
+        if !art.is_empty() {
+            let mime = if art.starts_with(b"\x89PNG") {
+                lofty::picture::MimeType::Png
+            } else {
+                lofty::picture::MimeType::Jpeg
+            };
+            let pic = lofty::picture::Picture::unchecked(art.to_vec())
+                .pic_type(lofty::picture::PictureType::CoverFront)
+                .mime_type(mime)
+                .build();
+            tag.push_picture(pic);
+        }
+    }
+
     tag.save_to_path(audio_path, lofty::config::WriteOptions::default())
         .map_err(|e| format!("Failed to save tags to {}: {e}", audio_path.display()))?;
 
@@ -160,7 +177,7 @@ mod tests {
     fn missing_file_returns_err_instead_of_panicking() {
         let dir = temp_dir("missing");
         let path = dir.join("nope.mp4");
-        let res = write_tags(&path, "Some Title", Some("Some Artist"), None);
+        let res = write_tags(&path, "Some Title", Some("Some Artist"), None, None);
         assert!(res.is_err(), "Missing file must return Err, got: {res:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -170,7 +187,13 @@ mod tests {
         let dir = temp_dir("garbage");
         let path = dir.join("garbage.mp3");
         std::fs::write(&path, b"NOT_A_VALID_AUDIO_FILE_AT_ALL").expect("write fixture");
-        let res = write_tags(&path, "Some Title", Some("Some Artist"), Some("Some Album"));
+        let res = write_tags(
+            &path,
+            "Some Title",
+            Some("Some Artist"),
+            Some("Some Album"),
+            None,
+        );
         assert!(res.is_err(), "Garbage file must return Err, got: {res:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -180,7 +203,7 @@ mod tests {
         // No title, no artist, no album -> nothing to do, and the path is not
         // even opened (it does not exist).
         let path = Path::new("/definitely/not/here.mp4");
-        assert!(write_tags(path, "   ", None, Some("  ")).is_ok());
+        assert!(write_tags(path, "   ", None, Some("  "), None).is_ok());
     }
 
     #[test]
@@ -200,7 +223,7 @@ mod tests {
             return;
         }
 
-        write_tags(&path, "Fixture Title", Some("Fixture Artist"), None)
+        write_tags(&path, "Fixture Title", Some("Fixture Artist"), None, None)
             .expect("writing tags to a copy of the fixture must succeed");
 
         // Read back through the real scanner path — that is the acceptance
@@ -210,6 +233,28 @@ mod tests {
         assert_eq!(track.title, "Fixture Title");
         assert_eq!(track.artist.as_deref(), Some("Fixture Artist"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_tags_embeds_artwork() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch/sample.m4a");
+        if !fixture.exists() {
+            return;
+        }
+        let dir = temp_dir("mp4_art");
+        let path = dir.join("art_test.m4a");
+        if std::fs::copy(&fixture, &path).is_err() {
+            return;
+        }
+        let mock_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xd9";
+        write_tags(&path, "Art Song", Some("Art Artist"), None, Some(mock_jpeg))
+            .expect("write tags with art must succeed");
+
+        let tagged = lofty::probe::Probe::open(&path).unwrap().read().unwrap();
+        let tag = tagged.primary_tag().or_else(|| tagged.first_tag()).unwrap();
+        assert!(!tag.pictures().is_empty(), "Tag must contain embedded picture");
+        assert_eq!(tag.pictures()[0].data(), mock_jpeg);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

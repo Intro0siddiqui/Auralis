@@ -178,13 +178,12 @@ impl MetadataExtractor {
         };
 
         // Cover art resolution:
-        // 1. Check for a sidecar image (`<audio>.jpg/.jpeg/.png/.webp`) next to the audio file.
-        // 2. If no sidecar image is found, extract and cache embedded artwork via Lofty.
-        track.album_art_path = Self::find_sidecar_art(path).or_else(|| {
-            tagged_file_opt
-                .as_ref()
-                .and_then(Self::extract_and_cache_embedded_art)
-        });
+        // 1. Extract and cache embedded artwork via Lofty (fully self-contained in audio file).
+        // 2. Fall back to a readable sidecar image (`<audio>.jpg/.jpeg/.png/.webp`) next to the file.
+        track.album_art_path = tagged_file_opt
+            .as_ref()
+            .and_then(Self::extract_and_cache_embedded_art)
+            .or_else(|| Self::find_sidecar_art(path));
 
         debug!(path = %path.display(), title = %track.title, "Metadata extracted");
         Ok(track)
@@ -336,7 +335,7 @@ impl MetadataExtractor {
     pub fn find_sidecar_art(path: &Path) -> Option<String> {
         for ext in ["jpg", "jpeg", "png", "webp"] {
             let side = path.with_extension(ext);
-            if side.is_file() {
+            if side.is_file() && std::fs::File::open(&side).is_ok() {
                 return Some(side.to_string_lossy().to_string());
             }
         }
